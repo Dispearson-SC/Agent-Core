@@ -43,7 +43,8 @@ class Audience(StrEnum):
             policy decisions, peer traffic.
 
     There is no third audience. If one is ever needed, it is a new value here and a new
-    row in the visibility table - never an ad-hoc filter at a call site.
+    answer in EVERY row of `VISIBILITY` - never an ad-hoc filter at a call site. The grid is
+    written cell by cell precisely so that a new audience cannot inherit a default.
     """
 
     USER = "user"
@@ -65,16 +66,52 @@ class EntryKind(StrEnum):
     POLICY_DENIAL = "policy_denial"
 
 
-# The visibility table. THE single source of truth for who sees what.
-# Adding an EntryKind without adding it here means it is invisible to everyone - which is
-# the safe failure, and a test asserts the table covers every EntryKind so it cannot rot.
+# The visibility grid. THE single source of truth for who sees what: one row per
+# EntryKind, one hand-written answer per Audience.
+#
+# WHY EVERY CELL IS WRITTEN OUT INSTEAD OF "ADMIN SEES EVERYTHING"
+#     The first cut declared ADMIN as `frozenset(EntryKind)`. It read as a decision and was
+#     not one: the set was DERIVED from the enum, so every kind ever added was ADMIN-visible
+#     the instant it was declared, and the test that was supposed to catch an undecided kind
+#     could not fail - the enum satisfied it by construction. A default wearing a decision's
+#     clothes, and the default leaned towards disclosure.
+#
+#     Written out, adding an EntryKind leaves a hole here and `t-f10-07` fails until someone
+#     answers True or False for each audience. Adding an Audience leaves a hole in EVERY
+#     row and the same test fails. There is deliberately no shortcut that fills a row in.
+#
+# WHY ADMIN DOES NOT SEE PENDING_PLACEHOLDER
+#     The placeholder is not stored. It is what the projection hands a USER INSTEAD of a
+#     PENDING_REQUEST, so the user learns THAT something is pending without learning WHICH
+#     tool. An operator reads the real PENDING_REQUEST. Admitting the substitute to the
+#     admin view too was never decided - it was what `frozenset(EntryKind)` did on its own,
+#     and it contradicts the table in docs/ARCHITECTURE.md "Store everything, filter on
+#     read", which has always shown the placeholder as user-only.
+VISIBILITY: dict[EntryKind, dict[Audience, bool]] = {
+    #                                    USER    ADMIN
+    EntryKind.USER_MESSAGE:        {Audience.USER: True,  Audience.ADMIN: True},
+    EntryKind.AGENT_MESSAGE:       {Audience.USER: True,  Audience.ADMIN: True},
+    EntryKind.TOOL_CALL:           {Audience.USER: False, Audience.ADMIN: True},
+    EntryKind.TOOL_RESULT:         {Audience.USER: False, Audience.ADMIN: True},
+    EntryKind.REASONING:           {Audience.USER: False, Audience.ADMIN: True},
+    EntryKind.PENDING_REQUEST:     {Audience.USER: False, Audience.ADMIN: True},
+    EntryKind.PENDING_PLACEHOLDER: {Audience.USER: True,  Audience.ADMIN: False},
+    EntryKind.HUMAN_DECISION:      {Audience.USER: False, Audience.ADMIN: True},
+    EntryKind.PEER_EXCHANGE:       {Audience.USER: False, Audience.ADMIN: True},
+    EntryKind.COMPACTION:          {Audience.USER: False, Audience.ADMIN: True},
+    EntryKind.KNOWLEDGE_HIT:       {Audience.USER: False, Audience.ADMIN: True},
+    EntryKind.POLICY_DENIAL:       {Audience.USER: False, Audience.ADMIN: True},
+}
+
+
+# The reader's lookup, derived from the grid so there is one place to change and no second
+# path to drift. A kind with no row above appears in neither set - invisible to everyone,
+# which is the safe failure, and `t-f10-07` fails loudly rather than letting it ship.
 VISIBLE_TO: dict[Audience, frozenset[EntryKind]] = {
-    Audience.USER: frozenset({
-        EntryKind.USER_MESSAGE,
-        EntryKind.AGENT_MESSAGE,
-        EntryKind.PENDING_PLACEHOLDER,
-    }),
-    Audience.ADMIN: frozenset(EntryKind),
+    audience: frozenset(
+        kind for kind, row in VISIBILITY.items() if row.get(audience, False)
+    )
+    for audience in Audience
 }
 
 

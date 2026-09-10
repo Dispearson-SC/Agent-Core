@@ -2,7 +2,7 @@
 
 Phase:   F1 (iterations) / F5 (cost, once compaction makes spend meaningful)
 Tasks:   docs/TASKS.md#t-f1-03
-Status:  TYPES DEFINED / BEHAVIOUR PENDING
+Status:  TYPES DEFINED / WRAP-UP NOTICE IMPLEMENTED (t-f1-03); COST GUARD LANDS IN F5
 
 DESIGN NOTE - START WITH A BUDGET, NOT WITH FIVE MECHANISMS
     Hermes runs five independent anti-loop mechanisms totalling ~1,300 lines: iteration
@@ -38,6 +38,14 @@ class BudgetState:
     max_cost_usd: Decimal = Decimal("0")
     spent_usd: Decimal = Decimal("0")
 
+    # What the counters read BEFORE the `consume` that produced this state. They are what
+    # makes the wrap-up notice fire once: the crossing is a property of the step, not of
+    # the position. Carrying them instead of a "notice already sent" flag keeps the state
+    # a pure function of the counters, so a DBOS replay of the same step reaches the same
+    # answer rather than depending on whether the caller remembered to mark it.
+    previous_used_iterations: int = 0
+    previous_spent_usd: Decimal = Decimal("0")
+
     @property
     def iterations_exhausted(self) -> bool:
         return self.used_iterations >= self.max_iterations
@@ -61,18 +69,43 @@ class BudgetState:
             self,
             used_iterations=self.used_iterations + iterations,
             spent_usd=self.spent_usd + cost_usd,
+            previous_used_iterations=self.used_iterations,
+            previous_spent_usd=self.spent_usd,
         )
 
     def wrapup_notice_due(self, threshold: float = 0.8) -> bool:
-        """PSEUDO-CODE - implement in F1. Borrowed from Hermes; worth copying.
+        """True only on the state whose own `consume` carried the budget over `threshold`.
 
-        True once the budget crosses `threshold`. The caller then injects a one-time
-        system notice telling the model to stop exploring and deliver with what it has.
+        The caller then injects a one-time system notice telling the model to stop
+        exploring and deliver with what it has. Without it, an exhausted budget truncates
+        mid-investigation and the user gets nothing. With it, the agent lands the plane.
 
-        Without it, an exhausted budget truncates mid-investigation and the user gets
-        nothing. With it, the agent lands the plane.
+        It fires ONCE per turn because it reports a CROSSING, not a position: the answer
+        is true only while the previous counters were below the threshold and the current
+        ones are at or past it. Asking "am I past 80%?" instead would re-inject the notice
+        on every remaining iteration and burn the very budget it protects - and that
+        mistake produces no error, only a bigger bill.
 
-        Fire it ONCE per turn. Repeating it every iteration burns the very budget it is
-        trying to protect - and that mistake produces no error, only a bigger bill.
+        Reading it is free and repeatable: the same state always gives the same answer.
+        Whichever ceiling is crossed first - iterations or cost - triggers it.
         """
-        raise NotImplementedError("F1 - docs/TASKS.md#t-f1-03")
+        limit = Decimal(str(threshold))
+        return self._crossed(
+            self.previous_used_iterations, self.used_iterations, self.max_iterations, limit
+        ) or self._crossed(self.previous_spent_usd, self.spent_usd, self.max_cost_usd, limit)
+
+    @staticmethod
+    def _crossed(before: Decimal | int, after: Decimal | int, ceiling: Decimal | int,
+                 threshold: Decimal) -> bool:
+        """Did this step take `before` -> `after` over `threshold` of `ceiling`?
+
+        A ceiling of zero or less means that dimension is not budgeted, so it can never
+        be crossed. Fractions stay in Decimal: a float ratio would make the crossing
+        depend on rounding, and a guard that fires one iteration late is a guard that
+        fires after the budget is already gone.
+        """
+        if ceiling <= 0:
+            return False
+        return (Decimal(after) / Decimal(ceiling)) >= threshold > (
+            Decimal(before) / Decimal(ceiling)
+        )

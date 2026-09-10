@@ -2,7 +2,7 @@
 
 Phase:   F1 - Real hexagonal core
 Tasks:   docs/TASKS.md#t-f1-02
-Status:  TYPES DEFINED / BEHAVIOUR PENDING
+Status:  MATCH SEMANTICS IMPLEMENTED (t-f1-02) / REDUCTION LIVES AT THE ENFORCEMENT POINT
 
 WHY THIS IS OURS AND NOT A DEPENDENCY
     The one subsystem no framework can supply, because it encodes the business's own
@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+
+from agent_core.domain.turn import CallerIdentity
 
 
 class Effect(StrEnum):
@@ -61,9 +63,9 @@ class PolicyRule:
 
     `tool_pattern` supports a trailing wildcard (`browser_*`, `mcp_*`), case-insensitive.
 
-    TODO(F1): implement `matches()` and pin its semantics with tests BEFORE any rule is
-    stored. Changing match semantics after rules exist silently changes what is allowed
-    in production, with no failing test to warn you.
+    Semantics are pinned by tests/unit/test_policy.py, written before any rule was stored.
+    Changing them after rules exist silently changes what is allowed in production, with
+    no failing test to warn you - so change the tests first, deliberately, or not at all.
 
     TODO(D2): add `tenant_id: TenantId | None`, where None means "all tenants". Leaving
     the column out now means an ALTER on a table that is already authoritative.
@@ -77,21 +79,35 @@ class PolicyRule:
     channels: frozenset[str] = frozenset()
 
     def matches(self, tool_name: str, roles: frozenset[str], channel: str) -> bool:
-        """PSEUDO-CODE - implement in F1.
+        """True only when every POPULATED constraint on this rule matched.
 
-        1. Lowercase `tool_name` and `self.tool_pattern`.
-        2. Match: exact, or prefix match when the pattern ends in '*'.
-        3. If `subject_roles` is non-empty, require a non-empty intersection with `roles`.
-           An EMPTY set means "any role", NOT "no roles". Test both readings - getting it
-           backwards is how a rule silently stops applying to everybody.
+        1. `tool_name` and `tool_pattern` are compared lowercased, so case never decides a
+           verdict: a provider advertising `Browser_Click` still meets `browser_*`.
+        2. A pattern ending in '*' is a PREFIX, never a substring - `browser_*` must not
+           reach `mcp_browser_click`. Any other pattern is exact.
+        3. An EMPTY `subject_roles` means "any role", NOT "no roles". A populated set
+           requires a non-empty intersection with `roles`. Getting this backwards is how a
+           rule silently stops applying to everybody.
         4. Same reading for `channels`.
-        5. True only when every populated constraint matched.
 
         NOTE the deliberate asymmetry with `MediaPolicy.accepts`, where empty means
         "nothing". Different defaults because the failure modes differ: a permissive
         policy rule is inconvenient, permissive media handling is an incident.
         """
-        raise NotImplementedError("F1 - docs/TASKS.md#t-f1-02")
+        if not self._pattern_matches(tool_name):
+            return False
+        if self.subject_roles and self.subject_roles.isdisjoint(roles):
+            return False
+        if self.channels and channel not in self.channels:
+            return False
+        return True
+
+    def _pattern_matches(self, tool_name: str) -> bool:
+        pattern = self.tool_pattern.lower()
+        name = tool_name.lower()
+        if pattern.endswith("*"):
+            return name.startswith(pattern[:-1])
+        return name == pattern
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,12 +122,55 @@ class RuleSet:
         once per turn; `decide()` is synchronous and pure over this frozen snapshot.
 
     A frozen snapshot also makes the turn's decisions internally consistent: a rule edited
-    mid-turn cannot change the verdict between the third tool call and the fourth."""
+    mid-turn cannot change the verdict between the third tool call and the fourth.
 
+    IT CARRIES THE NARROWING IT WAS LOADED FOR - THAT IS THE SAFETY PROPERTY
+        `load_rules(caller)` narrows by the caller, so the snapshot stores the subject
+        roles and the channel it was narrowed for. Everything downstream then needs only a
+        tool name: a snapshot IS the answer for exactly one caller's narrowing and cannot
+        be pointed at another one.
+
+        The alternative - keeping `rules` alone and passing the caller again to every
+        query - type-checks perfectly while answering caller A's rules about caller B, and
+        in a policy engine that means a tool gets allowed for someone who should not have
+        it. Nothing detects it: no exception, no failing test. Closing it structurally is
+        cheaper than any convention that asks callers to pass the matching identity."""
+
+    subject_roles: frozenset[str]
+    channel: str
     rules: tuple[PolicyRule, ...] = ()
     default_effect: Effect = Effect.DENY
 
-    def applicable(self, tool_name: str, roles: frozenset[str], channel: str) -> tuple[PolicyRule, ...]:
-        """PSEUDO-CODE - F1. Every rule matching, unreduced. `decide()` reduces by
-        EFFECT_PRECEDENCE."""
-        raise NotImplementedError("F1 - docs/TASKS.md#t-f1-02")
+    @classmethod
+    def for_caller(
+        cls,
+        caller: CallerIdentity,
+        rules: tuple[PolicyRule, ...] = (),
+        default_effect: Effect = Effect.DENY,
+    ) -> RuleSet:
+        """Build a snapshot narrowed for `caller`. The one intended construction path.
+
+        The adapter reads the caller's rows and hands them here, so the narrowing stored on
+        the snapshot always comes from the identity the query was run for, rather than
+        being copied by hand at each call site.
+
+        The fail-closed snapshot from an unreachable store is this with no rules: it
+        matches nothing and defaults to DENY."""
+        return cls(
+            subject_roles=caller.roles,
+            channel=caller.channel,
+            rules=rules,
+            default_effect=default_effect,
+        )
+
+    def applicable(self, tool_name: str) -> tuple[PolicyRule, ...]:
+        """Every rule matching this tool for THIS snapshot's caller, unreduced.
+
+        No roles and no channel parameter on purpose: they are the narrowing this snapshot
+        was loaded for. `decide()` reduces the result by EFFECT_PRECEDENCE and falls back
+        to `default_effect` when this returns nothing."""
+        return tuple(
+            rule
+            for rule in self.rules
+            if rule.matches(tool_name, self.subject_roles, self.channel)
+        )

@@ -2,7 +2,7 @@
 
 Phase:   F9 (foundations) / D2 (full A2A)
 Tasks:   docs/TASKS.md#t-f9-01
-Status:  TYPES DEFINED / BEHAVIOUR PENDING
+Status:  TYPES DEFINED / PeerPolicy.may_ask DONE (t-f9-01)
 
 THE SCENARIO THIS EXISTS FOR
     A customer-service agent cannot answer from its Skills or KnowledgeBase. It asks the
@@ -77,11 +77,30 @@ class PeerPolicy:
     reply_timeout_seconds: int = 3600
 
     def may_ask(self, agent_id: AgentId) -> bool:
-        """PSEUDO-CODE - F9. Empty `peers` means nobody.
+        """Whether this profile may address `agent_id`. Empty `peers` means nobody.
 
         Not every agent should be able to page a person's personal assistant. This is an
         allowlist, and it is checked on BOTH sides: the asker checks it may ask, the
         answerer checks it accepts being asked. One-sided checks are bypassable by
         whoever controls the other side.
+
+        Empty means NOTHING, not everything - the same reading as
+        KnowledgePolicy.can_read and MediaPolicy.accepts, and the opposite of
+        PolicyRule.subject_roles. The asymmetry is deliberate and it is tested: a
+        permissive default is acceptable for a convenience feature and unacceptable when
+        the thing being reached is somebody's personal-assistant agent.
+
+        Membership is the whole rule, and it is written as membership rather than as a
+        special case for the empty tuple: an allowlist nobody was added to denies
+        everything by construction, so there is no empty branch a later edit could invert
+        into a wildcard.
+
+        `enabled` is NOT consulted here, matching KnowledgePolicy.can_read. It is the
+        feature switch, not an identity rule, and the caller that turns a question into a
+        hop enforces it alongside the hop limit (docs/TASKS.md#t-f9-05). Both defaults
+        already fail closed: disabled, and nobody allowlisted.
+
+        Says nothing about the reply. A peer's answer is untrusted content regardless of
+        how the peer got onto this list (CLAUDE.md, non-negotiable 10).
         """
-        raise NotImplementedError("F9 - docs/TASKS.md#t-f9-01")
+        return any(peer.agent_id == agent_id for peer in self.peers)

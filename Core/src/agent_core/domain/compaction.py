@@ -2,7 +2,8 @@
 
 Phase:   F5 - Context compaction
 Tasks:   docs/TASKS.md#t-f5-01
-Status:  TYPES DEFINED / BEHAVIOUR PENDING
+Status:  TYPES DEFINED + LADDER L1-L4 IMPLEMENTED (t-f5-01); TRIGGER, PORT, USE CASE AND
+         ENGINE PENDING (t-f5-02 .. t-f5-04)
 
 READ THIS BEFORE TOUCHING ANY COMPACTION CODE
     Hermes ships a per-exchange micro-compaction mode and it is OFF BY DEFAULT. The
@@ -26,6 +27,7 @@ DIVISION OF LABOUR
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import IntEnum
@@ -140,3 +142,92 @@ class CompactionResult:
         pass - the most expensive possible failure mode. Escalate or fail the turn.
         """
         return self.tokens_after < self.tokens_before
+
+
+@dataclass(frozen=True, slots=True)
+class LadderRun:
+    """What one climb of the ladder cost and what it bought.
+
+    `reached_target` and `made_progress` answer different questions and the caller acts
+    differently on each. `reached_target` False with `made_progress` True means the ladder
+    did work and simply has nothing cheaper left - escalate or run the turn on a tighter
+    history. `made_progress` False means the ladder freed nothing at all, and repeating it
+    is an infinite loop that re-invalidates the prompt cache every pass. See
+    `CompactionResult.made_progress`."""
+
+    rungs_applied: tuple[Rung, ...]
+    tokens_before: int
+    tokens_after: int
+    reached_target: bool
+
+    @property
+    def made_progress(self) -> bool:
+        return self.tokens_after < self.tokens_before
+
+
+def target_tokens(policy: CompactionPolicy, context_window: int) -> int:
+    """How far down this compaction has to get before it may stop.
+
+    A context window of zero or less means the provider did not tell us how big the
+    window is. The ladder is only ever climbed once the trigger has already decided that
+    compaction is needed, so an unknown window resolves to a target of zero: keep climbing
+    while rungs remain rather than stop early against a number nobody knows. Stopping
+    early would leave the agent to die of overflow, and that failure appears only in
+    production."""
+    if context_window <= 0:
+        return 0
+    return int(context_window * policy.target_fraction)
+
+
+def is_within_target(policy: CompactionPolicy, tokens: int, context_window: int) -> bool:
+    """Is the history small enough that another rung would be spent for nothing?"""
+    return tokens <= target_tokens(policy, context_window)
+
+
+def climb_ladder(
+    policy: CompactionPolicy,
+    *,
+    tokens_before: int,
+    context_window: int,
+    apply_rung: Callable[[Rung], int],
+) -> LadderRun:
+    """Climb the enabled rungs cheapest-first, stopping the moment the target is reached.
+
+    `apply_rung` is the adapter's half of the split described in this module's header:
+    the domain owns WHEN a rung is climbed, `adapters/driven/context/engine.py` owns what
+    a rung does to a history. It applies one rung and returns the token count that is left.
+
+    Three properties, and each one is money rather than correctness:
+
+    * **A rung is climbed only because the previous one fell short.** L3 and L4 each cost
+      a model call; reaching them when L1 would have done pays for a summary nobody needed.
+    * **Reaching the target stops the ladder immediately** - including before the first
+      rung, when the history is already small enough. Every extra rung rewrites more of
+      the prompt prefix, and a rewritten prefix re-bills the whole prompt at full price on
+      the next request. An overshooting ladder frees MORE tokens, so it looks better on
+      every measure except the invoice.
+    * **The order is the ladder's, not the profile's.** Rungs are sorted by their own
+      value and de-duplicated, so a profile that happens to list L4 first does not buy a
+      summary before free pruning was tried. This is also a determinism requirement:
+      compaction runs inside a `@DBOS.step()`, and an order taken from however a mapping
+      was written would replay differently after a crash.
+
+    A rung that frees nothing is not a stopping condition - the next rung is cheaper than
+    failing the turn. Running out of rungs is, and it returns `reached_target` False for
+    the caller to escalate on. This function never retries a rung.
+    """
+    tokens_after = tokens_before
+    applied: list[Rung] = []
+
+    for rung in sorted(set(policy.enabled_rungs)):
+        if is_within_target(policy, tokens_after, context_window):
+            break
+        applied.append(rung)
+        tokens_after = apply_rung(rung)
+
+    return LadderRun(
+        rungs_applied=tuple(applied),
+        tokens_before=tokens_before,
+        tokens_after=tokens_after,
+        reached_target=is_within_target(policy, tokens_after, context_window),
+    )

@@ -147,14 +147,27 @@ class TurnRequest:
 class TurnOutcome:
     """The two-shaped result. See I2.
 
-    TODO(F1): add `__post_init__` asserting exclusivity, and a test constructing both
-    invalid shapes expecting ValueError. Cheap, and it catches adapter bugs at the
-    boundary instead of three steps deep inside a DBOS workflow.
+    Exclusivity is enforced at construction: an adapter producing a third shape fails
+    here, at the boundary, instead of three steps deep inside a DBOS workflow where the
+    traceback no longer names the culprit.
     """
 
     turn_id: TurnId
     pending: tuple[PendingRequest, ...] = ()
     result: TurnResult | None = None
+
+    def __post_init__(self) -> None:
+        """I2: SUSPENDED or FINISHED, never both and never neither."""
+        if self.pending and self.result is not None:
+            raise ValueError(
+                "TurnOutcome cannot be both suspended and finished: "
+                "pending and result are mutually exclusive."
+            )
+        if not self.pending and self.result is None:
+            raise ValueError(
+                "TurnOutcome must be either suspended or finished: "
+                "supply exactly one of pending or result."
+            )
 
     @property
     def is_suspended(self) -> bool:
