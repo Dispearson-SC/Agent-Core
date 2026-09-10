@@ -1,0 +1,68 @@
+[project]
+name = "agent-core"
+version = "0.0.0"
+# Deliberately carries no port count. The count changed from eleven to fifteen during
+# design and this string was the last place still saying eleven. The invariant is what
+# matters and it has not changed: only two ports change per vertical. docs/ARCHITECTURE.md
+# section 3 is the single source of truth for the count.
+description = "A hexagonal agent core: only two ports change when a vertical is added."
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic-ai>=2.0",
+    "litellm>=1.0",
+    "dbos>=1.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "psycopg[binary,pool]>=3.2",
+    "pydantic>=2.9",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_core"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "phase(name): roadmap phase this test belongs to (F0..F7, D2)",
+    "contract: guards the port contract - a vertical must not touch domain/application/ports",
+    "silent: covers a silent-bug area listed in CLAUDE.md; never delete without replacing",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "TID"]
+
+# Mechanically enforces the layer rule from CLAUDE.md. domain/ and application/ must not
+# reach for a runtime library. Adapters re-allow their own dependency via per-file-ignores.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pydantic_ai".msg = "Forbidden outside adapters/. domain/ and application/ stay pure."
+"dbos".msg = "Forbidden outside adapters/driving/workflow/."
+"litellm".msg = "Forbidden outside adapters/driven/llm_litellm/."
+"fastapi".msg = "Forbidden outside adapters/driving/http/."
+
+[tool.ruff.lint.per-file-ignores]
+"src/agent_core/adapters/**" = ["TID251"]
+"tests/**" = ["TID251"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]

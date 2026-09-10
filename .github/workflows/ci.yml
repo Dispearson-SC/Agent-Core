@@ -1,0 +1,50 @@
+name: CI
+
+# Declares, at the repository root, how this project is tested. That declaration matters
+# beyond CI: tooling that inspects a workspace looks for it, and without one it concludes
+# there is no test command — which is how a fakes-first convention gets reported as "no
+# strict TDD" when the only real problem is that pytest lives under Core/.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Runs before dependencies are installed, on purpose: a broken import in a stub is
+      # the one failure the (largely skipped) suite cannot catch, and this catches it in
+      # under a second.
+      - name: Imports load
+        run: python Core/scripts/check_imports.py
+
+      - name: Install
+        working-directory: Core
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      # Includes the flake8-tidy-imports banned-api rule, which is what mechanically
+      # enforces the layer rule: domain/ and application/ may not reach for pydantic_ai,
+      # dbos, litellm or fastapi.
+      - name: Lint
+        working-directory: Core
+        run: python -m ruff check src tests
+
+      - name: Typecheck
+        working-directory: Core
+        run: python -m mypy
+
+      # Unit tests only. Integration tests need Postgres and DBOS and are wired in F2.
+      - name: Unit tests
+        working-directory: Core
+        run: python -m pytest tests/unit

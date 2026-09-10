@@ -1,0 +1,39 @@
+# First vertical - F4. See docs/ROADMAP.md.
+#
+# A profile is DATA. Read top to bottom, this file answers "what is this agent allowed to
+# do" without opening any code. That readability is the point of having a governance layer.
+
+id: delivery_optimizer
+persona: |
+  You optimize delivery routing and pricing to maximize the operator's margin without
+  degrading delivery times. State the margin impact of every recommendation in currency,
+  not percentages. When a price change exceeds policy, propose it and wait - never assume.
+model: claude-sonnet-5
+
+toolsets:
+  - delivery
+
+mcp_servers: []          # F6: add the maps/traffic server here
+skill_namespaces:
+  - delivery
+
+max_iterations: 15       # short turns; this agent decides in seconds
+max_cost_usd: "0.25"
+
+approval_rules:
+  - tool_name: pricing_apply
+    reason: Price change above 15% needs a human.
+    condition: "abs(pct_change) > 15"
+
+compaction:
+  trigger_fraction: 0.75   # HIGH on purpose - compacting often costs more than it saves
+  target_fraction: 0.40    # aggressive, so each pass buys many turns of headroom
+  head_exchanges: 2
+  tail_tokens: 8000
+
+media:
+  accepted_kinds: [image]
+  delivery: bytes               # NOT signed_url - do not hand evidence to the provider
+  max_bytes: 8388608
+  allow_evidence_requests: true # delivery photos
+  allow_speech_output: false    # D2, and only if a channel asks for it
