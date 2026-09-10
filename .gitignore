@@ -27,3 +27,6 @@ media-store/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Skill registry cache (fingerprint, regenerated)
+.atl/.skill-registry.cache.json

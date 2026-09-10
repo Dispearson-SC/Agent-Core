@@ -1,0 +1,20 @@
+# Line endings are declared here rather than left to each contributor's core.autocrlf.
+# The repository stores LF; working trees may render CRLF on Windows. Without this file the
+# result depends on a local git setting, which is how a Makefile or a shell script ends up
+# committed with CRLF and then fails on Linux.
+* text=auto eol=lf
+
+*.py    text eol=lf
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+Makefile text eol=lf
+
+# Binary — never normalise.
+*.png binary
+*.jpg binary
+*.gif binary
+*.pdf binary
+*.ico binary
