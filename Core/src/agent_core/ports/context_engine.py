@@ -3,9 +3,34 @@
 Phase:      F5
 Tasks:      docs/TASKS.md#t-f5-02
 Adapter:    adapters/driven/context/
+Status:     PROTOCOL FROZEN (t-f5-02) - the trigger carries its mandatory fallback; the
+            ladder itself is still PSEUDO-CODE, pending t-f5-03 and t-f5-04.
 Per-vertical: NO (the policy is per profile, the engine is not)
 
 SILENT-BUG AREA. A wrong strategy here shows up on the BILL, never in a test.
+
+THE ASYNC SPLIT (D13) - ONE COROUTINE, FOUR SYNC MEMBERS
+    `compress` is the only awaitable member, because it is the only one that can reach a
+    model: rungs L3 and L4 each cost a summariser call, and a sync `def` doing that would
+    block the event loop for every other turn in the process.
+
+    `should_compress` stays SYNC, and this is not an exception to D13. D13's rule is "no
+    I/O to await", and the trigger is pure arithmetic over a `ContextState` that has
+    already been gathered - exactly the reasoning that keeps `ToolPolicy.decide` sync. It
+    runs after EVERY model response, so a coroutine here would buy an await point with
+    nothing behind it on the hottest path this port has. `on_session_start`,
+    `update_from_response` and `on_session_end` are local accounting for the same reason.
+
+WHY THE TRIGGER HAS A BODY WHEN EVERY OTHER PORT MEMBER IS `...`
+    `docs/TASKS.md#t-f5-02` says the None-window fallback is MANDATORY. A docstring cannot
+    make anything mandatory, and this is a silent-bug area: an adapter that forgets the
+    fallback never compacts, and against a provider that DOES report usage it looks
+    perfect. So the fallback lives on the Protocol as an inherited default rather than
+    being re-derived, and forgotten, once per adapter.
+
+    It stays inside the layer rule: pure arithmetic over domain types, no import that is
+    not a domain type, no I/O. An adapter with a better estimator may still override it -
+    what it cannot do is inherit a hole.
 
 THE LIFECYCLE BELOW IS BORROWED, NOT INVENTED
     It is Hermes' context-engine base class, which is production-proven. Two details in
@@ -50,27 +75,46 @@ class ContextEngine(Protocol):
         ...
 
     def should_compress(self, state: ContextState, policy: CompactionPolicy) -> bool:
-        """PSEUDO-CODE - F5. The most consequential ten lines in the project.
+        """The most consequential ten lines in the project. SYNC (D13) - pure arithmetic.
 
-        1. fraction = state.window_used
-        2. if fraction is None:
-               fraction = state.estimated_tokens / state.context_window
-           NEVER return False just because the provider was silent. That is the bug that
-           kills the agent in production and cannot be reproduced against a provider that
-           reports usage.
-        3. return fraction >= policy.trigger_fraction
+        TOTAL BY CONSTRUCTION. Every `ContextState` gets a real `bool`, including the two
+        inputs that have no fraction to compare:
+
+        * `window_used is None` - the COMMON case, not an edge one. The provider simply
+          did not report usage. Fall back to the local estimate the engine has been
+          maintaining in `update_from_response`. NEVER answer False just because the
+          provider was silent: that is the bug that kills the agent in production and
+          cannot be reproduced against a provider that reports usage.
+        * `context_window <= 0` - the window SIZE is unknown, so the fallback has no
+          divisor and there is no fraction to compute at all. The answer is the one
+          `domain.compaction.target_tokens` already chose for this exact input: resolve
+          towards compaction "rather than stop early against a number nobody knows". A
+          trigger that disagreed with the ladder's own rule would leave the ladder to be
+          climbed only when a contradicting trigger happened to fire.
+
+        The boundary is `policy.trigger_fraction`, never a constant: it is per profile,
+        and `domain/compaction.py` explains why its default is high.
 
         DO NOT add "compress a little every turn". Compacting often costs MORE than it
         saves: every pass rewrites the prompt prefix and invalidates the provider's cache,
         so the next request re-bills the whole prompt at full price. Hermes ships exactly
         that mode OFF BY DEFAULT for this reason. See domain/compaction.py.
         """
-        ...
+        fraction = state.window_used
+        if fraction is None:
+            if state.context_window <= 0:
+                return True
+            fraction = state.estimated_tokens / state.context_window
+        return fraction >= policy.trigger_fraction
 
-    def compress(
+    async def compress(
         self, session: SessionRef, history: object, policy: CompactionPolicy
     ) -> CompactionResult:
         """PSEUDO-CODE - F5. The ladder, cheapest rung first, stop when the target is met.
+
+        ASYNC (D13): the only awaitable member on this port, and the reason the other four
+        stay sync. L3 and L4 each cost a summariser model call, so this is the one member
+        with I/O behind its await.
 
         target_tokens = policy.target_fraction * context_window
 

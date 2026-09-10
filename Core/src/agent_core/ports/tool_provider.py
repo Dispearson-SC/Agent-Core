@@ -11,9 +11,9 @@ WHERE MCP LIVES - THE ANSWER TO "IS MCP A PORT?"
     vertical's local tools with whatever MCPToolsets the profile declares and returns one
     set.
 
-    That is why the port count stayed at eleven and why only two ports change per
-    vertical: skills and MCP enter as DATA AND COMPOSITION, not as new code.
-    docs/DECISIONS.md#d10.
+    That is why only two ports change per vertical: skills and MCP enter as DATA AND
+    COMPOSITION, not as new code. docs/DECISIONS.md#d10. (The count itself is owned by
+    docs/ARCHITECTURE.md section 3 and stated nowhere else - D24.)
 
 NON-NEGOTIABLE (CLAUDE.md #4)
     MCP tools pass through the SAME ToolPolicy as local ones. Their results are wrapped
@@ -24,18 +24,37 @@ NON-NEGOTIABLE (CLAUDE.md #4)
     Tool NAMES from MCP are prefixed (`mcp_<server>_<tool>`) so a policy rule can match
     `mcp_*` and so a malicious server cannot shadow a local tool by naming itself
     `write_file`. Verify collision handling with a test that registers a hostile name.
+
+WHY BOTH METHODS ARE ASYNC (D13)
+    Neither is pure. `toolset_for` builds MCPToolsets, which open stdio, Streamable HTTP or
+    SSE connections; `tool_names_for` reads the persisted schema cache (F6) and, on a miss,
+    has to reach the server to fill it. Both are therefore I/O, both sit on the turn's
+    critical path, and both must be awaitable rather than block the loop.
+
+    Declaring them async from F1 also stops the F6 cache work from being a breaking change:
+    the F1 local-only adapter simply never awaits anything real.
+
+WHY runtime_checkable
+    So conformance can be asserted from `ports/` alone. Without it the only way to prove an
+    implementation satisfies this port is to import a concrete adapter into the test, which
+    turns a contract test into an adapter test. The check is structural - it verifies that
+    BOTH methods exist, which is what keeps `tool_names_for` from quietly becoming optional
+    and answers being taken from a constructed toolset instead.
 """
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from agent_core.domain.profile import AgentProfile
 
 
+@runtime_checkable
 class ToolProvider(Protocol):
-    def toolset_for(self, profile: AgentProfile) -> object:
+    async def toolset_for(self, profile: AgentProfile) -> object:
         """PSEUDO-CODE - F1 local only, F6 adds MCP.
+
+        ASYNC (D13): step 2 opens MCP transports. F1 does no I/O here and awaits nothing.
 
         1. Resolve each name in `profile.toolsets` to a registered local toolset.
            Unknown name -> raise. Silently ignoring a typo gives an agent that is
@@ -55,8 +74,10 @@ class ToolProvider(Protocol):
         """
         ...
 
-    def tool_names_for(self, profile: AgentProfile) -> tuple[str, ...]:
+    async def tool_names_for(self, profile: AgentProfile) -> tuple[str, ...]:
         """Flat list of names, for ToolPolicy.filter_toolset and for the audit record.
+
+        ASYNC (D13): reads the F6 schema cache, which is I/O even on a hit.
 
         Kept separate from `toolset_for` so policy filtering never needs to construct
         live MCP connections. Starting an stdio child process just to answer "what may

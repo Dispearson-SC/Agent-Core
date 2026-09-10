@@ -27,12 +27,36 @@ FILE SHAPE
           env: [ZONE_API_URL]
         ---
         # ... body the model reads on demand ...
+
+WHY BOTH METHODS ARE ASYNC (D13)
+    Neither is pure. `index` walks the skills root and reads frontmatter off disk; `read`
+    opens one file. Both sit on the turn's critical path - `index` on every turn, `read`
+    the moment the model asks for a body - so both must be awaitable rather than block the
+    loop while the filesystem answers. A cache in front of `index` does not change that:
+    the miss is still I/O, and a port that is sync until its first cold start is a port
+    that has to be widened later.
+
+WHY runtime_checkable
+    So conformance can be asserted from `ports/` alone. Without it the only way to prove an
+    implementation satisfies this port is to import a concrete adapter into the test, which
+    turns a contract test into an adapter test.
+
+    Note what structural conformance does NOT check: it verifies that the required members
+    EXIST, so a registry that ALSO offers a bulk body loader still passes `isinstance`.
+    That is why the rule below is locked against this port's own declared surface in
+    tests/unit/test_ports_skill_registry.py, and not against an instance.
+
+THE ONE RULE A FUTURE WIDENING MUST NOT BREAK
+    Exactly one member returns a body, it returns ONE body, and it is reached by skill
+    name. No `read_all`, no `read_many(names)`, no `index(..., include_bodies=True)`, and
+    no metadata field carrying body text. Each of those puts every body back into every
+    turn, none of them fails a test on its own, and the only symptom is the bill.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from agent_core.domain.profile import AgentProfile
 
@@ -50,9 +74,12 @@ class SkillMeta:
     path: str
 
 
+@runtime_checkable
 class SkillRegistry(Protocol):
-    def index(self, profile: AgentProfile) -> tuple[SkillMeta, ...]:
+    async def index(self, profile: AgentProfile) -> tuple[SkillMeta, ...]:
         """PSEUDO-CODE - F6.
+
+        ASYNC (D13): step 1 walks the filesystem and step 2 reads frontmatter.
 
         1. Scan the skills root for SKILL.md files.
         2. Parse frontmatter only - NEVER read the body here.
@@ -67,8 +94,13 @@ class SkillRegistry(Protocol):
         """
         ...
 
-    def read(self, name: str) -> str:
+    async def read(self, name: str) -> str:
         """PSEUDO-CODE - F6. Backs the `skill_view` tool.
+
+        ASYNC (D13): step 2 opens a file.
+
+        ONE body, BY NAME. This is the only member that may return body text, and
+        there is deliberately no bulk variant beside it - see the module docstring.
 
         1. Resolve `name` against the index. Unknown -> raise; do not fall through to a
            filesystem path.
