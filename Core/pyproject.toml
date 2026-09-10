@@ -38,7 +38,7 @@ packages = ["src/agent_core"]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
-    "phase(name): roadmap phase this test belongs to (F0..F7, D2)",
+    "phase(name): roadmap phase this test belongs to; see docs/ROADMAP.md",
     "contract: guards the port contract - a vertical must not touch domain/application/ports",
     "silent: covers a silent-bug area listed in CLAUDE.md; never delete without replacing",
 ]

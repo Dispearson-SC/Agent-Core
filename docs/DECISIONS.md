@@ -628,3 +628,31 @@ vertical is added* — because that is what has not changed and will not.
 
 The lesson generalises: a number repeated in five files is five things to update and four
 opportunities to be wrong. State the invariant, not the count.
+
+---
+
+## D24 addendum · the drift inventory had drifted
+
+D24 states that the port count "left **four** stale strings behind". A later adversarial
+pass found a **fifth** in `docs/ARCHITECTURE.md` — the section-2 layer diagram read
+`ports/  eleven protocols`, ninety-seven lines above the section-3 table in the *same file*
+that correctly said fifteen.
+
+And more instructive: **`README.md` had already drifted the same way**, within hours of D24
+being written to prevent exactly that. It claimed "D1–D23" against 24 decisions and "90
+anchored tasks" against 91. `Core/pyproject.toml`'s pytest marker still enumerated
+"(F0..F7, D2)" after the roadmap grew to F10.
+
+**So the convention is stronger than first written, and it applies to every count, not just
+the port count:**
+
+> Do not state a count that can change. State the invariant, or point at the document that
+> owns it.
+
+The counts are now removed from `README.md`, from the layer diagram, and from the pytest
+marker. `docs/ARCHITECTURE.md` section 3 owns the port count because that table *is* the
+count — nowhere else needs to repeat it.
+
+This addendum is kept rather than folded into D24 because the failure is the point: a
+decision record written to prevent drift drifted, and a hand-maintained inventory of stale
+strings is itself a stale string waiting to happen.

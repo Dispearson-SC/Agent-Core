@@ -39,7 +39,7 @@ Dependencies always point inward.
 domain/          zero external imports
   ↑
 application/     use cases; imports domain/ and ports/ only
-ports/           eleven protocols; only signatures and domain types
+ports/           the protocols; only signatures and domain types
   ↑
 adapters/driving/    http/  workflow/  scheduler/
 adapters/driven/     agent, model, persistence, context, skills, mcp, human, media, tools
@@ -85,6 +85,8 @@ Core/
       audit_sink.py      model_gateway.py
       context_engine.py  skill_registry.py
       media_store.py     speech_port.py
+      knowledge_base.py  knowledge_admin.py
+      agent_mailbox.py   transcript_reader.py
     adapters/
       driving/
         http/  workflow/  scheduler/
@@ -97,6 +99,8 @@ Core/
         mcp/               # MCPToolset composed into ToolProvider
         human/             # HumanGateway: channel + evidence
         media_fs/          # MediaStore
+        knowledge_pg/      # KnowledgeBase + KnowledgeAdmin
+        peers/             # AgentMailbox
         tools/
           fraud/  delivery/
     composition.py         # the ONE place adapters are chosen and wired
@@ -141,8 +145,6 @@ Each port answers exactly one question. A port that answers two is cut wrong.
 draft (compaction, skills, MCP, media, knowledge, peers, transcripts) entered as **data and
 composition**, never as a per-vertical code change. That invariant, not the port count, is
 what the architecture is defending.
-Skills and MCP added no per-vertical ports because they enter as *data and
-composition*, not as new code.
 
 ### On abstracting Pydantic AI
 

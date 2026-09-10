@@ -48,9 +48,9 @@ Agent-Core/
 
 | Document | Read it for |
 |----------|-------------|
-| [docs/DECISIONS.md](docs/DECISIONS.md) | D1–D23, each with the evidence that produced it. **Read this first.** |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Every decision, each carrying the evidence that produced it. **Read this first.** |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The fifteen ports, layer rules, and every subsystem design |
-| [docs/TASKS.md](docs/TASKS.md) | The task spine — 90 anchored tasks every code stub points at |
+| [docs/TASKS.md](docs/TASKS.md) | The task spine — the anchored task every code stub points at |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases F0→F10 and D2, each with a verifiable done-criterion, plus sizing and effort |
 | [docs/GAPS.md](docs/GAPS.md) | What is still undesigned, grouped by what it blocks |
 | [CLAUDE.md](CLAUDE.md) | Layer rules, non-negotiables, silent-bug areas |
