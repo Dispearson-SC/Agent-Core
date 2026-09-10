@@ -41,8 +41,8 @@ domain/          zero external imports
 application/     use cases; imports domain/ and ports/ only
 ports/           the protocols; only signatures and domain types
   ↑
-adapters/driving/    http/  workflow/  scheduler/
-adapters/driven/     agent, model, persistence, context, skills, mcp, human, media, tools
+adapters/driving/    http/  channels/  workflow/  scheduler/
+adapters/driven/     agent, model, persistence, context, skills, profiles, mcp, human, media, tools
 ```
 
 ### Sync or async
@@ -89,13 +89,14 @@ Core/
       agent_mailbox.py   transcript_reader.py
     adapters/
       driving/
-        http/  workflow/  scheduler/
+        http/  channels/  workflow/  scheduler/
       driven/
         agent_pydantic/    # AgentRunner + hooks
         llm_litellm/       # ModelGateway
         persistence_pg/    # ConversationStore, AuditSink, MediaStore
         context/           # ContextEngine: the compaction ladder
         skills_fs/         # SkillRegistry over SKILL.md files
+        profiles_fs/       # reads and parses profile YAML; the domain never does
         mcp/               # MCPToolset composed into ToolProvider
         human/             # HumanGateway: channel + evidence
         media_fs/          # MediaStore
@@ -643,9 +644,21 @@ incident.
 | human decision | — | ✅ |
 | cost per turn | — | ✅ |
 
-`VISIBLE_TO` in `domain/transcript.py` is the single source of truth for that table, and a
-test asserts it covers every `EntryKind` so it cannot rot. A kind added without a
-visibility entry is invisible to everyone — the safe failure.
+`VISIBILITY` in `domain/transcript.py` is the source of truth for that table: a grid with a
+hand-written cell for every `EntryKind` against every `Audience`. `VISIBLE_TO` is still
+there and still keyed by audience, but it is now the derived view rather than the
+declaration.
+
+The grid replaced a derived `ADMIN = frozenset(EntryKind)`, and the reason is worth keeping.
+While ADMIN was derived from the enum, the test asserting that every kind has a visibility
+entry could not fail — a new kind was covered the moment it was declared, and it silently
+became admin-visible with nobody deciding whether a user could see it. A table that fills
+itself in is not a decision, it is a default wearing a decision's clothes, and that default
+leaned toward disclosure. It had already gone wrong once: `pending placeholder` was
+admin-visible against the row above, which has always shown it user-only.
+
+Now a kind added without a row fails the suite by name, and so does an audience added
+without an answer in every row.
 
 ### The one thing a user must still see
 
@@ -738,9 +751,14 @@ way for the first 25 seconds.
 
 ### Chatwoot as the channel layer — what it replaces and what it does not
 
-A reasonable option: the core owns all agent logic, Chatwoot owns the interface and the
-inbox. Its AgentBot integration POSTs conversation events to a bot URL and accepts replies
-through its API, which fits cleanly as a driving adapter.
+> **Resolved by D23.** Agent-Core owns its channel adapters in phase one; Chatwoot is
+> deferred to phase two and never owns the channel layer. The evaluation below is kept
+> because it is what that decision was weighed against, and because it still describes
+> what Chatwoot would and would not give us when it arrives.
+
+The option that was weighed: the core owns all agent logic, Chatwoot owns the interface
+and the inbox. Its AgentBot integration POSTs conversation events to a bot URL and
+accepts replies through its API, which fits cleanly as a driving adapter.
 
 **What it gives you.** Multi-channel routing, contact management, an agent inbox — and
 **human handoff**, which is exactly the A5 gap deferred to D2. Handing a conversation to a

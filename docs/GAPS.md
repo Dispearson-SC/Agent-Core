@@ -69,6 +69,15 @@ phantom bug in the UI.
 
 **Without it:** the product feels broken next to any competitor, even when it is correct.
 
+> **Narrowed by D23.** The 202-plus-poll model was also flagged as unable to serve
+> WhatsApp Cloud API or Telegram Bot API, which only push webhooks and never poll us back.
+> That part is now designed: outbound delivery of a finished `TurnResult` goes through a
+> channel registry plus one `_step_deliver` step (D23), tasked as `t-f3-06`…`t-f3-09`. What
+> remains genuinely undesigned here is real-time token streaming for an interactive client
+> (own app / browser), and per-channel delivery retry and idempotency semantics for
+> `_step_deliver` itself — a retried DBOS step must not double-send a message to a channel
+> that has no dedup of its own.
+
 ### A5 · Human handoff and escalation — **DEFERRED TO D2**
 
 > Decided: not in the Day-1 scope. It is still table stakes for customer service, so it
@@ -165,6 +174,28 @@ the moment a second provider or an aggregator is in play.
 `AuditSink.record_turn_end` stores cost per turn. Turning that into per-tenant billing needs
 aggregation, a rating model, and a reconciliation path against the provider's own invoice —
 which will not match exactly.
+
+### B9 · A profile has no seat for a model setting
+
+`AgentProfile` carries `max_iterations` and `max_cost_usd` — the run's ceilings — and
+nothing that reaches the PROVIDER: no `max_tokens`, no `reasoning_effort`, no temperature.
+`ModelFactory` is `(model_id, base_url) -> Model`, so there is no seat on that path either.
+
+Found while closing `t-f0-04`'s day-1 endpoint. `tests/integration/test_f0_end_to_end.py`
+had been exercising MiniMax M3's two reasoning modes by injecting its own factory carrying
+`OpenAIChatModelSettings`; once the test stopped injecting a factory — which is what proves
+production can call a model at all — there was nowhere for that setting to come from. The
+parametrization was dropped rather than faked, and `docs/FIELD-NOTES.md` keeps what M3
+actually does in both modes.
+
+The cost is small and the design question is not: a setting belongs to the profile, so it
+has to be a domain field, and adding one means deciding which settings are portable across
+providers and which are one provider's dialect. Putting the dialect in the domain is how
+`AgentProfile` becomes a passthrough for whatever the current provider accepts.
+
+**Without it:** every profile runs on provider defaults, `max_tokens` included, and the
+only ceiling on a runaway generation is `max_cost_usd` — which Pydantic AI can only enforce
+when pricing data exists for the model, and warns rather than fails when it does not.
 
 ---
 

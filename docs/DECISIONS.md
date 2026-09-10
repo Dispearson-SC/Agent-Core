@@ -284,6 +284,22 @@ explicit go-ahead.
 Recorded during the Hermes core extraction, when parallel work on the extraction and
 the Campus-Alert integration was explicitly stopped.
 
+**Amended 2026-09-10 — scoped to workstreams, not to tasks within a phase.** The user
+directed that implementation run as parallel waves of subagents: tasks whose dependencies
+are satisfied and whose written files are disjoint execute concurrently, wave by wave,
+with a barrier between waves. The original preference still holds at the level it was
+recorded at — one workstream finished before the next begins, and integration into a
+consuming system still waits for an explicit go-ahead. What is now permitted is
+concurrency *inside* a single phase of a single workstream.
+
+Two constraints make that safe, and both are load-bearing:
+
+- No two tasks in one wave may write the same file. The wave schedule is derived from a
+  `writes` set per task, not from the order tasks appear in `docs/TASKS.md`.
+- Every task is test-first. A wave agent writes the failing test, confirms it fails for
+  the intended reason, then implements. A test that passes before implementation is a
+  broken test and stops that task.
+
 
 ---
 
@@ -543,55 +559,72 @@ window to every message, including single ones, so it is a latency decision with
 
 ---
 
-## D23 · OPEN DECISION — the channel layer, and whether Chatwoot owns it
+## D23 · Own channel adapters in phase one; delivery is composition wiring, not a new port
 
-**Status: OPEN. Must be decided before the first driving adapter is written in F0.**
+**Two decisions, recorded together because the second follows from the first.**
 
-Recorded as open rather than settled, because it changes which adapter gets built first and
-that is expensive to reverse.
+### Ownership: Option A — Agent-Core owns the channel layer in phase one
 
-### Option A — own channel adapters
+**Decision.** One driving adapter per channel — WhatsApp Cloud API webhook, Telegram
+webhook, own app — built and maintained by Agent-Core. **Option B (Chatwoot as the channel
+layer) is rejected for phase one**, not dropped: Chatwoot is deferred to phase two, and when
+it arrives it is only a channel adapter, or at most a read-side projection over the
+transcript — never a second write path. `ConversationStore` and `AuditSink` remain the only
+writers (D18); an AgentBot integration that persisted its own state would be exactly the
+two-write-path drift D18 exists to prevent.
 
-One driving adapter per channel: WhatsApp Cloud API webhook, Telegram webhook, own app over
-WebSocket. Full control, no extra hop, no extra infrastructure.
+**What this keeps deferred.** Human handoff (gap A5) stays deferred to D2, as already
+recorded there — Option B would have pulled it forward by adopting Chatwoot's inbox instead
+of building handoff ourselves, but not at the cost of a second writer. Every channel is our
+integration to build until then.
 
-Cost: human handoff (gap A5) stays deferred to D2, and every channel is our integration to
-build and maintain.
+**What is preserved from Option B's evaluation, should phase two revisit it.** Chatwoot
+shows *messages* — no tool calls, reasoning, policy denials, knowledge hits or per-turn cost
+— so it can only ever replace the user-facing half of the F10 transcript viewer, never the
+admin half; `TranscriptReader` stays required either way. Its one capability nothing else
+supplies is inbound typing state from its own web widget, and only there (D22).
 
-### Option B — Chatwoot as the channel layer
+### Shape A: a channel registry plus one delivery step — no sixteenth port
 
-The core owns all agent logic; Chatwoot owns the interface and the inbox. Its **AgentBot**
-integration POSTs conversation events to a bot URL and accepts replies through its API, which
-fits cleanly as a single driving adapter.
+**Decision.** Outbound delivery of a finished `TurnResult` goes through a channel registry
+wired in `composition.py`, plus one generic `_step_deliver` step in
+`adapters/driving/workflow/turn_workflow.py`. **No new port.** The port count stays exactly
+as `docs/ARCHITECTURE.md` §3 states it (see D24 — that section is the only place a count is
+stated). The already-planned `ChannelHumanGateway` (named in `composition.py`'s pseudo-code)
+shares this same registry rather than inventing its own: one channel-id → adapter lookup,
+used by both the mid-turn human-wait path and the end-of-turn delivery path.
 
-**What it gives.** Multi-channel routing, contact management, an agent inbox, and **human
-handoff** — which is exactly the A5 gap we deferred to D2. Handing a conversation to a person
-*is* Chatwoot's core product, so option B closes that gap by adopting rather than building.
+**Shape B — a sixteenth port — was considered and rejected.** Two independent arguments,
+not one:
 
-**What it does NOT replace.** Chatwoot shows *messages*. It shows no tool calls, no
-reasoning, no policy denials, no knowledge hits, no per-turn cost. It replaces the
-**user-facing half** of the F10 transcript viewer and **none of the admin half** —
-`TranscriptReader` is still required either way.
+- `HumanGateway` cannot absorb this instead. Its own docstring scopes it to one question —
+  *"who do I ask, and how do I wait for the answer?"* (`ports/human_gateway.py:1`). Delivering
+  a finished result is a different question; folding it in is the two-questions-one-port
+  mistake `CLAUDE.md`'s layer rule calls a port cut wrong.
+- A new port does not clear the bar D15 sets for when one is worth it: it would not add a
+  question the domain asks, only a dispatch step over channels already carried on
+  `CallerIdentity.channel` (`domain/turn.py:68`). D10 already established the precedent for
+  this shape of problem — MCP composes into `ToolProvider` instead of becoming its own port,
+  because it does not change the question `ToolProvider` answers. `docs/ARCHITECTURE.md` §3
+  is explicit that this is the general pattern here, not an exception: every capability added
+  since the first draft — compaction, skills, MCP, media, knowledge, peers, transcripts —
+  entered as data and composition, and the invariant the architecture defends is that a
+  vertical touches only `ToolProvider` and the rows behind `ToolPolicy`, not that the port
+  count never moves. Moving it anyway is not free regardless: D24's addendum found a
+  stale-count defect that had already spread to five files from one earlier move.
 
-**What it costs.** An extra hop of latency; a mapping from `SessionRef` onto its
-(conversation, contact, inbox) model; and self-hosting means another Rails app with its own
-Postgres **and its own Redis**. That Redis is Chatwoot's, not ours — D21 concerns our work
-queue and is unaffected.
+**Why delivery cannot ride the phase-one polling contract instead.** D13's contract is
+`POST /turns` returning 202, consumed via `GET /turns/{turn_id}`. That assumes a caller able
+to poll us. D22 already verified, for the two channels that matter most, that this does not
+hold: WhatsApp Cloud API and Telegram Bot API are webhook-push in the direction that matters
+here too — the platform POSTs inbound to us, and answering means us calling out to *their*
+send API, never them calling back into ours. Neither channel can be served by a model where
+the client fetches its own answer; the answer has to be pushed.
 
-**One capability it adds that nothing else does.** Inbound typing state, but only from its
-own web widget — never from a WhatsApp or Telegram conversation it relays, because the
-providers do not expose it (D22).
-
-### How to decide
-
-The deciding question is **whether the first paying customer needs human handoff on day one.**
-
-- Customer service: almost certainly yes → Option B is worth the hop.
-- Delivery optimization or fraud analysis, operating internally: probably no → Option A, and
-  handoff arrives with D2 as planned.
-
-Whichever is chosen, record it here as D23 resolved and note the date. Do not let F0 start
-without it: the first driving adapter is written under one of these assumptions.
+**Consequence.** `t-f0-00` closes: the first driving adapter is no longer written under an
+undecided assumption. The webhook adapters and the delivery registry itself are still
+unbuilt — tracked as new tasks in F3, where `ChannelHumanGateway` already lives (see
+`docs/TASKS.md`).
 
 ---
 
