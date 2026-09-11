@@ -38,6 +38,43 @@ there is no barrier and no ordering.
    index is the orchestrator's job at the barrier, and it happens before the next wave is
    scheduled: a schedule derived from a stale index re-runs work that is already done.
 
+4. **A task that widens a port owns every implementation of it, in the same wave.** Three
+   waves in a row ended with a barrier cleaning up a port that had moved under its adapters:
+   `AuditSink` grew `record_rejected_decision` and eighteen mypy errors appeared in eleven
+   files; `ModelGateway.classify_error` grew an `attempt` parameter and broke four stubs;
+   `MediaStore.signed_url` changed its return type and left eight errors across four.
+   Each time the widening was CORRECT, and each time the wave still ended red.
+
+   The cause is not the agents. Every one of them reported the collateral accurately and
+   declined to touch files outside its writes set, which is rule 2 working exactly as
+   intended. **The cause is the writes set, and the writes set is the orchestrator's.** A
+   port and its implementations are one work unit; splitting them across a barrier
+   guarantees a red wave.
+
+   So before scheduling any task that touches `ports/`, grep for the Protocol's name and put
+   **every** implementation, every fake in `Core/tests/fakes/`, and every local stub inside a
+   test module into that one task's writes set. If that makes the set large, the set is
+   large - it is one change. If it then collides with another task, those two cannot share a
+   wave, which is rule 2 doing its job rather than an inconvenience.
+
+   A rename is the same thing: `ask_peer_result_for` became `ask_peer_result` and left a test
+   red for exactly this reason.
+
+5. **Never `git checkout --` a file in a wave.** An agent proving mutation teeth restored its
+   one-line change with `git checkout -- runner.py` and reverted **765 lines of uncommitted
+   work**, because `HEAD` in this repository is ten waves behind the working tree. It
+   reconstructed the file from the session transcript and verified it — 1,416 lines, every
+   anchor present, 31 green tests — but that recovery was luck wearing diligence's clothes.
+
+   A mutation is restored by **writing the original bytes back**: keep a copy before you
+   mutate, restore from the copy, and confirm with `git diff --stat` that `src/` shows only
+   what you meant. `git checkout --` does not restore a mutation, it restores `HEAD`, and
+   those are the same thing only in a repository that is committed.
+
+   The orchestrator's half of this rule is the real one: **commit at every barrier.** The
+   blast radius of that command was ten waves wide because nobody had reduced it. A green
+   suite is not a save point.
+
 ## Test-first is enforced per task, not per wave
 
 Every wave agent follows the same contract:

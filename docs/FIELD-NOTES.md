@@ -90,9 +90,42 @@ Debouncer.create(workflow, *, debounce_timeout_sec=None, queue=None)
 behaviour `t-f2-07` asserts — three messages inside the window producing one turn and one
 model call.
 
-**So F2's D19 additions are mostly configuration, not construction.** Read this section
-before writing `t-f2-03` or `t-f2-05`; hand-rolling either would reimplement something the
-dependency already ships, and would have to be maintained against it forever.
+### RETRACTED 2026-09-10 — partitioning and deduplication are mutually exclusive
+
+**This section previously concluded "F2's D19 additions are mostly configuration, not
+construction." That is WRONG on the installed version, and it is retracted rather than
+edited away, because it was read as authority and a wave was scheduled on it.**
+
+The two configurations above cannot be applied to one queue. `Queue._validate_enqueue`
+(`dbos/_queue.py`) raises `Deduplication is not supported for partitioned queues` when
+`queue_partition_key` and `deduplication_id` are both set — which is exactly the
+combination D19 prescribes. Verified against the installed source and reproduced by a test.
+
+Every route around it is closed too:
+
+- A partitioned queue **requires** a partition key (same function), so the turn cannot be
+  enqueued onto it without one.
+- `Debouncer` refuses the same pair explicitly, and says why:
+  *"partitioned queues do not support the deduplication a debounce requires"*
+  (`dbos/_debouncer.py`, `_reject_conflicting_options`).
+- A plain `deduplication_id` is released when the workflow **completes**
+  (`_sys_db.update_workflow_outcome`), not when the delay expires — only `is_debounced`
+  rows are cleared in `transition_delayed_workflows`. So a hand-built two-queue relay would
+  make a message arriving MID-TURN join the running turn and vanish, instead of becoming the
+  follow-up turn `t-f2-09` asserts.
+
+The only shape left is the one `Debouncer` itself uses: a separate **non-partitioned**
+window queue carrying a debounced workflow that, on expiry, enqueues the real turn onto the
+partitioned queue. That is now [`t-f2-11`](TASKS.md#t-f2-11), and it lives in
+`turn_workflow.py` — not in `routes.py`, which is why `t-f2-05` alone could never have
+landed.
+
+**What the retracted claim cost, and the rule it earns.** Both facts above were read
+straight from the installed signatures, and both were true in isolation: `Queue` really does
+take `partition_concurrency`, `EnqueueOptions` really does carry `deduplication_id`. The
+error was combining two verified parameters and calling the combination verified. **A
+signature check proves a parameter exists; only running it proves two of them compose.**
+Verify combinations against behaviour, not against the argument list.
 
 ---
 
@@ -160,6 +193,18 @@ regulates how much thinking happens, it does not switch thinking off. Do not wri
 assertion that one mode has reasoning and the other does not; it will be wrong, and it will
 be wrong intermittently, which is worse.
 
+### Repeated-character filler makes M3 return an empty answer, nondeterministically
+
+Feeding MiniMax-M3 a long run of one repeated character — `"u" * 8000` as padding to force a
+compaction — makes its `ThinkingPart` consume the entire `max_tokens` budget and come back
+with an **empty** `TextPart`. Run to run, not every time. In `ModelSummariser` that trips the
+empty-answer guard into `_extractive_fallback`, so a test asserting the model path was taken
+fails intermittently while the code is correct.
+
+A repeated natural-language SENTENCE does not trigger it. Use natural-language filler in any
+test that pads a conversation against a live model. Discovered while writing the summariser's
+live-provider check, which is the test that exists because nothing else drives that route.
+
 ---
 
 ## Gemini, and why a second provider exists at all
@@ -204,6 +249,22 @@ accepting connections; poll `pg_isready` instead. Worse, if the blocked wrapper 
 killed it takes the server down with it — which looks exactly like a suite that regressed
 from 101 passing to 97 for no reason.
 
+### The local cluster has no pgvector. The remote one does. Verified 2026-09-10.
+
+| Database | Version | `vector` |
+|---|---|---|
+| portable EDB cluster in the scratchpad — **the suite runs here** | 17 (Windows binaries) | **absent**; there is no `vector.control` in `pgsql/share/extension/` |
+| remote Coolify instance | 17.11 (Debian, `pgdg12`) | **0.8.6 available**, not yet `CREATE EXTENSION`-ed |
+
+The EDB Windows binaries ship no pgvector and it is not a file you can drop in — it is a C
+extension that must be compiled against the server. The Debian image has it packaged.
+
+**Do not write "Postgres has pgvector" anywhere.** A capability belongs to a named database.
+That sentence, written as a single row in `docs/STATE.md`, was copied into a wave prompt and
+produced a `CREATE EXTENSION vector` migration aimed at the cluster that cannot have it —
+and because migration discovery applies every sibling module it finds, one impossible
+migration took the entire startup path down with it.
+
 ---
 
 ## What a green suite still does not prove
@@ -222,3 +283,67 @@ The layer rule has its own guard, and it earned its place immediately:
 real run. Its own docstring had predicted the shape of the catch — *"ruff's banned-api
 catches the four named libraries; this catches the fifth one nobody thought to ban"*. The
 fifth was `yaml`. It is now banned by name too.
+
+---
+
+## Compaction cost, measured against a real bill (t-f5-09)
+
+**Date: 2026-09-11. Model: `minimax/MiniMax-M3` (bare alias `MiniMax-M3` through the live
+LiteLLM proxy, `LITELLM_KEY_TENANT_A` for the ladder condition, `LITELLM_KEY_TENANT_B` for
+the control — the same per-team spend separation `test_proxy_mode.py` already verified).
+Harness: `Core/tests/integration/test_compaction_cost.py`.**
+
+**Traffic: one identical fourteen-turn onboarding conversation** (a senior engineer
+walking a teammate through a data-pipeline design — real, distinct, natural-language
+paragraphs, never repeated-character filler) **run twice, real provider both times,
+through the real `LadderContextEngine` on one run and with no engine at all on the
+other.** `context_window` was set to 3,000 for this run — deliberately small, so a
+bounded, cheap, real conversation actually crosses `CompactionPolicy`'s default
+`trigger_fraction` (0.75) instead of needing hundreds of turns to do it for real. That is
+the one deliberately unrealistic knob in this measurement; everything else (the trigger,
+the ladder, the summariser, the wire calls) is the same code and the same kind of call
+production makes.
+
+### The numbers
+
+| Condition | Total tokens billed (14 turns) | Tokens/turn | Rungs applied |
+|---|---|---|---|
+| With ladder (tenant A) | **17,666** | 1,261.9 | `L1_PRUNE_TOOL_OUTPUT`, `L2_SLIDING_WINDOW`, `L3_SUMMARISE_MIDDLE` (fired once, at turn 8) |
+| Without ladder (tenant B) | **33,684** | 2,406.0 | — |
+
+Per-turn tokens, with ladder: `534, 586, 943, 1299, 1654, 2013, 2367, 627, 683, 453, 517,
+871, 1083, 1431` — the drop from 2,367 to 627 at turn 8 is the one real `L3` pass. Per-turn
+tokens, without ladder, over the identical script: `534, 586, 943, 1299, 1654, 2013, 2367,
+2728, 2756, 3099, 3460, 3813, 4081, 4351` — monotonic, as an uncompacted history has to be.
+
+**Verdict at this trigger, on this traffic: the ladder saved money.** 17,666 vs 33,684
+total tokens is a 47.6% reduction, and the summariser's own real model call (one `L3`
+pass, folded into the 17,666 total above, not hidden from it) cost far less than the
+prompt growth it avoided over turns 8–14.
+
+### What this run does NOT show, so the next reader does not over-read it
+
+- **Only one compaction pass fired.** Fourteen turns at `context_window=3000` crossed the
+  trigger exactly once. This says nothing about the failure mode `domain/compaction.py`
+  actually warns about — repeated compaction, many times over a much longer conversation,
+  each pass rewriting the prompt prefix and invalidating the provider's cache. That
+  requires a much longer real run than this harness's cost budget covers, and is still an
+  open question.
+- **LiteLLM's own `/team/info` spend did not move within a 60-second poll on either
+  tenant** (`spend_before == spend_after` for both — see the harness output). This is the
+  same asynchronous-posting lag `test_proxy_mode.py` documented (25–65s observed there,
+  sometimes longer); the token counts above are the authoritative numbers this entry
+  relies on, taken directly from each response's own `usage` block — a real,
+  provider-reported figure, never a `CHARS_PER_TOKEN` estimate. A future run wanting a
+  dollar figure needs a longer poll budget than this one used.
+- **`context_window=3000` is not a production value.** Shrinking it was the only way to
+  make a bounded, cheap real conversation cross `trigger_fraction=0.75` at all. It changes
+  how SOON the ladder fires, not what code runs when it does — but the ratio measured
+  here (how much the one paid `L3` call cost against how much prompt growth it avoided)
+  will shift at a real window size, where more material gets folded into each summary.
+- **No tool calls in this script.** The pairing guarantee (`t-f5-06`, `t-f5-10`'s own live
+  test) is proven elsewhere; this run measures cost only, over plain text turns.
+
+The hypothesis this anchor was free to disprove — that compacting can cost more than it
+saves — did NOT hold on this traffic, at this trigger. That is a real result for this one
+shape of conversation, not a general proof that the ladder always pays for itself.

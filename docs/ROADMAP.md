@@ -82,6 +82,64 @@ another device, and the turn resumes with the image as the tool result.
 
 ---
 
+## Day 1.5 — cold start and the operator surface
+
+### F11 · A clone, an empty Postgres, and one command
+
+**Done when** a fresh clone with an empty PostgreSQL instance and a credentials file
+starts with one command, and an operator can create an agent, give it tools, connect it to
+an MCP server, point it at another agent, watch a tool refused, approve that refusal, have
+one agent orchestrate the other, and read the whole exchange in the audit trail — **without
+writing a line of SQL, and without a code change for any of it except a new tool.**
+
+The exception is the contract, not a caveat: writing a new TOOL is code, because a tool is
+behaviour. Everything else — which tools an agent may use, which MCP servers it connects
+to, which agents it may ask, what needs approval — is configuration, or the port cut is
+wrong.
+
+That criterion is written against what actually happened the first time anyone tried to
+use this system. Everything below is a step that had to be performed by hand, and every
+one of them was invisible until a human sat at a terminal:
+
+| What a human had to do by hand | Why nothing complained |
+|---|---|
+| `CREATE DATABASE agent_core_app` and `..._dbos` | `start_container` migrates and deliberately does not create; every test created its own |
+| export `AGENT_CORE_DATABASE_URL` and `MINIMAX_API_KEY` | the process never reads `.env`; only tests do |
+| repoint both profiles off `claude-sonnet-5` | no test ever served a shipped profile against a real provider |
+| `INSERT INTO policy_rules` | **nothing in production writes that table** — only tests |
+
+The pattern is the one this build hit seven times: **the fixture that supplies a missing
+collaborator is exactly what stops anyone noticing it is missing.** F11 is that pattern
+applied to the last mile — the mile a test never walks, because a test is already inside.
+
+#### Why the CLI is the phase, and not an accessory
+
+Agents are *made, used and judged* at a terminal. The HTTP surface answers 202 and polls;
+the channels deliver text. Neither shows the thing an operator has to see to trust the
+system: which tools a profile actually resolved to, which rule admitted or refused each
+one, what the model was handed, and what a user would have seen instead. The console is
+where the silent-bug table in `CLAUDE.md` becomes visible to a person — four of those five
+areas have no failing test by definition, and a human reading a real exchange is the only
+check they will ever get.
+
+#### The two design decisions this phase makes, and what they cost
+
+**1. Bootstrap is opt-in, not automatic.** `Settings` carries no admin URL today on
+purpose: *a deployment that hands its application superuser credentials has a bigger
+problem than a missing table.* That reasoning survives. So `AGENT_CORE_ADMIN_DATABASE_URL`
+is **optional**: present, startup creates the two logical databases and migrates,
+idempotently; absent, startup migrates only and a missing database fails loudly naming the
+exact command. Development leaves it in `.env` and gets one command. Production sets it for
+one bootstrap run and removes it. The app never *requires* superuser to run.
+
+**2. Policy is reviewed configuration, not a console command.** A `:allow` command would be
+the identity widening non-negotiable #9 forbids — the console runs as a `CallerIdentity`
+and policy is an administrative write. Rules therefore live in `Core/policy/*.yaml` and are
+applied at startup the way migrations are: declarative, diffable, idempotent, and reviewed
+before they are in force. The cost is that changing a rule needs a restart, and that cost
+is deliberate — a permission that can be granted at a prompt is a permission granted
+without a record.
+
 ## Day 2 — multi-tenant
 
 ### D2 · LiteLLM becomes a proxy, plus voice out
