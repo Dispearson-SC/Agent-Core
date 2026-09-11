@@ -1,8 +1,9 @@
-"""Driving adapter: the operator console - a REPL for inspecting and exercising an agent.
+"""Driving adapter: the operator console - a REPL for making, using and judging an agent.
 
-Phase:   F0
-Tasks:   docs/TASKS.md#t-f0-07
-Status:  IMPLEMENTED - commands, turn rendering and the tool-call view; wired in main.py
+Phase:   F0 (the surface) / F11 (the surface FINISHED)
+Tasks:   docs/TASKS.md#t-f0-07, #t-f11-09, #t-f11-10, #t-f11-11, #t-f11-12, #t-f11-13
+Status:  IMPLEMENTED - navigation, inspection, turns, scaffolding, reload, the approval
+         path, whole tool calls, session resumption and the two-audience trace.
 
 WHAT IT IS FOR
     Move between agents, read the configuration the system RESOLVED for each one, see the
@@ -11,10 +12,19 @@ WHAT IT IS FOR
 
 IT IS A DRIVING ADAPTER, NOT A SECOND COMPOSITION ROOT
     It lives beside `http/`, `channels/`, `workflow/` and `scheduler/` and it calls use
-    cases through collaborators handed to it. It imports no concrete adapter: every seat
-    below is a port protocol or a domain type, and `main.py` fills them from the ONE
-    container `composition.py` built. A console that assembled its own policy engine or
-    its own audit sink would be inspecting a system nobody deploys.
+    cases through collaborators handed to it. Every seat below is a port protocol, a use
+    case narrowed to the one member this needs, or a domain type, and `main.py` fills them
+    from the ONE container `composition.py` built. A console that assembled its own policy
+    engine or its own audit sink would be inspecting a system nobody deploys.
+
+    THE ONE CONCRETE IMPORT IS THREE RENDERING CONSTANTS, AND IT IS DELIBERATE.
+    `UNTRUSTED_OPEN`, `UNTRUSTED_CLOSE` and `is_untrusted` come from the runner that
+    writes the fence. `t-f11-11` asks this console to render untrusted-content wrapping AS
+    wrapping so an operator can SEE the boundary defending non-negotiables #4 and #10 -
+    and a console holding its OWN copy of the delimiter would keep drawing a fence after
+    the runner changed its own, which is precisely the "do not duplicate a fact that can
+    drift" rule in CLAUDE.md. Drawing the wrong fence in a silent-bug area is worse than
+    an adapter-to-adapter import for three module constants.
 
 IT CALLS `StartTurn` DIRECTLY, NOT THE DBOS WORKFLOW - AND IT SAYS SO OUT LOUD
     A REPL wants an answer now. The 202-plus-poll and the durable per-session partitioned
@@ -24,9 +34,13 @@ IT CALLS `StartTurn` DIRECTLY, NOT THE DBOS WORKFLOW - AND IT SAYS SO OUT LOUD
       - durability: a crash mid-turn is not recovered and not replayed (t-f2-02)
       - coalescing: the per-session partition and its window are never exercised
 
-    `_BANNER` prints that at startup. A tool that silently exercises less than the real
-    path is how somebody concludes the system works when they have not tested the part
-    that breaks - and an operator judging this system from a console deserves to know
+    It also means `HumanGateway.publish` never runs for a turn started here, so a console
+    suspension has NO correlation handle: `:pending` says that rather than printing a
+    queue an operator cannot act on.
+
+    `_BANNER` prints all of it at startup. A tool that silently exercises less than the
+    real path is how somebody concludes the system works when they have not tested the
+    part that breaks - and an operator judging this system from a console deserves to know
     which half of it they are judging.
 
 WHAT IT DOES NOT SKIP, WHICH IS EVERYTHING THAT DECIDES A REFUSAL
@@ -43,13 +57,19 @@ THE AUDIENCE IS ADMIN, DELIBERATELY, AND THE BANNER SAYS THAT TOO
     needed to go and answer it. That is a different audience, not a relaxed rule, so the
     view names itself rather than leaving a reader to assume it is the user's view.
 
-IDENTITY: NOTHING HERE IS AN ADMINISTRATOR
-    The console builds a `CallerIdentity` from flags. Non-negotiable #9: `AdminIdentity`
-    is never derived from it, and there is no parameter here that one could arrive
-    through. Running locally does not widen a chat client into an administrator, so the
-    console exposes no knowledge-write, no admin route and no admin anything: those take a
-    separate identity by a separate route (`main._env_admin_authenticator`) or they do not
-    exist.
+    `:trace user` is how an operator checks that claim instead of trusting it: the same
+    turn, projected for the other audience, through the same `TranscriptReader` a customer
+    would be served from. Both halves of #11 pull against each other and only a human
+    looking at both projections can see whether the projection got them right.
+
+IDENTITY: NOTHING HERE IS AN ADMINISTRATOR, AND THE ONE ADMIN SEAT IS NOT THE CALLER'S
+    The console builds a `CallerIdentity` from flags, and that is what the AGENT acts
+    under. `AuditReader` takes an `AdminIdentity` because tool names, arguments and policy
+    verdicts are admin-audience facts - so the console holds one, handed to it by the
+    process, and non-negotiable #9 holds exactly because the two are different types that
+    no code path here converts between. There is no parameter a `CallerIdentity` could
+    become an `AdminIdentity` through, and no knowledge-write, admin route or admin
+    anything is reachable from this REPL.
 
 CREDENTIALS ARE NEVER PRINTED
     `:profile` renders an MCP server by name and transport and deliberately NOT by url or
@@ -59,88 +79,51 @@ CREDENTIALS ARE NEVER PRINTED
 
 from __future__ import annotations
 
+import re
 import uuid
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping, MutableMapping
+from pathlib import Path
 from typing import Final, Protocol
 
+from agent_core.adapters.driven.agent_pydantic.runner import (
+    UNTRUSTED_CLOSE,
+    UNTRUSTED_OPEN,
+    is_untrusted,
+)
+from agent_core.application.decide_approval import FourEyesError, UnknownCorrelationError
 from agent_core.domain.policy import Effect, PolicyDecision
 from agent_core.domain.profile import AgentProfile
+from agent_core.domain.transcript import (
+    VISIBILITY,
+    Audience,
+    EntryKind,
+    TranscriptEntry,
+)
 from agent_core.domain.turn import (
     CallerIdentity,
     PendingRequest,
+    SessionId,
     SessionRef,
+    ToolCallId,
     TurnId,
     TurnOutcome,
     TurnRequest,
     UserInput,
 )
+from agent_core.ports.audit_reader import AuditedToolCall, AuditReader
+from agent_core.ports.knowledge_admin import AdminIdentity
 from agent_core.ports.tool_policy import ToolPolicy
 from agent_core.ports.tool_provider import ToolProvider
+from agent_core.ports.transcript_reader import TranscriptReader
 
 __all__ = [
+    "PROFILE_SCAFFOLD",
+    "ApprovalDecider",
     "Console",
-    "ObservedToolCall",
-    "ToolCallLog",
+    "ProfileLoader",
     "TurnRunner",
     "new_turn_id",
 ]
-
-
-@dataclass(frozen=True, slots=True)
-class ObservedToolCall:
-    """One tool call a turn made, as the append-only trail recorded it.
-
-    THE RECORDED VERDICT, NOT A RE-DECIDED ONE. `effect` and `rule_id` are what the policy
-    engine answered AT THE TIME the call was attempted, which is the only answer worth
-    showing: asking the engine again now would quietly report today's rules against
-    yesterday's call, and the two differ precisely on the day somebody edits a rule to
-    explain an incident.
-
-    THERE IS NO `reason` FIELD, AND ITS ABSENCE IS A FINDING RATHER THAN A CHOICE.
-        `PolicyDecision.reason` is the sentence the model is handed on DENY and the human
-        is asked on NEEDS_APPROVAL - and `audit_tool_calls` has no column for it
-        (migration `0005_audit_tool_calls`: turn_id, caller, tool, arguments, effect,
-        rule_id, at). So the trail can tell an auditor WHICH rule fired and never WHAT it
-        said. `:policy <tool>` asks the live engine for the sentence instead, which is
-        honest about being a question about the rules as they read now.
-
-    `arguments` are whatever the sink stored, i.e. already redacted by
-    `PgAuditSink._redact`. The console does not re-redact: two redaction paths drift, and
-    the drifting one is always the one nobody reads until an incident.
-    """
-
-    tool_name: str
-    arguments: dict[str, object] = field(default_factory=dict)
-    effect: Effect = Effect.DENY
-    rule_id: str | None = None
-
-    @property
-    def executed(self) -> bool:
-        """Whether the tool body actually ran.
-
-        `PolicyEnforcement.before_tool_execute` raises `SkipToolExecution` whenever the
-        decision is not ALLOW, so this mirrors `PolicyDecision.blocks_execution` rather
-        than restating a list of blocking effects - an effect added to the enum later must
-        read as "did not run" here, not fall through to "ran" unnoticed.
-        """
-        return self.effect is Effect.ALLOW
-
-
-class ToolCallLog(Protocol):
-    """The audit READ the console renders a turn from.
-
-    A protocol rather than a concrete reader because there is no audit-read PORT: `AuditSink`
-    is write-only by design and `TranscriptReader` projects a `transcript_entries` table
-    nothing in the tree writes to yet. So the console declares the one question it needs
-    answered, and `main.py` binds it to a read of the same `audit_tool_calls` rows
-    `PgAuditSink` wrote - the same shape `composition._pg_requester_lookup` already uses
-    for the same table.
-    """
-
-    async def for_turn(self, turn_id: TurnId) -> tuple[ObservedToolCall, ...]:
-        """Every tool call filed under `turn_id`, oldest first. Empty is a normal answer."""
-        ...
 
 
 class TurnRunner(Protocol):
@@ -151,6 +134,42 @@ class TurnRunner(Protocol):
     """
 
     async def execute(self, turn_id: TurnId, request: TurnRequest) -> TurnOutcome: ...
+
+
+class ApprovalDecider(Protocol):
+    """What the console needs from `DecideApproval`, and nothing else. t-f11-10.
+
+    NARROWED FOR THE SAME REASON `TurnRunner` IS, NOT BECAUSE A PORT IS MISSING.
+        `DecideApproval` is a USE CASE, not a port - `adapters/driving/http/routes.py`
+        narrows it the same way through `TurnStarter`. This is not the mistake
+        `ports/audit_reader.py` was written to end: that one was a driving adapter
+        declaring the protocol of a DRIVEN collaborator, which is the definition of a
+        missing port. Narrowing an application-layer entry point is the opposite - it
+        keeps the console from reaching the gateway or the sink behind it.
+
+    Every exception this can raise is part of the contract, and the console catches them
+    by type: `FourEyesError` (D25) and `UnknownCorrelationError`.
+    """
+
+    async def execute(
+        self,
+        correlation_id: str,
+        subject_id: str,
+        approved: bool,
+        note: str | None = None,
+    ) -> tuple[TurnId, ToolCallId]: ...
+
+
+# Re-reading the profiles directory, as a callable rather than as a path. t-f11-09.
+#
+# The console must not know that a profile is a YAML file on a disk - `yaml` may only be
+# imported under adapters/driven/profiles_fs/, and versions are assigned by
+# `composition.load_profiles` (D20) rather than by whoever happens to read the directory.
+# So the composition root binds `lambda: load_profiles(settings.profiles_dir)` and this
+# file calls it. What comes back is the WHOLE directory or an exception; there is
+# deliberately no per-file member, because a reload that applied some files and not others
+# is the half-application `:reload` exists to refuse.
+ProfileLoader = Callable[[], Mapping[str, AgentProfile]]
 
 
 def new_turn_id() -> TurnId:
@@ -168,10 +187,18 @@ def new_turn_id() -> TurnId:
 _COMMANDS: Final[tuple[tuple[str, str], ...]] = (
     (":agents", "every loaded profile, with the version a turn would record"),
     (":use <id>", "switch agent - persona, toolset and policy surface all change"),
+    (":new <id>", "scaffold a profile file from a template worth reading, then :reload"),
+    (":reload", "re-read the profiles directory; a file that fails changes nothing"),
     (":profile", "the RESOLVED configuration of the current agent"),
     (":tools", "the toolset this profile gets, and what policy does to each name"),
     (":policy [tool]", "what the engine decides for this caller, and which rule wins"),
-    (":audit", "the tool calls of the last turn, with decision and rule_id"),
+    (":audit", "the tool calls of the last turn, whole: arguments, verdict and reason"),
+    (":pending", "what the last turn is waiting on a human for"),
+    (":approve <id>", "answer a pending request YES (D25 four-eyes applies to YES only)"),
+    (":refuse <id>", "answer it NO - a refusal is never blocked by four-eyes"),
+    (":sessions", "conversations in this tenant, the ones stuck on a human marked"),
+    (":resume <id>", "file the next turns under that session instead of this run's"),
+    (":trace [user|admin]", "the last turn as TranscriptReader projects it, either side"),
     (":help", "this list"),
     (":quit", "leave"),
 )
@@ -179,22 +206,76 @@ _COMMANDS: Final[tuple[tuple[str, str], ...]] = (
 _BANNER: Final[tuple[str, ...]] = (
     "agent-core console - an ADMIN-audience operator surface.",
     "",
-    "This mode calls StartTurn DIRECTLY, not the DBOS workflow. Two guarantees are",
+    "This mode calls StartTurn DIRECTLY, not the DBOS workflow. Three guarantees are",
     "therefore NOT exercised here, and a turn that works here proves nothing about them:",
     "  - durability: a crash mid-turn is not recovered and not replayed",
     "  - coalescing: the per-session partitioned queue and its window never run",
+    "  - publication: HumanGateway.publish never runs, so a suspension raised here has",
+    "    no correlation handle and :approve has nothing to answer (see :pending)",
     "Everything that decides a refusal IS real: the profile, the tool provider, the policy",
     "engine and the audit sink are the ones this deployment was built with.",
     "",
     "ADMIN audience: a suspension is shown with its tool name and tool_call_id. A USER",
-    "sees only THAT something is pending (CLAUDE.md non-negotiable #11).",
+    "sees only THAT something is pending (CLAUDE.md non-negotiable #11). `:trace user`",
+    "renders the same turn the way a user would have been served it.",
     "",
     "Type :help for commands. Plain text is a turn.",
 )
 
-# How much of one argument value to show inline. The full payload belongs to the audit
-# table; this line exists so an operator can tell two calls apart at a glance.
-_ARGUMENT_CHARS: Final[int] = 48
+# A profile id becomes a FILE NAME, so it is validated as one rather than trusted as one.
+# `../../etc/agent` is a perfectly ordinary-looking agent id and a perfectly effective
+# path traversal, and `:new` writes a file that decides what an agent may do.
+_PROFILE_ID: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+# The scaffold. It opens with the comment the shipped profiles open with, and that is not
+# decoration: those files say "a profile is DATA - read top to bottom, this file answers
+# what this agent is allowed to do without opening any code", and a scaffold that dropped
+# the sentence would teach every agent made from it the opposite lesson.
+PROFILE_SCAFFOLD: Final[str] = '''# Scaffolded by the operator console (:new).
+#
+# Edit it - that is what it is for.
+#
+# A profile is DATA. Read top to bottom, this file answers "what is this agent allowed to
+# do" without opening any code. That readability is the point of having a governance
+# layer, so keep the comments honest as you change the values - the next person to read
+# this file is deciding whether to trust the agent it describes.
+
+id: {profile_id}
+
+persona: |
+  Say what this agent is for, how it should answer, and what it must never assume. The
+  persona is instructions to a model, not a description for a catalogue.
+
+model: minimax/MiniMax-M3
+
+# Tool PACKAGES this agent may use. Every name here must already be registered in
+# DEFAULT_TOOL_PACKAGES, or this profile is refused at LOAD rather than on its third turn
+# (docs/TASKS.md#t-f11-05). Adding a new package is the one thing in this file that is
+# code, because a tool is behaviour.
+toolsets: []
+
+# Tools this agent BORROWS from a third-party process. They arrive named
+# `mcp_<server>_<tool>`, obey the same ToolPolicy as a local tool, and get a smaller
+# result budget because the text they return is not ours (CLAUDE.md non-negotiable #4).
+mcp_servers: []
+
+# Skill namespaces whose index is put in the system prompt.
+skill_namespaces: []
+
+max_iterations: 10
+max_cost_usd: "0.10"
+
+# What this agent may not do without a person saying yes. `reason` is the sentence a human
+# is actually asked, so write it for them and not for us.
+approval_rules: []
+
+# Which other agents this one may ask. An empty list means NOBODY - that is the safe
+# default and also the usual reason an A2A setup "does not work". The allowlist is
+# two-sided: naming a peer here is not enough unless that peer names this agent back.
+peers:
+  enabled: false
+  peers: []
+'''
 
 
 class UnknownConsoleProfileError(KeyError):
@@ -207,33 +288,45 @@ class UnknownConsoleProfileError(KeyError):
 
 
 class Console:
-    """The REPL. One agent at a time, one session for the whole run.
+    """The REPL. One agent at a time, one session until `:resume` names another.
 
     INPUT AND OUTPUT ARE SEAMS, WHICH IS WHAT MAKES IT TESTABLE
         A REPL that can only be driven by a human typing at it is a REPL nobody tests, and
         this is the surface an operator forms their opinion of the system from.
         `read_line` returns `None` at end of input - a piped script, or ctrl-D.
 
-    THE SESSION IS FIXED FOR THE RUN so history accumulates across turns exactly as it does
-    for a real conversation. Switching agent with `:use` deliberately does NOT start a new
-    session: watching one agent pick up the thread another one left is an operator question
-    worth being able to ask, and `TurnRequest` carries the profile per turn anyway.
+    THE SESSION IS FIXED FOR THE RUN unless `:resume` moves it, so history accumulates
+    across turns exactly as it does for a real conversation. Switching agent with `:use`
+    deliberately does NOT start a new session: watching one agent pick up the thread
+    another one left is an operator question worth being able to ask, and `TurnRequest`
+    carries the profile per turn anyway.
+
+    `profiles` IS MUTABLE AND IS MUTATED IN PLACE BY `:reload`, WHICH IS THE WHOLE POINT
+        `StartTurn` holds the SAME mapping object, and it is the one that resolves the
+        profile a turn actually runs under. Rebinding only this console's reference would
+        make `:agents` show the new file while the turn kept running the old one - a
+        reload that half-applied, silently, in the direction nobody would check.
     """
 
     def __init__(
         self,
         *,
-        profiles: Mapping[str, AgentProfile],
+        profiles: MutableMapping[str, AgentProfile],
         tools: ToolProvider,
         policy: ToolPolicy,
         start_turn: TurnRunner,
-        tool_calls: ToolCallLog,
+        audit: AuditReader,
+        admin: AdminIdentity,
         caller: CallerIdentity,
         session: SessionRef,
         write_line: Callable[[str], None],
         read_line: Callable[[str], str | None],
         profile_id: str | None = None,
         new_turn_id: Callable[[], TurnId] = new_turn_id,
+        profiles_dir: Path | None = None,
+        load_profiles: ProfileLoader | None = None,
+        approvals: ApprovalDecider | None = None,
+        transcripts: TranscriptReader | None = None,
     ) -> None:
         if not profiles:
             raise UnknownConsoleProfileError(
@@ -251,16 +344,24 @@ class Console:
         self._tools = tools
         self._policy = policy
         self._start_turn = start_turn
-        self._tool_calls = tool_calls
+        self._audit = audit
+        self._admin = admin
         self._caller = caller
-        self._session = session
         self._write = write_line
         self._read = read_line
         self._new_turn_id = new_turn_id
+        self._profiles_dir = profiles_dir
+        self._load_profiles = load_profiles
+        self._approvals = approvals
+        self._transcripts = transcripts
 
         self.profile_id: str = resolved
+        # PUBLIC because `:resume` moves it and a caller has to be able to read where the
+        # conversation went. `profile_id` is public for the same reason.
+        self.session: SessionRef = session
         self._last_turn_id: TurnId | None = None
-        self._last_calls: tuple[ObservedToolCall, ...] = ()
+        self._last_calls: tuple[AuditedToolCall, ...] = ()
+        self._pending: tuple[PendingRequest, ...] = ()
 
     # -- the loop -----------------------------------------------------------------------
 
@@ -313,6 +414,10 @@ class Console:
                     self._agents()
                 case ":use":
                     self._use(argument)
+                case ":new":
+                    self._new(argument)
+                case ":reload":
+                    self._reload()
                 case ":profile":
                     self._profile()
                 case ":tools":
@@ -320,7 +425,19 @@ class Console:
                 case ":policy":
                     await self._policy_command(argument or None)
                 case ":audit":
-                    self._audit()
+                    self._audit_command()
+                case ":pending":
+                    self._pending_command()
+                case ":approve":
+                    await self._decide(argument, approved=True)
+                case ":refuse":
+                    await self._decide(argument, approved=False)
+                case ":sessions":
+                    await self._sessions()
+                case ":resume":
+                    self._resume(argument)
+                case ":trace":
+                    await self._trace(argument)
                 case ":help":
                     self._help()
                 case _:
@@ -361,9 +478,7 @@ class Console:
         self._write(f"now talking to {profile_id} (v{target.version}).")
         self._write(f"  persona:   {_first_line(previous.persona)}")
         self._write(f"          -> {_first_line(target.persona)}")
-        self._write(
-            f"  model:     {previous.model} -> {target.model}"
-        )
+        self._write(f"  model:     {previous.model} -> {target.model}")
         self._write(
             f"  toolsets:  {', '.join(previous.toolsets) or 'none'} -> "
             f"{', '.join(target.toolsets) or 'none'}"
@@ -377,6 +492,134 @@ class Console:
             "answer for this agent's surface."
         )
 
+    # -- making and editing an agent (t-f11-09) -----------------------------------------
+
+    def _new(self, profile_id: str) -> None:
+        """Scaffold one profile file. It does NOT load it - `:reload` does.
+
+        SCAFFOLDING AND LOADING ARE SEPARATE ON PURPOSE. A file written straight into the
+        running set would be an agent nobody read, assembled from a template, holding
+        whatever permissions the template happened to carry. Writing then reloading means
+        the operator opens the file first, which is the only review this path has.
+        """
+        if not profile_id:
+            self._write("usage: :new <id>. The id becomes the file name and the agent id.")
+            return
+        if self._profiles_dir is None:
+            self._write(
+                "cannot scaffold: this console has no profiles directory wired, so there "
+                "is nowhere to write the file. Start it with AGENT_CORE_PROFILES_DIR set."
+            )
+            return
+        if not _PROFILE_ID.fullmatch(profile_id):
+            self._write(
+                f"{profile_id!r} is not a usable profile id. Lower-case letters, digits "
+                "and underscores, starting with a letter. The id becomes a FILE NAME, and "
+                "a file name that can contain a path separator can be written outside the "
+                "profiles directory."
+            )
+            return
+        if profile_id in self._profiles:
+            self._write(
+                f"{profile_id!r} is already loaded. Edit its file and run :reload; "
+                "scaffolding over a live agent would replace what it is allowed to do."
+            )
+            return
+
+        path = self._profiles_dir / f"{profile_id}.yaml"
+        if path.exists():
+            self._write(
+                f"{path.name} already exists and is NOT overwritten. This file decides "
+                "what an agent may do, and a template is not a merge."
+            )
+            return
+
+        self._profiles_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            PROFILE_SCAFFOLD.format(profile_id=profile_id), encoding="utf-8", newline="\n"
+        )
+        self._write(f"wrote {path}")
+        self._write(
+            "  it names no toolsets, no peers and no approval rules yet, which is the "
+            "safe shape: every one of those is an allowlist where empty means nobody."
+        )
+        self._write("  read it, edit it, then :reload. It is not loaded until you do.")
+
+    def _reload(self) -> None:
+        """Re-read the whole directory, or change nothing at all.
+
+        ALL OR NOTHING, AND THE REFUSAL IS THE FEATURE. An agent is edited far more often
+        than it is invented, so this is the command that gets used - and a reload that
+        half-applied would leave the operator reading one profile while the turn ran
+        another. The loader answers with the WHOLE directory or it raises; on a raise the
+        previously loaded profiles stay exactly as they were and this says so.
+
+        IT MUTATES THE MAPPING IN PLACE. `StartTurn` holds the same object and it is the
+        one that decides which profile a turn actually runs under. See the class docstring.
+        """
+        if self._load_profiles is None:
+            self._write(
+                "cannot reload: this console has no profile loader wired. The loader is "
+                "what reads the directory and assigns versions (D20); without it the "
+                "console could only guess at both."
+            )
+            return
+
+        try:
+            loaded = self._load_profiles()
+        except Exception as error:
+            self._write(f"! the profiles directory did not load: {type(error).__name__}: {error}")
+            self._write(
+                f"  NOTHING CHANGED. The {len(self._profiles)} profile(s) loaded before "
+                "this command are still in force, and the turn you run next uses them. "
+                "Fix the file and run :reload again."
+            )
+            return
+
+        if not loaded:
+            self._write(
+                "! the directory loaded and holds no profiles at all. NOTHING CHANGED: an "
+                "empty set would leave this console with no agent to talk to."
+            )
+            return
+        if self.profile_id not in loaded:
+            self._write(
+                f"! {self.profile_id!r} is the agent in force and the reloaded directory "
+                "no longer has it. NOTHING CHANGED, because applying this would either "
+                "leave you talking to a profile that is gone or switch you to another "
+                f"agent silently. :use one of {', '.join(sorted(loaded))} first."
+            )
+            return
+
+        before = dict(self._profiles)
+        self._profiles.clear()
+        self._profiles.update(loaded)
+
+        added = sorted(set(loaded) - set(before))
+        removed = sorted(set(before) - set(loaded))
+        changed = sorted(
+            profile_id
+            for profile_id in set(loaded) & set(before)
+            if loaded[profile_id].content_hash != before[profile_id].content_hash
+        )
+
+        self._write(f"reloaded: {len(loaded)} profile(s) now in force.")
+        for profile_id in added:
+            self._write(f"  + {profile_id}  v{loaded[profile_id].version}  (new)")
+        for profile_id in removed:
+            self._write(f"  - {profile_id}  (gone from the directory)")
+        for profile_id in changed:
+            self._write(
+                f"  ~ {profile_id}  v{before[profile_id].version} -> "
+                f"v{loaded[profile_id].version}  (content changed, so the version moved)"
+            )
+        if not (added or removed or changed):
+            self._write("  nothing changed - every file resolved to what was already loaded.")
+        self._write(
+            "  a version moves only when what the agent may DO changes (D20), so "
+            "reformatting a file deliberately does not bump it."
+        )
+
     # -- inspection ---------------------------------------------------------------------
 
     def _profile(self) -> None:
@@ -388,8 +631,7 @@ class Console:
         """
         profile = self._profiles[self.profile_id]
         self._write(
-            f"profile {profile.id}  v{profile.version}  "
-            f"content={profile.content_hash[:12]}"
+            f"profile {profile.id}  v{profile.version}  content={profile.content_hash[:12]}"
         )
         self._write("  persona:")
         for line in profile.persona.splitlines():
@@ -398,9 +640,7 @@ class Console:
         self._write(f"  max_iterations:   {profile.max_iterations}")
         self._write(f"  max_cost_usd:     {profile.max_cost_usd}")
         self._write(f"  toolsets:         {', '.join(profile.toolsets) or 'none'}")
-        self._write(
-            f"  skill_namespaces: {', '.join(profile.skill_namespaces) or 'none'}"
-        )
+        self._write(f"  skill_namespaces: {', '.join(profile.skill_namespaces) or 'none'}")
 
         if profile.mcp_servers:
             self._write("  mcp_servers:")
@@ -442,9 +682,10 @@ class Console:
             f"max_bytes={media.max_bytes} evidence={media.allow_evidence_requests}"
         )
         peers = profile.peers
+        named = ", ".join(peer.agent_id for peer in peers.peers) or "NOBODY"
         self._write(
             f"  peers:            enabled={peers.enabled} max_hops={peers.max_hops} "
-            f"visibility={peers.visibility.value}"
+            f"visibility={peers.visibility.value} may_ask={named}"
         )
 
     async def _tools_command(self) -> None:
@@ -467,12 +708,18 @@ class Console:
         self._write(f"{profile.id} resolves to {len(names)} tool(s):")
         for name in names:
             decision = self._policy.decide(rules, name, {})
-            self._write(f"  {name:<28} {_verdict(decision)}")
+            fence = " UNTRUSTED-WRAPPED" if is_untrusted(name) else ""
+            self._write(f"  {name:<28} {_verdict(decision)}{fence}")
 
         advertised = self._policy.filter_toolset(rules, names)
         self._write(
             f"  advertised to the model: {len(advertised)} of {len(names)} "
             f"(a {Effect.DENY.value} tool is never shown to it)"
+        )
+        self._write(
+            "  UNTRUSTED-WRAPPED: whatever that tool returns is fenced in "
+            f"{UNTRUSTED_OPEN} delimiters and capped at the smaller budget before the "
+            "model sees it (CLAUDE.md non-negotiables #4 and #10)."
         )
 
     async def _policy_command(self, tool_name: str | None) -> None:
@@ -513,17 +760,12 @@ class Console:
             "map, and a rule can still decide differently on a real call."
         )
 
-    def _audit(self) -> None:
+    def _audit_command(self) -> None:
         if self._last_turn_id is None:
             self._write("no turn has run yet in this session, so there is nothing to show.")
             return
         self._write(f"tool calls of turn {self._last_turn_id}:")
         self._render_tool_calls(self._last_calls)
-        self._write(
-            "  (arguments are the redacted copy the sink stored - PgAuditSink keeps only "
-            "the fields a tool opted into - so an empty argument list does not mean the "
-            "model passed none)"
-        )
 
     def _help(self) -> None:
         self._write("commands:")
@@ -537,7 +779,7 @@ class Console:
     async def _turn(self, text: str) -> None:
         turn_id = self._new_turn_id()
         request = TurnRequest(
-            session=self._session,
+            session=self.session,
             caller=self._caller,
             profile_id=self.profile_id,
             input=UserInput(text=text),
@@ -554,7 +796,7 @@ class Console:
         # reproduce. Letting the read's failure reach `_dispatch` would throw it away.
         trail_error: str | None = None
         try:
-            self._last_calls = await self._tool_calls.for_turn(turn_id)
+            self._last_calls = await self._audit.tool_calls_for_turn(self._admin, turn_id)
         except Exception as error:
             self._last_calls = ()
             trail_error = f"{type(error).__name__}: {error}"
@@ -565,6 +807,7 @@ class Console:
         else:
             self._render_tool_calls(self._last_calls)
 
+        self._pending = outcome.pending if outcome.is_suspended else ()
         if outcome.is_suspended:
             self._render_suspension(outcome.pending)
             return
@@ -580,13 +823,18 @@ class Console:
             f"{usage.cached_tokens} cached, cost {usage.cost_usd})"
         )
 
-    def _render_tool_calls(self, calls: tuple[ObservedToolCall, ...]) -> None:
-        """Name, arguments in brief, the decision, and whether it ran.
+    def _render_tool_calls(self, calls: tuple[AuditedToolCall, ...]) -> None:
+        """A tool call WHOLE: who, when, what it was passed, and what the rule SAID.
+
+        t-f11-11. A name and an effect tell an operator that something was refused; they
+        do not tell them why, and "why" is a sentence the policy engine wrote and the
+        model or the human was handed. Rendering the name alone is how a refusal becomes
+        folklore.
 
         "Whether it ran" is a SEPARATE line from the effect on purpose. They are two facts
         and today they agree; the day `NEEDS_APPROVAL` stops refusing and starts suspending
-        (`runner.py`'s TODO(F3)) they stop agreeing, and an operator reading only the effect
-        would keep believing the old story.
+        they stop agreeing, and an operator reading only the effect would keep believing
+        the old story.
         """
         if not calls:
             self._write("  (no tool calls)")
@@ -594,22 +842,49 @@ class Console:
         for call in calls:
             ran = "executed" if call.executed else "NOT EXECUTED"
             rule = call.rule_id if call.rule_id is not None else "no matching rule"
+            self._write(f"  tool {call.tool_name} -> {call.effect.value} [{rule}] - {ran}")
             self._write(
-                f"  tool {call.tool_name}({_brief(call.arguments)}) "
-                f"-> {call.effect.value} [{rule}] - {ran}"
+                f"      at {call.at.isoformat()}  by subject={call.caller_subject_id}"
             )
-            if call.effect is Effect.NEEDS_APPROVAL:
+            if call.reason is None:
+                # `None` is a row written before migration 0022 gave the table a column
+                # for the sentence. It does NOT mean the rule said nothing, and rendering
+                # it as an empty reason would put words in an auditor's mouth.
                 self._write(
-                    "       needs_approval blocks the call this turn; suspending on it "
-                    "instead is not wired yet (F3)."
+                    "      reason: NOT RECORDED - this row predates migration 0022, which "
+                    "added the column. The rule was not silent; the table had nowhere to "
+                    "keep what it said."
                 )
+            else:
+                self._write(f"      reason: {call.reason}")
+            self._render_arguments(call.arguments)
+
+    def _render_arguments(self, arguments: Mapping[str, object]) -> None:
+        """Every argument, whole, one per line - and no second redaction pass.
+
+        t-f11-11. THE SINK ALREADY REDACTED THESE, through its per-tool allowlist, and
+        nothing here re-redacts: two redaction paths drift, and the drifting one is always
+        the one nobody reads until an incident. So an absent field means the tool never
+        opted into recording it, not that the model passed nothing - which is the sentence
+        below, printed every time, because an operator who guesses wrong about that guesses
+        in the direction of "the model did not do it".
+        """
+        if not arguments:
+            self._write(
+                "      arguments: none recorded. The sink keeps only the fields a tool "
+                "opted into, so this does not mean the model passed none."
+            )
+            return
+        self._write("      arguments (as the sink stored them, already redacted):")
+        for key in sorted(arguments):
+            self._write(f"        {key} = {arguments[key]!r}")
 
     def _render_suspension(self, pending: tuple[PendingRequest, ...]) -> None:
         """ADMIN audience - see the module docstring.
 
         The tool name and the `tool_call_id` are shown because answering the suspension is
         the operator's job and neither can be guessed. A USER-audience view of the same
-        turn shows THAT something is pending and nothing else.
+        turn shows THAT something is pending and nothing else - `:trace user` renders it.
         """
         self._write(f"SUSPENDED - waiting on {len(pending)} request(s):")
         for request in pending:
@@ -618,15 +893,349 @@ class Console:
                 f"tool_call_id={request.tool_call_id}"
             )
             self._write(f"      {request.reason}")
-            self._write(f"      arguments: {_brief(request.arguments)}")
+            self._render_arguments(request.arguments)
         self._write(
             "  (this view is ADMIN audience: a user is told only that something is "
-            "pending, never which tool)"
+            "pending, never which tool. `:trace user` shows you that projection.)"
+        )
+        self._write("  :pending repeats this list; :approve and :refuse answer one.")
+
+    # -- the approval path (t-f11-10) ---------------------------------------------------
+
+    def _pending_command(self) -> None:
+        """What the last turn is waiting on, and the truth about answering it from here.
+
+        THE HONEST PART IS THE SECOND HALF. This console calls `StartTurn` directly, so
+        `HumanGateway.publish` never ran and no correlation row exists for anything listed
+        here - which means `:approve` has no handle to take. Printing a queue and leaving
+        an operator to discover that by typing at it is exactly the "exercises less than
+        the real path" failure `_BANNER` exists to prevent.
+        """
+        if not self._pending:
+            self._write(
+                "nothing is pending: the last turn in this session finished, or no turn "
+                "has run yet."
+            )
+            return
+        self._write(f"pending in this session ({len(self._pending)}):")
+        for request in self._pending:
+            self._write(
+                f"  {request.kind.value}  tool={request.tool_name}  "
+                f"tool_call_id={request.tool_call_id}"
+            )
+            self._write(f"      {request.reason}")
+        self._write(
+            "  These were raised by a turn this console started DIRECTLY, so "
+            "HumanGateway.publish never ran and none of them has a correlation handle. "
+            ":approve takes the handle a human was given on the channel the request was "
+            "published on - a turn started through the workflow has one; these do not."
+        )
+
+    async def _decide(self, correlation_id: str, *, approved: bool) -> None:
+        """Answer one pending request YES or NO, as THIS caller. docs/DECISIONS.md#d25.
+
+        FOUR-EYES WILL USUALLY REFUSE HERE, AND THAT IS THE CONTROL WORKING
+            The operator sitting at this console is usually the operator who started the
+            turn, and D25's rule is that an approval must come from someone other than the
+            human who started it. So the common outcome of `:approve` from a terminal is a
+            refusal - and a refusal an operator cannot tell apart from a crash is a refusal
+            that gets worked around, which is how a control becomes decoration.
+
+            So this names the rule, names the two subjects, says which half of D25 fired,
+            and says what actually resolves it. It never retries, never re-asks under a
+            different identity, and offers no flag that would let one.
+
+        `:refuse` IS NEVER GATED. Refusing your own request removes a permission rather
+        than conferring one, and blocking it would leave the turn asleep with the one
+        person who wants it stopped unable to stop it. D25 gates `approved=True` only.
+        """
+        verb = "approve" if approved else "refuse"
+        if not correlation_id:
+            self._write(f"usage: :{verb} <correlation-id>. :pending says where one comes from.")
+            return
+        if self._approvals is None:
+            self._write(
+                "cannot answer: this console has no approval path wired. Deciding an "
+                "approval is the DecideApproval use case - it records the decision and "
+                "wakes the waiting turn - and the console holds one or it holds nothing."
+            )
+            return
+
+        try:
+            turn_id, tool_call_id = await self._approvals.execute(
+                correlation_id, self._caller.subject_id, approved, "answered from the console"
+            )
+        except FourEyesError as refused:
+            self._write("REFUSED by the four-eyes rule (docs/DECISIONS.md#d25) - not a fault.")
+            self._write(f"  grounds recorded: {refused}")
+            self._write(
+                f"  you are answering as subject={self._caller.subject_id!r}, which is "
+                "the identity this console runs every turn under. An approval must come "
+                "from someone other than the human who started the turn, and nothing here "
+                "can show that it did."
+            )
+            self._write(
+                "  the attempt IS on record: a rejected decision was appended before this "
+                "refusal, so the control can be shown to have fired."
+            )
+            self._write(
+                "  what resolves it: a SECOND person answers - another operator running "
+                "this console under their own --subject, or the human the request was "
+                "published to on the channel. :refuse is never blocked by this rule."
+            )
+            return
+        except UnknownCorrelationError as unknown:
+            self._write(f"no pending request answers to that handle: {unknown}")
+            self._write(
+                "  handles expire, and one that is not yours resolves to nothing on "
+                "purpose. Nothing was recorded and no turn was woken."
+            )
+            return
+
+        answer = "APPROVED" if approved else "REFUSED"
+        self._write(f"{answer} - recorded, and the waiting turn was signalled.")
+        self._write(f"  turn={turn_id}  tool_call_id={tool_call_id}")
+        self._write(
+            "  the turn resumes in whichever process holds it. This console started no "
+            "workflow, so watch it there and not here."
+        )
+
+    # -- sessions and the trace (t-f11-12, t-f11-13) ------------------------------------
+
+    async def _sessions(self) -> None:
+        """The inbox, ADMIN audience, with the ones stuck on a human marked.
+
+        A console that can only start fresh cannot reach a long conversation, and
+        compaction only has anything to do on a long one - so this is the command that
+        makes CLAUDE.md's compaction row in the silent-bug table reachable by a person.
+        """
+        if self._transcripts is None:
+            self._write(
+                "cannot list conversations: this console has no transcript reader wired. "
+                "The conversation list is TranscriptReader's projection, and the console "
+                "must not assemble a second one out of SQL."
+            )
+            return
+
+        rows, cursor = await self._transcripts.list_conversations(
+            self.session.tenant_id, Audience.ADMIN
+        )
+        if not rows:
+            self._write(f"no conversations in tenant {self.session.tenant_id}.")
+            return
+
+        self._write(f"{len(rows)} conversation(s) in tenant {self.session.tenant_id}:")
+        for row in rows:
+            marker = "*" if row.session.session_id == self.session.session_id else " "
+            waiting = (
+                f"  WAITING ON A HUMAN since {row.waiting_since.isoformat()}"
+                if row.is_suspended and row.waiting_since is not None
+                else "  WAITING ON A HUMAN"
+                if row.is_suspended
+                else ""
+            )
+            self._write(
+                f" {marker} {row.session.session_id}  agent={row.profile_id}  "
+                f"messages={row.message_count}  last={row.last_activity_at.isoformat()}"
+                f"{waiting}"
+            )
+            if row.total_cost_usd is not None:
+                self._write(f"      cost so far: {row.total_cost_usd}")
+        if cursor is not None:
+            self._write(f"  more follow this page (cursor {cursor}).")
+        self._write("  (* is this console's session; :resume <id> moves to another)")
+
+    def _resume(self, session_id: str) -> None:
+        """File the next turns under another session. t-f11-12.
+
+        THE LAST TURN'S STATE IS DROPPED, AND DROPPING IT IS THE POINT. `:audit`,
+        `:pending` and `:trace` all answer "the last turn"; keeping the old one after the
+        conversation moved would answer a question about session A while the prompt said
+        B, and an operator reading a trail attributed to the wrong conversation is worse
+        off than one reading none.
+        """
+        if not session_id:
+            self._write("usage: :resume <session-id>. :sessions lists them.")
+            return
+
+        previous = self.session
+        self.session = SessionRef(
+            session_id=SessionId(session_id),
+            # THE TENANT IS THIS CONSOLE'S, never one typed at a prompt. `SessionRef`
+            # carries the tenant so a session can never be named without one, and the
+            # tenant predicate in every query comes from it - letting an operator type one
+            # would turn this command into cross-tenant read access.
+            tenant_id=previous.tenant_id,
+        )
+        self._last_turn_id = None
+        self._last_calls = ()
+        self._pending = ()
+        self._write(
+            f"now writing to session {self.session.session_id} in tenant "
+            f"{self.session.tenant_id} (was {previous.session_id})."
         )
         self._write(
-            "  answering it is not a console command: an approval is decided through "
-            "POST /decisions/{corr_id} and evidence through POST /evidence/{corr_id}."
+            "  history for that session is loaded by the next turn, from the store. The "
+            "last turn's audit, pending list and trace were dropped: they belonged to the "
+            "conversation you just left."
         )
+
+    async def _trace(self, argument: str) -> None:
+        """The last turn as `TranscriptReader` projects it, in EITHER audience. t-f11-13.
+
+        THIS IS THE ONLY PRACTICAL CHECK ON NON-NEGOTIABLE #11, whose two halves pull
+        against each other: a user must see THAT something is pending and must never learn
+        WHICH tool. Nothing fails a test when a projection gets that wrong; an operator
+        looking at the user's own view does see it.
+
+        THE GRID IS INDEXED, NOT CONSULTED WITH A FALLBACK. `VISIBILITY` is declared TOTAL
+        over EntryKind x Audience for exactly this reason, so `VISIBILITY[kind][audience]`
+        raises on a kind nobody decided instead of defaulting - and a default here is how a
+        new EntryKind becomes user-visible with nobody having chosen that.
+        """
+        audience = _AUDIENCES.get(argument.lower()) if argument else Audience.ADMIN
+        if audience is None:
+            self._write(
+                f"usage: :trace [user|admin]. {argument!r} is neither, and there is no "
+                "third audience - domain/transcript.py declares exactly two."
+            )
+            return
+        if self._transcripts is None:
+            self._write(
+                "cannot trace: this console has no transcript reader wired. The trace is "
+                "TranscriptReader's projection or it is nothing - a view the console "
+                "rendered from its own memory would agree with itself by construction."
+            )
+            return
+
+        page = await self._transcripts.page(self.session, audience)
+        entries = tuple(
+            entry
+            for entry in page.entries
+            if self._last_turn_id is None or entry.turn_id == self._last_turn_id
+        )
+        scope = (
+            f"turn {self._last_turn_id}"
+            if self._last_turn_id is not None
+            else "the whole page - no turn has run in this console since :resume"
+        )
+        self._write(
+            f"trace of {scope}, session {self.session.session_id}, "
+            f"audience={audience.value}:"
+        )
+        if not entries:
+            self._write(
+                "  (the projection returned nothing for this scope. transcript_entries is "
+                "written by the transcript projection, not by a turn this console ran.)"
+            )
+        for entry in entries:
+            self._render_entry(entry, audience)
+
+        withheld = sorted(
+            kind.value for kind in EntryKind if not VISIBILITY[kind][audience]
+        )
+        self._write(
+            f"  withheld from audience={audience.value}: {', '.join(withheld) or 'nothing'}"
+        )
+        if audience is Audience.USER:
+            self._write(
+                "  a user sees a pending_placeholder and never a pending_request: THAT "
+                "something is pending, never WHICH tool (CLAUDE.md non-negotiable #11). "
+                "If a tool name appears above, the projection is leaking and the grid is "
+                "not what stopped it."
+            )
+
+    def _render_entry(self, entry: TranscriptEntry, audience: Audience) -> None:
+        """One timeline row, checked against the grid before a single byte of it prints.
+
+        The check is not belt and braces. `VISIBLE_TO` is what the READER filters with, and
+        an operator asking for the user's view is asking whether that filter is right - so
+        re-deriving the answer from the grid here is the whole assertion. A row that should
+        not be in this projection is reported, loudly, and its payload is NOT printed.
+        """
+        if not VISIBILITY[entry.kind][audience]:
+            self._write(
+                f"  ! LEAK: the projection returned a {entry.kind.value} for "
+                f"audience={audience.value}, which VISIBILITY forbids. Its payload is not "
+                "printed here. Non-negotiable #11 is not holding."
+            )
+            return
+
+        head = f"  {entry.at.isoformat()}  {entry.kind.value}"
+        if entry.cost_usd is not None:
+            head = f"{head}  cost={entry.cost_usd}"
+        self._write(head)
+
+        payload = entry.payload
+        match entry.kind:
+            case EntryKind.USER_MESSAGE | EntryKind.AGENT_MESSAGE | EntryKind.REASONING:
+                for line in str(payload.get("text", "")).splitlines() or [""]:
+                    self._write(f"      {line}")
+            case EntryKind.TOOL_CALL:
+                self._write(f"      tool {payload.get('tool_name')}")
+                self._render_arguments(_as_arguments(payload.get("arguments")))
+            case EntryKind.TOOL_RESULT:
+                self._render_result(
+                    str(payload.get("tool_name", "")), str(payload.get("result", ""))
+                )
+            case EntryKind.PENDING_PLACEHOLDER:
+                self._write(
+                    "      something is pending. The tool is deliberately not named: this "
+                    "is the substitute a USER is handed instead of the request."
+                )
+            case _:
+                for key in sorted(payload):
+                    self._write(f"      {key} = {payload[key]!r}")
+
+    def _render_result(self, tool_name: str, text: str) -> None:
+        """A tool's RESULT, and the untrusted boundary drawn as a boundary. t-f11-11.
+
+        UNTRUSTED-CONTENT WRAPPING IS IN CLAUDE.md's SILENT-BUG TABLE: it surfaces only
+        under an injection attempt, which means a human looking at the fence is the only
+        check it will ever get. So the fence is rendered AS a fence rather than as two
+        stray tags inside a wall of text, and the three cases are kept apart:
+
+          - fenced, from an untrusted tool           the boundary is drawn and named
+          - NOT fenced, from an untrusted tool       reported as a defect, loudly. Either
+                                                     the result skipped the wrapping or a
+                                                     new prefix was added without it, and
+                                                     both are non-negotiables #4 and #10
+                                                     failing silently
+          - not fenced, from a local tool            ordinary, and said to be ordinary
+
+        A peer agent's answer is the same case as an MCP result (non-negotiable #10), and
+        it reaches here through the same `ask_peer` tool name, so it takes the same path.
+        """
+        untrusted_tool = is_untrusted(tool_name)
+        opened = text.find(UNTRUSTED_OPEN)
+        closed = text.rfind(UNTRUSTED_CLOSE)
+
+        if opened == -1 or closed == -1 or closed < opened:
+            if untrusted_tool:
+                self._write(
+                    f"      result from {tool_name} - UNTRUSTED TOOL, AND NO DELIMITERS "
+                    "ARE PRESENT. The model was handed this without the boundary "
+                    "non-negotiables #4 and #10 require. Treat it as a defect, not as "
+                    "formatting."
+                )
+            else:
+                self._write(f"      result from {tool_name} (local tool, not fenced):")
+            for line in text.splitlines() or [""]:
+                self._write(f"        {line}")
+            return
+
+        body = text[opened + len(UNTRUSTED_OPEN) : closed]
+        self._write(
+            f"      result from {tool_name} - fenced as untrusted before the model saw "
+            "it. Everything between the rules below is DATA, never instructions:"
+        )
+        self._write(f"      +-- {UNTRUSTED_OPEN} " + "-" * 28)
+        for line in body.strip("\n").splitlines() or [""]:
+            self._write(f"      | {line}")
+        self._write(f"      +-- {UNTRUSTED_CLOSE} " + "-" * 28)
+        trailing = text[closed + len(UNTRUSTED_CLOSE) :].strip()
+        if trailing:
+            self._write(f"      (after the fence: {trailing})")
 
     # -- helpers ------------------------------------------------------------------------
 
@@ -641,29 +1250,29 @@ class Console:
         return (
             f"caller: subject={self._caller.subject_id} tenant={self._caller.tenant_id} "
             f"channel={self._caller.channel} roles={roles}  |  session="
-            f"{self._session.session_id}  |  agent={self.profile_id}"
+            f"{self.session.session_id}  |  agent={self.profile_id}"
         )
+
+
+# The two audiences, by the name an operator types. Derived from the enum so a third one
+# would appear here the moment it existed - but `:trace` still refuses anything not in it,
+# which is the same refusal `VISIBILITY` makes one layer down.
+_AUDIENCES: Final[dict[str, Audience]] = {audience.value: audience for audience in Audience}
+
+
+def _as_arguments(value: object) -> Mapping[str, object]:
+    """A payload's `arguments` as a mapping, or an empty one.
+
+    `TranscriptEntry.payload` is deliberately loose (`dict[str, object]`), so what comes
+    back under a key is whatever the projection put there. Narrowing it here rather than
+    casting keeps a malformed row from crashing a rendering loop an operator is reading.
+    """
+    return value if isinstance(value, Mapping) else {}
 
 
 def _verdict(decision: PolicyDecision) -> str:
     rule = decision.rule_id if decision.rule_id is not None else "no matching rule"
     return f"{decision.effect.value:<15} [{rule}]"
-
-
-def _brief(arguments: Mapping[str, object]) -> str:
-    """Arguments, short enough to read in a terminal and long enough to tell two apart.
-
-    The full payload is in `audit_tool_calls`; this is a glance, not a record.
-    """
-    if not arguments:
-        return ""
-    parts = []
-    for key in sorted(arguments):
-        value = repr(arguments[key])
-        if len(value) > _ARGUMENT_CHARS:
-            value = f"{value[:_ARGUMENT_CHARS]}..."
-        parts.append(f"{key}={value}")
-    return ", ".join(parts)
 
 
 def _first_line(text: str) -> str:

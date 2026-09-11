@@ -48,10 +48,10 @@ WHAT IT DELIBERATELY DOES NOT DO
     deployment is configured is not a preflight.
 
     It DOES compose each profile's toolsets, because that is the question `StartTurn` step
-    3 asks and the only honest way to answer "is this profile servable". Today that reaches
-    nothing; the day MCP composition lands (t-f6-05) it will open those transports, which
-    is what a readiness report should say about a declared server - and is why the
-    composition is bounded by a timeout.
+    3 asks and the only honest way to answer "is this profile servable" - and, for a
+    profile that declares an MCP server, it goes one step further and actually asks the
+    server for its tools (t-f11-36), because composing alone never connects to one: a
+    dead server would otherwise pass silently and only be noticed at the first real turn.
 """
 
 from __future__ import annotations
@@ -69,8 +69,10 @@ from agent_core.adapters.driven.llm_litellm.models import (
     ModelEndpointUnavailableError,
     model_for,
 )
+from agent_core.adapters.driven.mcp.toolsets import server_prefix
+from agent_core.adapters.driven.persistence_pg.migrations import dbos_system_database
 from agent_core.adapters.driven.tools.provider import (
-    MCPNotComposedYetError,
+    LocalToolProvider,
     ToolsetBuilder,
     UnknownToolsetError,
     build_tool_provider,
@@ -99,12 +101,6 @@ _MODEL = "model"
 # Connecting to diagnose, not to work. Short, because a preflight that hangs for the
 # driver's default is a preflight nobody waits for.
 _CONNECT_TIMEOUT_SECONDS = 5
-
-# The second logical database `composition.ensure_databases` creates, by the convention the
-# whole repository uses. Restated rather than imported for the reason composition.py gives
-# about every other private constant it restates: reaching into another module's private
-# name from a reporting tool couples the two.
-_DBOS_DATABASE_SUFFIX = "_dbos"
 
 # How long one profile gets to compose its toolsets. Local packages are pure construction
 # and take none of it; an MCP transport is what this bound is for - see `_profile_checks`.
@@ -312,7 +308,7 @@ def _database_checks(settings: Settings, facts: _DatabaseFacts) -> list[Check]:
                 ),
                 remedy=(
                     f'CREATE DATABASE "{database}";\n'
-                    f'CREATE DATABASE "{database}{_DBOS_DATABASE_SUFFIX}";\n'
+                    f'CREATE DATABASE "{dbos_system_database(database)}";\n'
                     "Or set AGENT_CORE_ADMIN_DATABASE_URL to an administrative connection "
                     "string and start once: startup creates both and migrates them, "
                     "idempotently. It is optional on purpose - the app never needs "
@@ -375,19 +371,39 @@ def _database_checks(settings: Settings, facts: _DatabaseFacts) -> list[Check]:
             )
         )
 
-    dbos_database = f"{database}{_DBOS_DATABASE_SUFFIX}"
+    # THE NAME COMES FROM ITS ONE OWNER. `migrations.dbos_system_database` derives this
+    # the way dbos 2.31.1 derives it - by appending `_dbos_sys` to the app URL - and
+    # `ensure_databases` creates exactly this one (t-f11-20). A second constant here,
+    # even a correct one today, is the defect this replaces: the name drifted once
+    # already when the bootstrap moved and nothing here noticed.
+    dbos_database = dbos_system_database(database)
     present = _database_exists(settings.app_conninfo, dbos_database)
+    if present is True:
+        # REPORTED WHEN IT IS FINE, not only when it is missing. Every other check in this
+        # file prints `[ ok ]` on success, and this one stayed silent - so a reader could
+        # not tell whether the durable engine's database had been checked and passed, or
+        # never checked at all. Those look identical in a report and mean opposite things,
+        # and this check in particular spent a whole phase looking at the wrong name
+        # (t-f11-20): silence is exactly how that survived.
+        checks.append(
+            Check(
+                category=_DATABASE,
+                name=f"database {dbos_database}",
+                severity="ok",
+                detail="present - this is the one dbos derives from the app URL and opens",
+            )
+        )
     if present is False:
         checks.append(
             Check(
                 category=_DATABASE,
                 name=f"database {dbos_database}",
-                # A WARNING and not a failure. The durable engine derives its own system
-                # database from the app URL and creates it at launch, so a deployment
-                # missing this one can still take a turn - see docs/TASKS.md#t-f11-20,
-                # which owns the question of which of the two is the real one.
+                # A WARNING and not a failure. The durable engine's own creation is best
+                # effort and runs at launch (`migrations.ensure_databases`'s docstring), so
+                # a deployment missing this one can still take a turn - until that launch
+                # fails too, for the same reason (no CREATE DATABASE privilege).
                 severity="warn",
-                detail="the second logical database the bootstrap creates is not there",
+                detail="the database dbos derives from the app URL and opens is not there",
                 remedy=(
                     "Set AGENT_CORE_ADMIN_DATABASE_URL for one start, or "
                     f'CREATE DATABASE "{dbos_database}";'
@@ -473,10 +489,14 @@ async def _profile_checks(
     a report names every one of them.
 
     THE TIMEOUT IS NOT DEFENSIVE PADDING. Composing a local toolset is pure construction and
-    cannot block. Composing an MCP toolset (t-f6-05) opens a transport, and the day that
-    lands, this check becomes a REACHABILITY check for every declared server - which is what
-    a preflight should say about one, and also the only way this can hang. Bounded, a server
-    that does not answer is one line in the report instead of a process that never starts.
+    cannot block. `provider.toolset_for` never opens an MCP transport either - it only
+    CONSTRUCTS the guarded wrapper (`adapters/driven/mcp/toolsets.py`: "toolset_for
+    returns" even for a dead server) - so `MCPNotComposedYetError` cannot reach here since
+    t-f11-28: `build_tool_provider` always supplies an MCP collaborator, and a bare
+    `LocalToolProvider` with none is not what this function builds. The bound stays for
+    the same reason a seatbelt stays on a car that has not crashed yet: something a
+    profile names can still make composition wait, and a server that does not answer is
+    one line in the report instead of a process that never starts.
     """
     provider = build_tool_provider(packages)
     checks: list[Check] = []
@@ -499,21 +519,6 @@ async def _profile_checks(
                         "shipping the profile. Unregistered, every turn under it dies at "
                         "StartTurn step 3 - after the model has been paid for. Registered "
                         f"here: {', '.join(sorted(packages))}."
-                    ),
-                )
-            )
-        except MCPNotComposedYetError:
-            servers = ", ".join(repr(server.name) for server in profile.mcp_servers)
-            checks.append(
-                Check(
-                    category=_PROFILE,
-                    name=f"profile {profile_id}",
-                    severity="fail",
-                    detail=f"declares MCP servers this process cannot compose: {servers}",
-                    remedy=(
-                        "The tool provider this container wires is the local-only one, so "
-                        "every turn under this profile raises MCPNotComposedYetError. Wire "
-                        "the MCP toolset (docs/TASKS.md#t-f6-05) or remove the server."
                     ),
                 )
             )
@@ -555,6 +560,55 @@ async def _profile_checks(
                     detail=f"servable: toolsets {named}",
                 )
             )
+            if profile.mcp_servers:
+                checks.extend(await _mcp_reachability_checks(provider, profile_id, profile))
+    return checks
+
+
+async def _mcp_reachability_checks(
+    provider: LocalToolProvider, profile_id: str, profile: AgentProfile
+) -> list[Check]:
+    """One WARNING per declared MCP server nothing reached at startup.
+
+    THIS IS THE REACHABILITY CHECK THE DEAD `MCPNotComposedYetError` BRANCH LOOKED LIKE IT
+    WAS. `toolset_for` composes without connecting - a dead server costs the profile only
+    that server's tools, deliberately (`_GuardedToolset.get_tools` logs at WARNING and
+    keeps going, `adapters/driven/mcp/toolsets.py`: "AN UNREACHABLE SERVER IS A DEGRADED
+    START, NOT A REFUSAL"). Silent is the right call for a running turn nobody is watching
+    the logs of at that moment; silent in a report nobody ran to find out what is wrong is
+    the opposite call, so this asks the one method that actually reaches the server -
+    `tool_names_for`, which discovers or reads the schema cache - and turns a swallowed
+    warning into a line an operator sees before a turn ever needs this profile.
+
+    A WARNING, not a failure: the profile still starts and serves its local tools, exactly
+    as a real turn would.
+    """
+    try:
+        names = await asyncio.wait_for(
+            provider.tool_names_for(profile), timeout=_COMPOSE_TIMEOUT_SECONDS
+        )
+    except Exception:  # noqa: BLE001 - a report must survive any provider, same as above
+        return []
+
+    checks: list[Check] = []
+    for server in profile.mcp_servers:
+        prefix = f"{server_prefix(server.name)}_"
+        if any(name.startswith(prefix) for name in names):
+            continue
+        checks.append(
+            Check(
+                category=_PROFILE,
+                name=f"mcp server {server.name} (profile {profile_id})",
+                severity="warn",
+                detail="did not answer at startup; the profile runs with only its local "
+                "tools until it does",
+                remedy=(
+                    f"Confirm the process behind {server.name!r} is up and reachable from "
+                    "here. This is a degraded start, not a refusal - a turn under this "
+                    "profile proceeds without this server's tools rather than waiting."
+                ),
+            )
+        )
     return checks
 
 

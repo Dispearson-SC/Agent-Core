@@ -87,15 +87,7 @@ from collections.abc import Awaitable, Callable, Mapping, MutableMapping, Sequen
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from agent_core.adapters.driven.knowledge_pg.admin import PgKnowledgeAdmin
-from agent_core.adapters.driven.persistence_pg.transcript_repository import (
-    PgTranscriptReader,
-)
-from agent_core.adapters.driving.cli.console import (
-    Console,
-    ObservedToolCall,
-    ToolCallLog,
-)
+from agent_core.adapters.driving.cli.console import Console
 from agent_core.adapters.driving.cli.preflight import preflight
 from agent_core.adapters.driving.http.admin_routes import (
     AdminAuthenticator,
@@ -116,9 +108,9 @@ from agent_core.application.decide_approval import DecideApproval
 from agent_core.application.ingest_media import IngestMedia
 from agent_core.composition import (
     Container,
-    PoolConnections,
     Settings,
     build_container,
+    load_profiles,
     start_container,
 )
 from agent_core.domain.knowledge import CollectionId
@@ -130,7 +122,6 @@ from agent_core.domain.turn import (
     TurnId,
     TurnRequest,
 )
-from agent_core.ports.audit_reader import AuditReader
 from agent_core.ports.knowledge_admin import (
     AdminIdentity,
     AdminSubjectId,
@@ -316,23 +307,13 @@ def build_app(
         ),
     )
 
-    # THESE TWO SEATS BELONG ON `Container`, NOT HERE. `composition.py` is the one place
-    # that chooses a driven adapter, and it has no `transcript_reader` or
-    # `knowledge_admin` field yet. Mounting a router against nothing is the same as not
-    # mounting it, so they are built here, from the container's OWN domain pool, and this
-    # comment is the debt. When the container grows the seats, both lines become
-    # `container.transcript_reader` / `container.knowledge_admin` and the two adapter
-    # imports at the top of this file go away with them.
-    reader = (
-        PgTranscriptReader(PoolConnections(container.domain_pool))
-        if transcript_reader is None
-        else transcript_reader
-    )
-    admin = (
-        PgKnowledgeAdmin(PoolConnections(container.domain_pool))
-        if knowledge_admin is None
-        else knowledge_admin
-    )
+    # t-f11-33. THE DEBT THIS COMMENT USED TO RECORD IS PAID. Both of these were built
+    # HERE, from the container's own domain pool, because `Container` had no seat for
+    # either - which made this file the only module outside `composition.py` that chose a
+    # driven adapter. It now has both seats, so the choice is back in the one place that
+    # is allowed to make it and the two adapter imports are gone from the top of this file.
+    reader = container.transcripts if transcript_reader is None else transcript_reader
+    admin = container.knowledge_admin if knowledge_admin is None else knowledge_admin
 
     app.include_router(create_transcript_router(reader=reader))
     app.include_router(
@@ -362,9 +343,11 @@ def build_app(
 # of a missing port (`ports/audit_reader.py`), and the next consumer declares a second one.
 #
 # `AuditReader` is that port (t-f11-08) and `Container.audit_reader` is its seat
-# (t-f11-18), so what is left here is a PROJECTION and not an adapter: the console's
-# `ObservedToolCall` is a narrower shape than the port's `AuditedToolCall`, and translating
-# between two already-chosen types is not choosing one. No connection string, no statement,
+# (t-f11-18), and nothing at all is left here: the console takes the port directly. A
+# projection lived here briefly, narrowing `AuditedToolCall` onto a shape the console had
+# declared before the port existed - and it dropped migration 0022's `reason`, the sentence
+# the winning rule actually said, because that older shape had no field for one. Deleting
+# the duplicate shape is what let the sentence through. No connection string, no statement,
 # no second opinion about which pool the trail is read through.
 
 # The channel a console turn is attributed to. NOT `http`: policy rules can be scoped by
@@ -403,41 +386,6 @@ def _console_audit_admin(environ: Mapping[str, str] | None = None) -> AdminIdent
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _AuditTrailToolCallLog:
-    """The console's `ToolCallLog`, answered by the container's `AuditReader`.
-
-    A PROJECTION, NOT AN ADAPTER. It chooses nothing: the reader is the container's, the
-    identity is the process's, and all this does is narrow `AuditedToolCall` to the four
-    fields `console.ObservedToolCall` declares. The day the console takes `AuditReader`
-    directly (t-f11-11 renders arguments and results, and `reason` is the field it will
-    want), this type goes away rather than growing.
-
-    `reason` IS DROPPED HERE AND THAT IS A LOSS WORTH NAMING. Migration 0022 gave the trail
-    the sentence the winning rule actually said, and `ObservedToolCall` predates it and has
-    no field for one. Nothing is invented to fill the gap; the console renders what its own
-    type can hold until that type widens.
-    """
-
-    reader: AuditReader
-    admin: AdminIdentity
-
-    async def for_turn(self, turn_id: TurnId) -> tuple[ObservedToolCall, ...]:
-        recorded = await self.reader.tool_calls_for_turn(self.admin, turn_id)
-        return tuple(
-            ObservedToolCall(
-                tool_name=call.tool_name,
-                # Already redacted by `PgAuditSink._redact` - nothing re-redacts, because
-                # two redaction paths drift and the drifting one is always the one nobody
-                # reads until an incident.
-                arguments=dict(call.arguments),
-                effect=call.effect,
-                rule_id=call.rule_id,
-            )
-            for call in recorded
-        )
-
-
 def _stdin_reader() -> Callable[[str], str | None]:
     """`input()`, with both ways out of a REPL reported as end of input.
 
@@ -464,7 +412,6 @@ def build_console(
     channel: str = _CONSOLE_CHANNEL_ID,
     roles: frozenset[str] = frozenset(),
     session_id: SessionId | None = None,
-    tool_calls: ToolCallLog | None = None,
     write_line: Callable[[str], None] = print,
     read_line: Callable[[str], str | None] | None = None,
 ) -> Console:
@@ -486,21 +433,57 @@ def build_console(
     console inspects the tenant this deployment actually serves. The session id is fresh
     per run unless one is named: reusing a real conversation's id would append console
     experiments to a customer's history.
+
+    SIX OF THE THIRTEEN COMMANDS WERE INERT IN THE SHIPPED PROCESS UNTIL t-f11-33
+        `profiles_dir`, `load_profiles`, `approvals` and `transcripts` were passed for
+        none of them, so `:new`, `:reload`, `:approve`, `:refuse`, `:sessions` and
+        `:trace` - every command for MAKING an agent and every command for JUDGING one -
+        answered "this console has no ... wired" from `python -m agent_core console`. The
+        surface behind them (t-f11-09 .. t-f11-13) was finished, tested and green, because
+        `tests/unit/test_console.py` constructs the console itself and passes every one of
+        those seats. A fixture that supplies the missing piece is exactly what stops
+        anyone noticing it is missing; the acceptance run
+        (`tests/integration/test_cli_acceptance.py`) drives this function instead, and
+        found all six on its first execution.
     """
     return Console(
         profiles=container.profiles,
         tools=container.tools,
         policy=container.policy,
         start_turn=container.start_turn,
-        tool_calls=(
-            # t-f11-18. The container's OWN reader, on the audit pool it was built with -
-            # never a second one assembled here from a connection string.
-            _AuditTrailToolCallLog(
-                reader=container.audit_reader, admin=_console_audit_admin()
-            )
-            if tool_calls is None
-            else tool_calls
+        # t-f11-33. `:new` writes here and `:reload` re-reads here - the SAME directory
+        # this container loaded from, never a second opinion about where profiles live.
+        profiles_dir=container.settings.profiles_dir,
+        # t-f11-33. `:reload`, bound to the composition root's own loader and to this
+        # container's version REGISTRY (D20). The registry is what makes the reload
+        # meaningful: a fresh one would restart numbering at 1, so an edited profile would
+        # be filed under a version that already means something else in the audit trail.
+        # The console never learns that a profile is a YAML file on a disk - `yaml` is
+        # banned outside `adapters/`, and this callable is the whole of the seam.
+        load_profiles=lambda: load_profiles(
+            container.settings.profiles_dir, container.profile_versions
         ),
+        # t-f11-33 / D25. The container's OWN `DecideApproval`, so the console answers a
+        # pending request through the same use case `POST /decisions/{corr_id}` does - one
+        # correlation table, one audit sink, one four-eyes rule.
+        #
+        # NON-NEGOTIABLE #9 IS NOT BENT BY THIS SEAT. `DecideApproval.execute` takes a
+        # `subject_id` string and decides with it; it is handed no `AdminIdentity` and
+        # mints none. D25's four-eyes rule will usually REFUSE a one-operator console -
+        # the operator asking is the operator approving - and that refusal is CORRECT and
+        # says so by name (`FourEyesError`, caught and rendered by the console). Nothing
+        # here works around it; a console that could approve its own requests would be the
+        # rule deleted rather than enforced.
+        approvals=container.decide_approval,
+        # t-f11-33. `:sessions` and `:trace`, on the container's reader - the same one the
+        # transcript router is mounted against (`build_app`), so what an operator reads
+        # here is what an HTTP caller would read, in whichever `Audience` they ask for
+        # (non-negotiable #11).
+        transcripts=container.transcripts,
+        # t-f11-18. The container's OWN reader, on the audit pool it was built with -
+        # never a second one assembled here from a connection string.
+        audit=container.audit_reader,
+        admin=_console_audit_admin(),
         caller=CallerIdentity(
             subject_id=subject_id,
             channel=channel,

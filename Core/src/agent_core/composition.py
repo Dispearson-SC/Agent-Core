@@ -160,7 +160,7 @@ import json
 import os
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final
 
@@ -173,8 +173,10 @@ from agent_core.adapters.driven.agent_pydantic.runner import PydanticAgentRunner
 from agent_core.adapters.driven.context.engine import LadderContextEngine
 from agent_core.adapters.driven.context.summariser import ModelSummariser
 from agent_core.adapters.driven.human.gateway import ChannelHumanGateway
+from agent_core.adapters.driven.knowledge_pg.admin import PgKnowledgeAdmin
 from agent_core.adapters.driven.llm_litellm.gateway import LiteLLMGateway
 from agent_core.adapters.driven.media_fs.store import FilesystemMediaStore
+from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
 from agent_core.adapters.driven.persistence_pg.audit_read_repository import (
     PgAuditReadRepository,
 )
@@ -187,9 +189,13 @@ from agent_core.adapters.driven.persistence_pg.migrations import (
     ensure_databases,
 )
 from agent_core.adapters.driven.persistence_pg.policy_repository import PgToolPolicy
+from agent_core.adapters.driven.persistence_pg.transcript_repository import (
+    PgTranscriptReader,
+)
 from agent_core.adapters.driven.policy_fs.loader import apply_policy_rules, load_policy_rules
 from agent_core.adapters.driven.profiles_fs.loader import load_profile_sync
 from agent_core.adapters.driven.skills_fs.registry import FilesystemSkillRegistry
+from agent_core.adapters.driven.tools import peers as peer_tools
 from agent_core.adapters.driven.tools.fraud import tools as fraud_tools
 from agent_core.adapters.driven.tools.provider import (
     DEFAULT_TOOL_PACKAGES,
@@ -234,6 +240,9 @@ from agent_core.domain.turn import (
     ToolCallId,
     TurnId,
 )
+from agent_core.ports.agent_mailbox import AgentMailbox
+from agent_core.ports.knowledge_admin import KnowledgeAdmin
+from agent_core.ports.transcript_reader import TranscriptReader
 
 __all__ = [
     "PINNED_DBOS_APPLICATION_VERSION",
@@ -280,6 +289,23 @@ _DEFAULT_APP_CONNINFO = "postgresql://localhost/agent_core_app"
 # Read as a FALLBACK under the real environment; see `_read_env_file` and `Settings.from_env`.
 _DEFAULT_ENV_FILE = _CORE_ROOT.parent / ".env"
 
+# t-f11-34. THE MECHANISM TOOLSET, AND IT IS NOT A VERTICAL.
+#
+# `delivery` and `fraud` below are verticals - one package per business domain, named by
+# the profile that wants it, exactly as CLAUDE.md's contract describes. `peers` is the
+# other kind: a MECHANISM a profile switches on in its `peers:` block
+# (`adapters/driven/tools/peers.py`, WHY THIS IS NOT A VERTICAL'S TOOL), the same way
+# `media.allow_evidence_requests` switches on `request_evidence`.
+#
+# It is registered as a package anyway, rather than composed onto the toolset behind the
+# provider's back, because `LocalToolProvider` resolves a profile's NAMED toolsets and
+# nothing else - NO AUTO-DISCOVERY, which is the security property and not an
+# implementation detail of it. So the grant is made where every other grant is made: by
+# putting this name in `profile.toolsets` at load (`_grant_peer_mechanism`), where
+# `:profile`, `:tools`, `preflight` and the audit record all see it. A provider wrapper
+# would have given the same tool and shown it nowhere.
+PEER_TOOLSET: Final[str] = "peers"
+
 # t-f11-05. THE TOOL REGISTRY THIS PROCESS SERVES.
 #
 # `adapters/driven/tools/provider.py` owns the registry and its NO AUTO-DISCOVERY rule;
@@ -297,6 +323,7 @@ _DEFAULT_ENV_FILE = _CORE_ROOT.parent / ".env"
 TOOL_PACKAGES: Mapping[str, ToolsetBuilder] = {
     **DEFAULT_TOOL_PACKAGES,
     "fraud": fraud_tools.build_toolset,
+    PEER_TOOLSET: peer_tools.build_toolset,
 }
 
 
@@ -361,6 +388,49 @@ def _read_env_file(path: Path) -> dict[str, str]:
             value = value[1:-1]
         values[name] = value
     return values
+
+
+# t-f11-23. A NAME THIS REPOSITORY'S `.env` USES THAT A LIBRARY OUTSIDE OUR CONTROL READS
+# UNDER A DIFFERENT NAME - {name the file carries: name the library actually reads}.
+#
+# THE DEFECT THIS MAPS AROUND: `from_env` layers `.env` under the real process environment
+# for Settings' OWN FIELDS ONLY and exports nothing (see that method's docstring). litellm's
+# per-provider config resolves MiniMax's credential by reading `os.environ["MINIMAX_API_KEY"]`
+# directly when it builds a client (docs/FIELD-NOTES.md) - a path that never goes through
+# `Settings` at all, however faithfully `from_env` merges the file. This repository's `.env`
+# carries the same value under `MINIMAX_API`, so a machine with a complete credentials file
+# still could not make a model call until a human exported `MINIMAX_API_KEY` by hand at a
+# terminal - the second row of docs/ROADMAP.md's F11 table.
+#
+# ADD A PAIR HERE ONLY WHEN A LIBRARY READS A NAME THE FILE DOES NOT ALREADY SPELL THE SAME
+# WAY. `TELEGRAM_BOT` and `GEMINI_API_KEY` need no entry: `Settings.from_env` and the library
+# that reads each one already agree on the name, so there is nothing to rename.
+_MAPPED_CREDENTIAL_NAMES: Final[Mapping[str, str]] = {"MINIMAX_API": "MINIMAX_API_KEY"}
+
+
+def _export_mapped_credentials(env: Mapping[str, str]) -> None:
+    """Put a mapped credential where the library that actually reads it will look. t-f11-23.
+
+    `env` is `from_env`'s own merged mapping - the credentials file layered under the real
+    process environment - so this runs once, in the one place the two layers already come
+    together, rather than adding a second opinion about where a value came from.
+
+    A REAL EXPORTED TARGET VARIABLE ALWAYS WINS AND IS NEVER OVERWRITTEN. If
+    `MINIMAX_API_KEY` is already in `os.environ`, this does nothing for it: an operator who
+    exported it themselves said something, and a file silently filling a name that is
+    already set would repoint a process the operator configured on purpose - the same
+    ordering rule `from_env` itself keeps between the file and the environment.
+
+    NOTHING HERE PRINTS, LOGS, OR PUTS A VALUE IN AN EXCEPTION MESSAGE. `os.environ` is the
+    only thing this ever touches, and only when the target name is genuinely absent from it.
+    """
+    for file_name, wire_name in _MAPPED_CREDENTIAL_NAMES.items():
+        if wire_name in os.environ:
+            continue
+        value = env.get(file_name)
+        if value:
+            os.environ[wire_name] = value
+
 
 # t-f2-12. THE DBOS APPLICATION VERSION, PINNED. READ `dbos_config` BEFORE CHANGING IT.
 #
@@ -502,10 +572,17 @@ class Settings:
         the class docstring's rule holds: the file is read here, merged here, and nothing
         below ever sees two opinions about which database it is using. NO VALUE READ HERE IS
         EVER LOGGED OR ECHOED - see `_read_env_file`.
+
+        t-f11-23: THIS IS ALSO WHERE A CREDENTIAL NAMED FOR OUR FILE BECOMES VISIBLE TO A
+        LIBRARY NAMED FOR ITS OWN. `MINIMAX_API` (the name `.env` carries) is exported to
+        `os.environ` as `MINIMAX_API_KEY` (the name litellm reads) whenever the target name
+        is not already set - see `_MAPPED_CREDENTIAL_NAMES` and `_export_mapped_credentials`
+        for the full reasoning and the one rule that protects an operator's own export.
         """
         fallback = _read_env_file(_DEFAULT_ENV_FILE if env_file is None else env_file)
         process = os.environ if environ is None else environ
         env: Mapping[str, str] = {**fallback, **process}
+        _export_mapped_credentials(env)
         profiles_dir = env.get("AGENT_CORE_PROFILES_DIR")
         skills_dir = env.get("AGENT_CORE_SKILLS_DIR")
         media_dir = env.get("AGENT_CORE_MEDIA_DIR")
@@ -665,7 +742,7 @@ def load_profiles(
     profiles: dict[str, AgentProfile] = {}
 
     for path in sorted(profiles_dir.glob("*.yaml")):
-        profile = assign.assign(load_profile_sync(path))
+        profile = assign.assign(_grant_peer_mechanism(load_profile_sync(path)))
         if profile.id in profiles:
             raise ValueError(
                 f"Two profile files declare id {profile.id!r}; {path.name} is the second. "
@@ -674,6 +751,44 @@ def load_profiles(
         profiles[profile.id] = profile
 
     return profiles
+
+
+
+def _grant_peer_mechanism(profile: AgentProfile) -> AgentProfile:
+    """`peers.enabled` resolves to the `ask_peer` tool. t-f11-34.
+
+    THE GAP THIS CLOSES, AND WHY IT SURVIVED SIX F9 ANCHORS
+        `support_triage.yaml` names `billing_specialist` with a two-sided allowlist and a
+        hop limit, the loader reads all of it (t-f11-14), and the agent resolved to no
+        `ask_peer` tool at all - so the model was never offered a way to ask, and every
+        A2A mechanism in the tree (t-f9-03 .. t-f9-09, t-f11-15) was reachable only from a
+        unit test that built its own provider. "One agent orchestrating another is a YAML
+        change, not a code change" was the claim; nothing in the shipped process made it
+        true.
+
+    THE DECLARATION IS THE `peers:` BLOCK, NOT A TOOLSET NAME, AND THAT IS DELIBERATE
+        A profile that wrote `toolsets: [peers]` and left `peers.enabled` false would hold
+        a tool whose every call `hop_limit.authorise_hop` refuses, and a profile that
+        declared a peer and forgot the toolset line is exactly the state this anchor found.
+        One switch, in the block that already carries the allowlist, the hop limit and the
+        visibility - so the two cannot disagree.
+
+    IT GRANTS A NAME, NOT A TOOLSET OBJECT, AND THAT IS THE OTHER HALF
+        `PEER_TOOLSET` is registered in `TOOL_PACKAGES`, so what comes back from
+        `ToolProvider.tool_names_for` is resolved by the same registry lookup every other
+        tool goes through - visible in `:profile`, in `:tools`, in `preflight`'s servability
+        check and in the audit record. Composing the toolset onto the provider's answer
+        instead would have granted the same capability and shown it in none of them.
+
+    Appended rather than prepended: `toolsets` order is meaningful (domain/profile.py) and
+    it decides the order of the flat name list a human reads in the trail, so the profile's
+    own packages keep coming first. Already-named is left alone - a second entry would
+    build `ask_peer` twice and `LocalToolProvider._resolve` would refuse the profile for a
+    collision with itself.
+    """
+    if not profile.peers.enabled or PEER_TOOLSET in profile.toolsets:
+        return profile
+    return replace(profile, toolsets=(*profile.toolsets, PEER_TOOLSET))
 
 
 def _refuse_unservable_profiles(
@@ -693,9 +808,13 @@ def _refuse_unservable_profiles(
         over every profile at once, naming all of them rather than whichever one a user
         happened to pick first.
 
-    IT CHECKS TOOLSETS AND NOT MCP SERVERS. A profile declaring an MCP server is refused by
-    `MCPNotComposedYetError` with its own reasoning and its own anchor (t-f6-05); widening
-    this check to cover it would put that decision in two places, and the two would drift.
+    IT CHECKS TOOLSETS AND NOT MCP SERVERS, AND THAT IS A DIFFERENT ANSWER SINCE t-f11-28.
+    An MCP server is not a registration this process either has or lacks - it is a remote
+    thing that may be down for ten seconds. `build_tool_provider` now composes them
+    (adapters/driven/tools/provider.py), and an unreachable one is a DEGRADED start: the
+    profile loses that server's tools, keeps its local ones, and the process comes up. So
+    there is nothing for a load-time check to refuse. Reachability is a question for
+    `adapters/driving/cli/preflight.py`, which asks it without stopping anything.
 
     Resolved against the registry KEYS rather than by building the toolsets, because
     building them is `toolset_for`'s async job and `build_container` performs no I/O
@@ -811,6 +930,39 @@ class Container:
     # only module outside this file that chose a driven adapter, which is the hole the
     # single-composition-root rule exists to prevent.
     audit_reader: PgAuditReadRepository
+    # t-f11-33. The read side of the conversation, and the seat `main.py` did not have.
+    # `build_app` built a `PgTranscriptReader` of its own from this container's domain
+    # pool and said so in a comment marked "this is the debt": it made `main.py` the only
+    # module outside this file that chose a driven adapter. Worse, `build_console` could
+    # not do the same trick usefully - it simply passed nothing - so `:sessions` and
+    # `:trace` answered "this console has no transcript reader wired" in every process
+    # `console` ever started, while `tests/unit/test_console.py` stayed green by
+    # constructing one itself.
+    #
+    # Typed on the PORT rather than on `PgTranscriptReader`, like `turn_lookup` and the two
+    # evidence seats above: both the router and the console take `TranscriptReader`, and a
+    # container field that named the adapter would be the one place a swap had to be
+    # remembered.
+    transcripts: TranscriptReader
+    # t-f11-33. The other adapter `main.py` hand-built, retired by the same seat. The
+    # admin router is the only consumer, and non-negotiable #8 is why it is a separate
+    # field and not something an agent can reach: `KnowledgeAdmin` is never injected into
+    # anything a turn touches, and there is no field here that would carry it there.
+    knowledge_admin: KnowledgeAdmin
+    # t-f11-34. The durable queue a peer ask leaves on (migration 0014). Typed on the port
+    # because t-d2-04's A2A adapter is an adapter SWAP - `A2AAgentMailbox` implements the
+    # same protocol over HTTP - and a container field naming `PgAgentMailbox` would put
+    # that swap out of reach of the one file that is supposed to make it.
+    #
+    # WHAT THIS SEAT DOES NOT YET REACH, NAMED RATHER THAN IMPLIED. The `ask_peer` tool is
+    # now on the asking agent's surface and always defers (adapters/driven/tools/peers.py),
+    # and `StartTurn` reports the suspension to the user without naming the peer (t-f9-06).
+    # Nothing in production yet turns that deferred call INTO `AgentMailbox.ask()`, nor
+    # claims the far side's queue: `TurnWorkflowDependencies` has no mailbox field to bind,
+    # and that file is not this anchor's to write. So a peer ask suspends and waits. That
+    # is one wiring away and it is visible from here, which is the difference between this
+    # and the six waves where it was not.
+    mailbox: AgentMailbox
 
 
 def build_pools(
@@ -1311,8 +1463,22 @@ def build_container(
     # borrowed the domain pool would put every inspection tool back on the connection that
     # separation exists to keep it off, and it would read as a tidy-up in review.
     audit_reader = PgAuditReadRepository(PoolConnections(audit_pool))
+    # t-f11-33. Both on the DOMAIN pool, and both were built in `main.build_app` until
+    # now. A transcript and a knowledge document are domain state, not the append-only
+    # trail, so neither takes the audit pool - the separation non-negotiable #6 asks for
+    # is about the audit WRITE.
+    transcripts = PgTranscriptReader(PoolConnections(domain_pool))
+    knowledge_admin = PgKnowledgeAdmin(PoolConnections(domain_pool))
+    # t-f11-34. `resolved.app_conninfo` - the same database `store` and `human_gateway`
+    # use, because `peer_messages` (migration 0014) is domain state. It opens nothing
+    # here: `PgAgentMailbox` takes a conninfo and connects per call, exactly as
+    # `PgConversationStore` does (NOTHING HERE CONNECTS).
+    mailbox = PgAgentMailbox(resolved.app_conninfo)
     # `provider.py`'s registry plus the second vertical - see `TOOL_PACKAGES` above for why
-    # the composition happens here and why the list is still hand-written.
+    # the composition happens here and why the list is still hand-written. t-f11-28: this
+    # constructor also supplies the MCP half, so a profile declaring a server (today
+    # `delivery_optimizer`) is served rather than refused. It CONNECTS TO NOTHING here -
+    # transports are built, and reached on first use or on schema discovery.
     tools = build_tool_provider(TOOL_PACKAGES)
     # t-f5-10 filled this seat: `ModelSummariser` over the SAME `model` gateway every
     # other model call in this container uses, so a summarisation call never ends up on
@@ -1378,6 +1544,9 @@ def build_container(
         policy=policy,
         audit=audit,
         audit_reader=audit_reader,
+        transcripts=transcripts,
+        knowledge_admin=knowledge_admin,
+        mailbox=mailbox,
         runner=runner,
         tools=tools,
         context=context,
@@ -1471,13 +1640,38 @@ def _server_is_reachable(conninfo: str) -> bool:
         return False
 
 
+def _redacted_target(conninfo: str) -> str:
+    """host, port and database name - NEVER a credential. t-f11-24.
+
+    Built from the PARSED conninfo, never from the string itself: a URL conninfo carries
+    its password inline (`postgresql://user:pass@host/db`) and a keyword conninfo may carry
+    one as `password=...`, so only reading out the three keys an operator actually needs -
+    never re-assembling or echoing the string - keeps this safe to put in an exception
+    message. `host`/`port` fall back to libpq's own defaults so a bare `dbname=...`
+    conninfo still names a place instead of printing nothing.
+    """
+    parsed = conninfo_to_dict(conninfo)
+    host = parsed.get("host") or "localhost"
+    port = parsed.get("port") or "5432"
+    return f'host "{host}" port {port}'
+
+
 def _refused_to_start(settings: Settings, error: psycopg.OperationalError) -> Exception:
-    """Turn a failed connection into something the operator can act on. t-f11-02.
+    """Turn a failed connection into something the operator can act on. t-f11-02/t-f11-24.
 
     The whole of this anchor's value is in the message. Every failure in F11's list was
     discovered one at a time, three commands apart, because each one surfaced as the driver
     saw it rather than as the operator needed it - and `connection failed: FATAL: database
     "agent_core_app" does not exist` names a problem while naming no remedy.
+
+    t-f11-24 ADDS THE SERVER, NOT JUST THE DATABASE. The checked-in `.env` and a fresh
+    clone's local Postgres can legitimately both hold a database named `agent_core_app` -
+    the shipped credentials point at the REMOTE Coolify instance, where that database was
+    never created - so naming only the database left an operator unable to tell which
+    server the failure was even about. That was the most confusing failure in this phase
+    and it cost an afternoon once already: "the database does not exist" reads the same
+    whether it is missing on the host you meant or you are pointed at the wrong host
+    entirely. `_redacted_target` names the host and port too, and never a credential.
 
     A server that is genuinely down gets the original exception back, unchanged and
     un-wrapped in advice: telling someone to `CREATE DATABASE` on a host that is not
@@ -1487,17 +1681,19 @@ def _refused_to_start(settings: Settings, error: psycopg.OperationalError) -> Ex
         return error
 
     database = _database_name(settings.app_conninfo)
+    target = _redacted_target(settings.app_conninfo)
     if settings.admin_conninfo:
         return MissingDatabaseError(
-            f'the database "{database}" does not exist and AGENT_CORE_ADMIN_DATABASE_URL '
-            "is set, so startup tried to create it and the schema still could not be "
-            "applied. The admin connection reached a different server, or the role it "
-            f"names may not CREATE DATABASE. Original error: {error}"
+            f'the database "{database}" does not exist at {target}, and '
+            "AGENT_CORE_ADMIN_DATABASE_URL is set, so startup tried to create it there and "
+            "the schema still could not be applied. The admin connection reached a "
+            f"different server, or the role it names may not CREATE DATABASE at {target}. "
+            f"Original error: {error}"
         )
     return MissingDatabaseError(
-        f'the database "{database}" does not exist.\n'
+        f'the database "{database}" does not exist at {target}.\n'
         "\n"
-        "Create it once, with a role that may:\n"
+        f"Create it once at {target}, with a role that may:\n"
         f'    CREATE DATABASE "{database}";\n'
         f'    CREATE DATABASE "{database}{_DBOS_DATABASE_SUFFIX}";\n'
         "\n"
