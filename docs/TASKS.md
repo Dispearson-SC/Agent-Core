@@ -480,7 +480,7 @@ and the only code change was the adapter's `base_url`.
 
 | Anchor | Task | File | Status |
 |---|---|---|---|
-| <a id="t-d2-01"></a>t-d2-01 | LiteLLM proxy mode; third database, same instance | `adapters/driven/llm_litellm/gateway.py` | **DONE** |
+| <a id="t-d2-01"></a>t-d2-01 | LiteLLM proxy mode; third database, same instance | `adapters/driven/llm_litellm/gateway.py` | **DONE — the adapter change is one URL, which is what it claimed. But `proxy_model` sends NO virtual key, so D2's per-tenant done-when is not met on the production path; see [F13](ROADMAP.md#f13--provider-and-tenant-provisioning)** |
 | <a id="t-d2-02"></a>t-d2-02 | `SpeechPort` synthesis, gated by profile flag | `ports/speech_port.py` | **DONE** |
 | <a id="t-d2-03"></a>t-d2-03 | Tenant dimension in policy rules — **SQL predicate and migration `0012` only**; if the condition below fails, the domain half is `t-d2-06` | `adapters/driven/persistence_pg/policy_repository.py` | **DONE** |
 | <a id="t-d2-06"></a>t-d2-06 | **TAKEN — condition checked 2026-09-10 and it fails.** Carry the tenant through `RuleSet.applicable` / `PolicyRule.matches` — `RuleSet` records no tenant, so the SQL alone cannot make it safe | `domain/policy.py` | **DONE** |
@@ -1138,6 +1138,36 @@ writing a line of SQL**. See `docs/ROADMAP.md` for why each row below exists.
 > next. A preflight that answers "what is not ready" in one pass is worth more than any of
 > the five individual fixes, because it is the thing that stops the sixth from being
 > discovered the same way.
+
+---
+
+## F13 · Provider and tenant provisioning — specified, not built
+
+`docs/ROADMAP.md` § F13 is the spec. Nothing here is scheduled; these anchors exist so the
+work is *owned* rather than remembered, which is the rule this file has enforced all build:
+work carrying a phase marker and no anchor is nobody's.
+
+| Anchor | Task | File | Status |
+|---|---|---|---|
+| <a id="t-f13-01"></a>t-f13-01 | **`proxy_model` sends no virtual key.** `LiteLLMProvider(api_base=...)` is built with no `api_key`, so per-tenant budgets and spend separation are unreachable through this code. `test_proxy_mode.py` records this in its own docstring and proved separation using the keys directly | `adapters/driven/llm_litellm/models.py` | TODO |
+| <a id="t-f13-02"></a>t-f13-02 | A key per TENANT, resolved from the `tenant_id` `CallerIdentity` already carries. **Never an unkeyed fallback**: a client built without a credential reads `OPENAI_API_KEY` and sends it to whatever provider it was pointed at | `adapters/driven/llm_litellm/gateway.py` | TODO |
+| <a id="t-f13-03"></a>t-f13-03 | `provider add` / `provider status` — register a model and its credential on the proxy once, and report what it costs. A SUBCOMMAND, never a console command: creating a key is an administrative write | `adapters/driving/cli/provider.py` | TODO |
+| <a id="t-f13-04"></a>t-f13-04 | `tenant add` — a virtual key, a budget and a spend line for a tenant, created once and never printed. `preflight` reports a tenant with no key rather than letting the first turn discover it | `adapters/driving/cli/tenant.py` | TODO |
+
+> **This phase exists because of a question, not a bug report.** Asked how a new machine
+> would be brought up, the honest answer turned out to be: connect a database, start it,
+> and then do three things by hand through another product's UI. Every one of those three
+> had been performed during this build and none had been written down as work.
+>
+> That is the same shape the table in `docs/STATE.md` records ten times — **a step somebody
+> performed, that nothing owns** — arriving one layer further out than any of the others.
+> The earlier ten were collaborators a test supplied and production never bound; this one is
+> a collaborator a HUMAN supplied, and no test could have caught it, because the tests were
+> handed a proxy that was already configured.
+>
+> The lesson generalises past this repository: **ask what the first hour on a new machine
+> looks like, out loud, before the machine exists.** The answer is a specification, and the
+> parts of it nobody owns are the phase.
 
 ## Migration ids — pre-allocated
 

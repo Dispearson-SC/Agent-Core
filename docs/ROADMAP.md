@@ -268,6 +268,99 @@ before.
 
 ---
 
+## Day 2.5 — a provider you did not configure by hand
+
+### F13 · Provider and tenant provisioning
+
+**Not built. Specified here because the gap was found by asking a question the system could
+not answer**, and writing it down now is cheaper than rediscovering it on the first machine
+that is not this one.
+
+**Done when** bringing a new machine up is: point it at a database, start it, name a
+provider once — and every tenant that appears afterwards gets its own virtual key, its own
+budget and its own spend line without anyone opening the proxy's UI.
+
+#### What exists today, exactly
+
+Day 1 resolves a credential by litellm's own convention: `MINIMAX_API_KEY` and friends,
+read from the environment, with `.env` layered under it and the mapped names exported
+(`t-f11-23`). `preflight` reports whether each one resolves, by NAME and never by value.
+That half works and needs nothing.
+
+Day 2 sets `AGENT_CORE_LITELLM_BASE_URL` and the same code talks to a proxy instead — which
+is the whole point of `t-d2-01`, and the part of it that is real: the adapter change is one
+URL.
+
+**What nobody built is everything around it.** Registering a model on the proxy, creating a
+team, creating a virtual key, granting the team its models — all of that was performed by
+hand through the proxy's API while this system was being built, and nothing in the tree
+does any of it.
+
+#### The defect that question surfaced
+
+`models.py::proxy_model` builds `LiteLLMProvider(api_base=base_url)` **with no `api_key`**.
+So in proxy mode this code sends no virtual key at all, and **per-tenant separation is not
+reachable through the adapter.**
+
+`test_proxy_mode.py` knows: its own docstring records that `proxy_model` takes no key and
+that its signature was frozen at `t-f0-04`, and it proved per-team spend separation by
+using the two keys **directly** rather than through our code. That is an honest test of the
+proxy and not a test of this system's use of it.
+
+So `t-d2-01` is real for what it claims about the ADAPTER — the code change is one URL — and
+D2's done-when, *"two tenants with different budgets run in parallel and one is cut off by
+the proxy"*, is **not** met on the path production takes. The anchor is qualified rather
+than re-opened, because what it built is right; what is missing was never anyone's.
+
+#### The decision, made 2026-09-11: one key per TENANT
+
+One team per deployment, one virtual key per tenant, created the first time that tenant is
+seen. `CallerIdentity` already carries `tenant_id`, so the key travels with the turn and no
+port changes shape.
+
+**Not per agent**, and the reason is worth keeping. A per-agent budget ALREADY EXISTS:
+`max_cost_usd` in the profile, enforced per turn. Adding a second one in the proxy would be
+two enforcement points for one number, and two enforcement points for one number drift.
+
+They are also not the same control, which is why both are wanted:
+
+| | Stops | Lives |
+|---|---|---|
+| `max_cost_usd` in the profile | a runaway TURN | in our process, and only works while it behaves |
+| the virtual key's budget | real SPEND | on the other side of the network, and does not care whether we behave |
+
+The **team** is the unit that owns model grants. Granting models per agent would mean
+re-granting every time an agent is added, which is configuration churn for no boundary: an
+agent is already restricted by its profile's `model:` line.
+
+#### The CLI shape, and why it is not a console command
+
+```
+python -m agent_core provider add <name>      # register a model and its credential, once
+python -m agent_core provider status          # what the proxy has, and what it costs
+python -m agent_core tenant add <tenant-id>   # a virtual key, a budget, a spend line
+```
+
+**A subcommand, not a `:command` in the console** — for the reason `Core/policy` is not a
+console command either: creating a key is an administrative write, the console runs as a
+`CallerIdentity`, and non-negotiable #9 says a caller is never widened into an
+administrator. A permission granted at a prompt is a permission granted with no record.
+
+Auto-creating a tenant's key on first sight is the convenience; it belongs at
+tenant-provisioning time, behind an administrative identity, and `preflight` should report a
+tenant that has no key rather than the first turn discovering it.
+
+#### What this phase must not do
+
+- **Never print or log a key**, including the one it just created. `preflight` already sets
+  the vocabulary: *set* / *missing*, never a value.
+- **Never fall back to an unkeyed request** when a tenant's key is missing. That is the
+  shape `docs/FIELD-NOTES.md` records for `api_key=None`: a client built without a
+  credential reads `OPENAI_API_KEY` and sends it to whatever provider it was pointed at.
+  Refuse loudly instead — a missing key must not become someone else's spend.
+- **Never store a key in a profile.** A profile is reviewable data an operator reads top to
+  bottom; a credential in one is a credential in a code review, a backup and a diff.
+
 ## Sizing
 
 > **Superseded** — see *Revised scope* at the end of this document. Kept for the method.

@@ -4,14 +4,14 @@ A running handover. `docs/TASKS.md` says what is left; this file says what is *t
 now* — what works, what cannot be run, what infrastructure exists, and what a fresh session
 needs to know before touching anything.
 
-Last updated: 2026-09-11, at the F11 wave 6 barrier. One agent is closing three defects
-found by driving the shipped process by hand; everything else is committed.
+Last updated: 2026-09-11, at the end of the build. Everything is committed and pushed;
+F13 is specified and deliberately not built.
 
 ## Verified state
 
 ```
-849 passed, 7 skipped, 0 failed     ruff: clean
-mypy strict: 238 source files        164 anchors, 3 open
+891 passed, 7 skipped, 0 failed     ruff: clean
+mypy strict: 248 source files        F0-F12 closed; F13 specified, not built
 ```
 
 Committed on branch `feat/f0-f10-core-implementation`. **Read `README.md` to run it** — that
@@ -107,14 +107,25 @@ And its mirror: **a frozen port with no adapter is not a finished port.**
 
 ## Open
 
-Three anchors, all found by driving the shipped process by hand *after* the suite was green
-— `t-f11-38` (the preflight exits 0 with a FAIL check), `t-f11-39` (a shipped profile points
-its MCP server at a test fixture, by a path relative to the working directory) and
-`t-f11-40` (a handled degraded start prints an `ExceptionGroup` traceback).
+**F13, and it is specified rather than started.** Bringing up a new machine is: point it at
+a database, start it — and then register a model, create a team and create virtual keys BY
+HAND through another product's UI. All three were performed during this build and none was
+ever written down as work. `proxy_model` also sends no virtual key at all, so D2's
+per-tenant done-when is not met on the path production takes; `t-d2-01` is qualified rather
+than re-opened, because the adapter change it claimed really is one URL. The decision on
+granularity is already made and recorded: **one key per tenant**, not per agent, because a
+per-agent budget already exists in the profile and two enforcement points for one number
+drift. See `docs/ROADMAP.md` § F13.
 
 `t-f2-06` is **BLOCKED**, not open: it needs inbound typing state, which D22 established only
 Chatwoot's web widget supplies, and D23 put Chatwoot in phase two. TODO is work nobody has
 done; BLOCKED is work nobody can do.
+
+## Where it lives
+
+`https://github.com/Dispearson-SC/Agent-Core`, private. The build is PR #1 against `main`:
+nineteen commits sliced by architectural layer, 76,339 insertions, which needs a
+`size:exception` and says so in its own body rather than pretending otherwise.
 
 ## Rules this build paid for
 
