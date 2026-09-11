@@ -222,7 +222,10 @@ def test_the_audit_row_outlives_a_real_rolled_back_domain_transaction() -> None:
     app_db = "agent_core_audit_test"
     asyncio.run(
         migrations.ensure_databases(
-            _ADMIN_CONNINFO, app_database=app_db, dbos_database=f"{app_db}_dbos"
+            # No `dbos_database=`: the name is DERIVED (t-f11-20). Passing one names a
+            # database nothing creates and nothing opens.
+            _ADMIN_CONNINFO,
+            app_database=app_db,
         )
     )
     app_conninfo = re.sub(r"/[^/?]+(\?.*)?$", rf"/{app_db}\1", _ADMIN_CONNINFO)
@@ -426,7 +429,10 @@ def test_the_rejected_decision_row_outlives_a_real_rolled_back_transaction() -> 
     app_db = "agent_core_audit_test"
     asyncio.run(
         migrations.ensure_databases(
-            _ADMIN_CONNINFO, app_database=app_db, dbos_database=f"{app_db}_dbos"
+            # No `dbos_database=`: the name is DERIVED (t-f11-20). Passing one names a
+            # database nothing creates and nothing opens.
+            _ADMIN_CONNINFO,
+            app_database=app_db,
         )
     )
     app_conninfo = re.sub(r"/[^/?]+(\?.*)?$", rf"/{app_db}\1", _ADMIN_CONNINFO)

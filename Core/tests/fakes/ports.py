@@ -26,6 +26,7 @@ the same method into one.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -34,9 +35,19 @@ from agent_core.domain.compaction import CompactionCheckpoint
 from agent_core.domain.media import MediaId, MediaKind, MediaRef
 from agent_core.domain.policy import EFFECT_PRECEDENCE, Effect, PolicyDecision, RuleSet
 from agent_core.domain.profile import AgentProfile
+from agent_core.domain.transcript import (
+    VISIBILITY,
+    Audience,
+    ConversationSummaryRow,
+    EntryKind,
+    TranscriptEntry,
+    TranscriptPage,
+)
 from agent_core.domain.turn import (
     CallerIdentity,
+    PendingRequest,
     SessionRef,
+    TenantId,
     ToolCallId,
     TurnId,
     TurnOutcome,
@@ -44,7 +55,9 @@ from agent_core.domain.turn import (
     Usage,
 )
 from agent_core.ports.agent_runner import ToolResolution
+from agent_core.ports.audit_reader import AuditedToolCall
 from agent_core.ports.embedder import Embedding
+from agent_core.ports.knowledge_admin import AdminIdentity
 from agent_core.ports.media_store import SignedMedia
 from agent_core.ports.model_gateway import ModelAttempt, RecoveryStrategy
 
@@ -413,6 +426,159 @@ class FakeMediaStore:
         )
 
 
-# TODO(F3): class FakeHumanGateway      - captures published asks, replays answers
+class FakeAuditReader:
+    """`AuditReader` (t-f11-08) - the tool-call trail, read back.
+
+    WHY IT HAD TO EXIST. Wave 1 froze the port and shipped one implementation: the
+    Postgres adapter. A port whose only implementation is the real adapter forces every
+    test that wants to render a trail to reach for a database, which is how
+    `adapters/driving/cli/console.py` ended up declaring its own read protocol in the
+    first place.
+
+    IT RECORDS THE `AdminIdentity` IT WAS ASKED WITH, AND THAT IS NOT BOOKKEEPING.
+        CLAUDE.md non-negotiable #9 is that an `AdminIdentity` is never derived from a
+        `CallerIdentity`, and this port takes one because tool names, arguments and policy
+        verdicts are admin-audience facts. A fake that dropped the identity would let a
+        caller wire the wrong seat and still look correct, so `asked` keeps the pair.
+
+    `AuditedToolCall.reason` is deliberately NOT defaulted to a sentence anywhere here:
+    `None` means a row written before migration 0022, and a fake that invented one would
+    teach every test that the trail always has the reason.
+    """
+
+    def __init__(
+        self, calls: Mapping[TurnId, Sequence[AuditedToolCall]] | None = None
+    ) -> None:
+        self._calls: dict[TurnId, tuple[AuditedToolCall, ...]] = {
+            turn_id: tuple(recorded) for turn_id, recorded in (calls or {}).items()
+        }
+        self.asked: list[tuple[AdminIdentity, TurnId]] = []
+
+    def record(self, turn_id: TurnId, *calls: AuditedToolCall) -> None:
+        """Append to one turn's trail, oldest first - the order the port promises."""
+        self._calls[turn_id] = self._calls.get(turn_id, ()) + calls
+
+    async def tool_calls_for_turn(
+        self, admin: AdminIdentity, turn_id: TurnId
+    ) -> tuple[AuditedToolCall, ...]:
+        self.asked.append((admin, turn_id))
+        return self._calls.get(turn_id, ())
+
+
+class FakeTranscriptReader:
+    """`TranscriptReader` (t-f10-02) - the conversation projection, in memory.
+
+    IT FILTERS THE WAY THE PORT PROMISES TO, BY DEFAULT. `page` drops every kind
+    `VISIBILITY` hides from the audience and hands a USER a `PENDING_PLACEHOLDER` where a
+    `PENDING_REQUEST` was, because that substitution is the port's contract and a fake
+    that skipped it would let a consumer be written against a projection nobody ships.
+
+    `filter_by_audience=False` MAKES IT LEAK ON PURPOSE. A consumer that re-checks the
+    grid - the console's `:trace` does, because non-negotiable #11 has no other check -
+    needs a projection that can actually be wrong, or its guard is unfalsifiable. That is
+    the defect `t-f10-07` caught in the grid itself.
+    """
+
+    def __init__(
+        self,
+        entries: Sequence[TranscriptEntry] = (),
+        conversations: Sequence[ConversationSummaryRow] = (),
+        *,
+        filter_by_audience: bool = True,
+    ) -> None:
+        self._entries = tuple(entries)
+        self._conversations = tuple(conversations)
+        self.filter_by_audience = filter_by_audience
+        self.page_calls: list[tuple[SessionRef, Audience]] = []
+        self.list_calls: list[tuple[TenantId, Audience, str | None, bool]] = []
+
+    async def page(
+        self,
+        session: SessionRef,
+        audience: Audience,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> TranscriptPage:
+        self.page_calls.append((session, audience))
+        entries = self._entries
+        if self.filter_by_audience:
+            entries = tuple(
+                _projected(entry, audience)
+                for entry in self._entries
+                if VISIBILITY[entry.kind][audience]
+                or (audience is Audience.USER and entry.kind is EntryKind.PENDING_REQUEST)
+            )
+        return TranscriptPage(session=session, audience=audience, entries=entries)
+
+    async def list_conversations(
+        self,
+        tenant: TenantId,
+        audience: Audience,
+        *,
+        profile_id: str | None = None,
+        suspended_only: bool = False,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[tuple[ConversationSummaryRow, ...], str | None]:
+        self.list_calls.append((tenant, audience, profile_id, suspended_only))
+        rows = tuple(
+            row
+            for row in self._conversations
+            if row.session.tenant_id == tenant
+            and (profile_id is None or row.profile_id == profile_id)
+            and (not suspended_only or row.is_suspended)
+        )
+        return rows, None
+
+
+def _projected(entry: TranscriptEntry, audience: Audience) -> TranscriptEntry:
+    """A USER is handed a placeholder where a request was: THAT something is pending,
+    never WHICH tool. The payload is BUILT here rather than narrowed from the request - a
+    narrowed payload keeps whatever key nobody remembered to drop, and the key that
+    matters is the tool name."""
+    if audience is Audience.USER and entry.kind is EntryKind.PENDING_REQUEST:
+        return TranscriptEntry(
+            entry_id=entry.entry_id,
+            turn_id=entry.turn_id,
+            kind=EntryKind.PENDING_PLACEHOLDER,
+            at=entry.at,
+            payload={"since": entry.at.isoformat()},
+        )
+    return entry
+
+
+class FakeHumanGateway:
+    """`HumanGateway` (t-f3-01) - captures published asks and replays the handles.
+
+    THE HANDLE IS MINTED AT PUBLISH, WHICH IS WHERE THE REAL ONE IS MINTED TOO. A fake
+    whose `correlate` answered anything it was asked would let a consumer be tested
+    against a correlation that never happened - and routing a stray reply into the wrong
+    turn approves an action nobody approved, which is the one failure this port's
+    docstring singles out.
+
+    Publishing twice for the same (turn_id, tool_call_id) mints nothing new: the port
+    requires idempotency there, because a retried DBOS step otherwise asks the same human
+    the same question twice.
+    """
+
+    def __init__(self) -> None:
+        self.published: list[tuple[TurnId, SessionRef, tuple[PendingRequest, ...]]] = []
+        self.handles: dict[str, tuple[TurnId, ToolCallId]] = {}
+
+    async def publish(
+        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...]
+    ) -> None:
+        self.published.append((turn_id, session, requests))
+        for request in requests:
+            self.handles.setdefault(
+                f"corr-{turn_id}-{request.tool_call_id}", (turn_id, request.tool_call_id)
+            )
+
+    async def correlate(self, correlation_id: str) -> tuple[TurnId, ToolCallId] | None:
+        """None for an unknown or expired handle - the NORMAL case, not an error."""
+        return self.handles.get(correlation_id)
+
+
 # TODO(F5): class FakeContextEngine     - scripted should_compress/compress
 # TODO(F6): class FakeSkillRegistry     - dict of SkillMeta

@@ -20,6 +20,7 @@ THE SPLIT THESE TESTS PIN
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import FrozenInstanceError
 from decimal import Decimal
 from pathlib import Path
@@ -35,13 +36,32 @@ from agent_core.adapters.driven.profiles_fs import loader as profiles_loader
 
 PROFILES_DIR = Path(__file__).resolve().parents[2] / "profiles"
 
+_MODEL_LINE = re.compile(r"^model:[ \t]*(?P<model>\S+)[ \t]*$", re.MULTILINE)
+
+
+def _model_named_in(document: str) -> str:
+    """The model a profile document names, read WITHOUT the loader under test.
+
+    A regex rather than a YAML parse, deliberately: the value of this second reading is
+    that it is independent, and parsing with the same library the adapter uses would only
+    make the assertion agree with itself. It is also why `yaml` stays out of this module -
+    it is banned outside `adapters/` (CLAUDE.md), and a test has no business importing it.
+    """
+    match = _MODEL_LINE.search(document)
+    assert match is not None, "this profile document names no model at its top level"
+    return match.group("model")
+
 
 def _delivery_optimizer_mapping() -> dict[str, Any]:
     """The same agent `Core/profiles/delivery_optimizer.yaml` describes, as plain data.
 
-    The model tracks that file: `_assert_is_the_delivery_optimizer` below is run against
-    BOTH this mapping and the real YAML, so a model named here and not there is a test
-    asserting about an agent nobody deploys.
+    THE MODEL ID IS DELIBERATELY NOT CROSS-PINNED (t-f11-27). This mapping and the shipped
+    file may name different models and neither test cares. `_assert_is_the_delivery
+    _optimizer` used to assert `model == "claude-sonnet-5"` against both, so the day the
+    deployment repointed at `minimax/MiniMax-M3` a unit test with no stake in the decision
+    went red. Which model a deployment runs is configuration; what the loader does with the
+    one it finds is behaviour, and only the second is worth a test - see
+    `test_the_adapter_loads_whatever_model_the_file_names`.
     """
     return {
         "id": "delivery_optimizer",
@@ -76,8 +96,13 @@ def _delivery_optimizer_mapping() -> dict[str, Any]:
 
 
 def _assert_is_the_delivery_optimizer(profile: Any) -> None:
+    """Everything about this agent that is a decision the code has to honour.
+
+    `model` is absent on purpose; see `_delivery_optimizer_mapping`. Each caller asserts
+    the model against the source it loaded from, which is the property that survives a
+    deployment changing it.
+    """
     assert profile.id == "delivery_optimizer"
-    assert profile.model == "minimax/MiniMax-M3"
     assert profile.toolsets == ("delivery",)
     assert profile.skill_namespaces == ("delivery",)
     assert profile.max_iterations == 15
@@ -94,9 +119,15 @@ def _assert_is_the_delivery_optimizer(profile: Any) -> None:
 
 
 def test_a_mapping_loads_into_a_frozen_agent_profile() -> None:
-    profile = profile_module.AgentProfile.from_mapping(_delivery_optimizer_mapping())
+    mapping = _delivery_optimizer_mapping()
+
+    profile = profile_module.AgentProfile.from_mapping(mapping)
 
     _assert_is_the_delivery_optimizer(profile)
+    # Carried through verbatim from whatever was handed in - never defaulted, never
+    # rewritten. Asserted against the mapping rather than against a literal, so this
+    # stays a claim about `from_mapping` and not about which model anyone deploys.
+    assert profile.model == mapping["model"]
 
     # Frozen: the whole point of loading into a dataclass instead of keeping a dict.
     with pytest.raises(FrozenInstanceError):
@@ -143,6 +174,13 @@ def test_the_adapter_loads_the_delivery_optimizer_yaml_off_disk() -> None:
     profile = asyncio.run(profiles_loader.load_profile(path))
 
     _assert_is_the_delivery_optimizer(profile)
+    # The model the FILE names, whatever it names - not a literal (t-f11-27). This line
+    # used to read `assert profile.model == "claude-sonnet-5"`, which made a unit test an
+    # obstacle to changing a deployment's model: a green run proved only that nobody had
+    # touched the YAML. What the adapter owes the domain is the value it read.
+    assert profile.model == _model_named_in(path.read_text(encoding="utf-8")), (
+        "the loader returned a model the profile file does not name"
+    )
     # The real file's persona is a YAML block scalar; only the domain test pins its exact
     # text, so here it is enough that the block arrived as one non-empty string.
     assert "delivery routing" in profile.persona
@@ -153,6 +191,33 @@ def test_the_adapter_loads_the_delivery_optimizer_yaml_off_disk() -> None:
     # The async entry point is a `to_thread` wrapper around the sync island and must not
     # be able to drift from it - same bytes, same profile, same content hash.
     assert profile == profiles_loader.load_profile_sync(path)
+
+
+def test_the_adapter_loads_whatever_model_the_file_names(tmp_path: Path) -> None:
+    """The falsifiable half of the assertion above, and the reason it is worth keeping.
+
+    Read against the shipped file alone, "the model matches the file" could also be
+    satisfied by a loader that hard-coded the one value that file happens to hold. So the
+    same document is loaded again with only its model line rewritten, and the profile has
+    to come back carrying the rewritten value. A loader that defaulted, normalised or
+    remembered a model fails here and passes everything else in this module.
+    """
+    shipped = (PROFILES_DIR / "delivery_optimizer.yaml").read_text(encoding="utf-8")
+    sentinel = "sentinel-provider/Sentinel-Model-9"
+    assert _model_named_in(shipped) != sentinel, "the sentinel collides with the real model"
+
+    repointed = tmp_path / "delivery_optimizer.yaml"
+    repointed.write_text(
+        _MODEL_LINE.sub(f"model: {sentinel}", shipped, count=1), encoding="utf-8"
+    )
+
+    profile = asyncio.run(profiles_loader.load_profile(repointed))
+
+    assert profile.model == sentinel, (
+        "the loader ignored the model the file names. Repointing a deployment at another "
+        "model would then be a code change, which is exactly what a profile file exists "
+        "to prevent (docs/TASKS.md#t-f11-27)."
+    )
 
 
 def test_the_adapter_adds_nothing_the_domain_did_not_already_do(tmp_path: Path) -> None:

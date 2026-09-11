@@ -89,10 +89,10 @@ def test_migrations_are_idempotent_on_rerun() -> None:
     """Running the same migration set twice must not error and must not apply any
     migration a second time."""
     app_db = "agent_core_migrations_test"
-    dbos_db = "agent_core_migrations_test_dbos"
-    asyncio.run(
-        migrations.ensure_databases(_ADMIN_CONNINFO, app_database=app_db, dbos_database=dbos_db)
-    )
+    # No `dbos_database=`: the name DBOS opens is derived from the app one (t-f11-20), and
+    # a caller that passes a name is a caller that can pass one nothing ever connects to.
+    # The test above still passes one, because proving it is IGNORED is its whole subject.
+    asyncio.run(migrations.ensure_databases(_ADMIN_CONNINFO, app_database=app_db))
 
     app_conninfo = re.sub(r"/[^/?]+(\?.*)?$", rf"/{app_db}\1", _ADMIN_CONNINFO)
 

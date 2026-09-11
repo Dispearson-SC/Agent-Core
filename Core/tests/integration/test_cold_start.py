@@ -21,11 +21,17 @@ WHY THIS FILE EXISTS
     the production startup path against a database that does not exist yet.
 
 WHAT "EMPTY POSTGRES INSTANCE" MEANS HERE
-    The two logical databases are DROPPED before each cold-start assertion and dropped
-    again afterwards, so what `start_container` faces is a server with no `agent_core_*`
-    on it at all - not a truncated schema. A leftover `schema_migrations` row would make
-    the applier skip the very migration this asserts it applies, and a leftover database
-    would hide the whole of t-f11-02.
+    Every `agent_core_cold_start_test*` database is DROPPED before each cold-start
+    assertion and dropped again afterwards, so what `start_container` faces is a server
+    with none of them on it at all - not a truncated schema. A leftover
+    `schema_migrations` row would make the applier skip the very migration this asserts it
+    applies, and a leftover database would hide the whole of t-f11-02.
+
+    The cleanup enumerates what is on the server rather than naming the databases it
+    expects. It used to name them, and t-f11-20 then moved one of the names: the fixture
+    went on dropping `<app>_dbos` and `<app>_dbos_dbos_sys`, neither of which anything
+    creates any more, and leaked the `<app>_dbos_sys` that a cold start really does make on
+    every run. A cleanup written as a list of names is only empty until a name moves.
 
 NOTHING HERE PRINTS, LOGS OR ASSERTS ON A CREDENTIAL VALUE.
     Two of the four rows above are about secrets, so the test that proves they load has to
@@ -48,6 +54,7 @@ import psycopg
 import pytest
 
 from agent_core import composition
+from agent_core.adapters.driven.persistence_pg import migrations
 
 _ADMIN_CONNINFO = os.environ.get(
     "AGENT_CORE_TEST_ADMIN_DATABASE_URL",
@@ -55,7 +62,13 @@ _ADMIN_CONNINFO = os.environ.get(
 )
 
 _APP_DATABASE = "agent_core_cold_start_test"
-_DBOS_DATABASE = f"{_APP_DATABASE}_dbos"
+
+# DERIVED, NEVER SPELLED OUT (t-f11-20). DBOS appends `_dbos_sys` to the app database it
+# is handed and opens that; the repo's old `<app>_dbos` convention named a database
+# nothing ever connected to. Asking the module that does the deriving means this test
+# cannot end up pinning a name production stopped using - which is exactly what it was
+# doing before this anchor.
+_DBOS_SYSTEM_DATABASE = migrations.dbos_system_database(_APP_DATABASE)
 
 # `Core/tests/integration/this_file.py` -> `Core/`, two parents up.
 _CORE_ROOT = Path(__file__).resolve().parents[2]
@@ -83,12 +96,24 @@ def _conninfo_for(database: str) -> str:
 def _drop_databases() -> None:
     """Leave the instance EMPTY of this test's databases. Executed, never merely described.
 
-    `WITH (FORCE)` because a pool this test opened - or a DBOS system database created
+    Every database whose name starts with `_APP_DATABASE` goes, whoever created it and
+    under whatever convention - see this module's docstring for why a list of names was
+    not good enough. The pattern is built from a constant defined here, so nothing an
+    operator or an environment variable controls reaches the statement.
+
+    `WITH (FORCE)` because a pool this test opened - or the DBOS system database created
     beside the app one - may still hold a session, and a cleanup that can be blocked by
     the thing it is cleaning up is not a cleanup.
     """
     with psycopg.connect(_ADMIN_CONNINFO, autocommit=True) as admin:
-        for database in (f"{_DBOS_DATABASE}_dbos_sys", _DBOS_DATABASE, _APP_DATABASE):
+        leftovers = [
+            str(row[0])
+            for row in admin.execute(
+                "SELECT datname FROM pg_database WHERE datname LIKE %s",
+                (f"{_APP_DATABASE}%",),
+            ).fetchall()
+        ]
+        for database in leftovers:
             admin.execute(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
 
 
@@ -253,16 +278,17 @@ def test_a_cold_start_creates_the_databases_migrates_and_puts_the_rules_in_force
         "startup did not create the app database. `CREATE DATABASE agent_core_app` is "
         "still a step a human performs by hand (docs/TASKS.md#t-f11-02)."
     )
-    assert _database_exists(_DBOS_DATABASE), (
-        "startup created the app database and not the dbos one, so the durable engine has "
-        "nowhere to keep its workflow state."
+    assert _database_exists(_DBOS_SYSTEM_DATABASE), (
+        f"startup created the app database and not {_DBOS_SYSTEM_DATABASE}, so the "
+        "durable engine has nowhere to keep its workflow state. That is the database DBOS "
+        "derives from the app URL and opens (t-f11-20); a deployment whose app role may "
+        "not CREATE DATABASE gets a warning from DBOS and a broken start without it."
     )
 
     with psycopg.connect(empty_instance) as conn:
         applied = {
             row[0] for row in conn.execute("SELECT id FROM schema_migrations").fetchall()
         }
-    from agent_core.adapters.driven.persistence_pg import migrations
 
     assert applied == {m.id for m in migrations.discover_app_migrations()}, (
         "a cold start did not leave the schema migrated"
@@ -276,7 +302,15 @@ def test_a_cold_start_creates_the_databases_migrates_and_puts_the_rules_in_force
     )
 
     # t-f11-05: every shipped profile resolves its toolsets, at LOAD.
-    assert set(container.profiles) == {"delivery_optimizer", "fraud_analyst"}
+    #
+    # The expected ids come from the directory, not from a list written here. A literal
+    # list pins WHICH agents this deployment ships - configuration, not behaviour - and
+    # this assertion had already gone stale once by the time the peer profiles landed.
+    # Derived, it still says everything it is worth saying: every shipped file loaded, and
+    # each one is keyed by the id inside it rather than quietly by its filename.
+    assert set(container.profiles) == {
+        path.stem for path in _SHIPPED_PROFILES.glob("*.yaml")
+    }, "a shipped profile file did not become a servable profile under its own id"
     for profile in container.profiles.values():
         names = asyncio.run(container.tools.tool_names_for(profile))
         assert names, (

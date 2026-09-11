@@ -235,6 +235,150 @@ def test_a_credential_is_reported_by_name_and_never_by_value(tmp_path: Path) -> 
     )
 
 
+# A dedicated database, never shared with `_APP_DATABASE` above: this test needs its own
+# databases both reset and reachable at once, which the four-way-broken tests never do.
+_DBOS_CHECK_DATABASE = "agent_core_preflight_dbos_check"
+
+
+def _reset_dbos_check_database() -> None:
+    """The app database exists and is reachable; its DBOS siblings, old and new, do not.
+
+    So `_database_checks` gets past its early returns to the check under test, and that
+    check finds the sibling genuinely absent rather than left over from an earlier run.
+    """
+    with psycopg.connect(_ADMIN_CONNINFO, autocommit=True) as admin:
+        for database in (
+            f"{_DBOS_CHECK_DATABASE}_dbos_sys",
+            f"{_DBOS_CHECK_DATABASE}_dbos",
+            _DBOS_CHECK_DATABASE,
+        ):
+            admin.execute(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
+        admin.execute(f'CREATE DATABASE "{_DBOS_CHECK_DATABASE}"')
+
+
+@pytest.mark.phase("F11")
+@_needs_postgres
+def test_the_preflight_checks_the_database_dbos_actually_opens(tmp_path: Path) -> None:
+    """docs/TASKS.md#t-f11-36.
+
+    `t-f11-20` moved the bootstrap to create `<app>_dbos_sys`, the name dbos 2.31.1
+    derives from the app URL and opens - and left this module checking `<app>_dbos`, the
+    retired convention nothing ever opens. A correctly bootstrapped instance was warned
+    about a database that does not matter and asked nothing about the one that does.
+    """
+    from agent_core.adapters.driven.persistence_pg import migrations
+
+    module = _preflight_module()
+    assert module is not None, "there is no preflight module; see the test above."
+
+    _reset_dbos_check_database()
+    try:
+        profiles = tmp_path / "profiles"
+        _broken_profile(profiles)
+        settings = Settings(
+            app_conninfo=_conninfo_for(_DBOS_CHECK_DATABASE),
+            profiles_dir=profiles,
+            policy_dir=tmp_path / "no-policy-here",
+            skills_dir=tmp_path / "skills",
+            media_dir=tmp_path / "media",
+        )
+        report = asyncio.run(module.preflight(settings, environ={}))
+    finally:
+        with psycopg.connect(_ADMIN_CONNINFO, autocommit=True) as admin:
+            admin.execute(
+                f'DROP DATABASE IF EXISTS "{_DBOS_CHECK_DATABASE}" WITH (FORCE)'
+            )
+
+    names = [check.name for check in report.checks]
+    system_database = migrations.dbos_system_database(_DBOS_CHECK_DATABASE)
+    assert f"database {system_database}" in names, (
+        f"the preflight never looks at {system_database}, the database dbos derives from "
+        f"the app URL and opens - it names the wrong sibling instead:\n{report.render()}"
+    )
+    assert f"database {_DBOS_CHECK_DATABASE}_dbos" not in names, (
+        "the preflight still checks the retired '_dbos' convention - a database nothing "
+        f"creates and nothing opens:\n{report.render()}"
+    )
+
+
+def _mcp_down_profile(directory: Path) -> None:
+    """A profile whose local half is trivially fine and whose only MCP server is not.
+
+    `toolsets: []` on purpose - the question under test is what happens to the SERVER,
+    and a profile that also failed to compose locally would confound the two.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "mcp_down.yaml").write_text(
+        "\n".join(
+            (
+                "id: mcp_down",
+                "persona: |",
+                "  Only used to prove an unreachable MCP server is reported, not swallowed.",
+                "model: nowhere/does-not-exist",
+                "toolsets: []",
+                "mcp_servers:",
+                "  - name: down",
+                "    transport: http",
+                # Port 1 is reserved and nothing on this machine listens on it, so the
+                # connection is refused immediately rather than timing out.
+                "    url: http://127.0.0.1:1/mcp",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.phase("F11")
+@_needs_postgres
+def test_an_unreachable_mcp_server_is_a_warning_not_a_silent_pass(
+    tmp_path: Path,
+) -> None:
+    """docs/TASKS.md#t-f11-36. A degraded start must show up in the report, or nobody can.
+
+    `provider.toolset_for` never connects - `adapters/driven/mcp/toolsets.py` composes a
+    server's toolset without reaching it - so a profile whose only MCP server is down
+    still, correctly, reports its local half servable. What must not happen is the report
+    stopping there: `_GuardedToolset` and `_discover_raw_names` both swallow the failure
+    at WARNING and keep going, which is right for a running turn and wrong for a report
+    nobody is tailing the logs of at the moment it runs.
+    """
+    module = _preflight_module()
+    assert module is not None, "there is no preflight module; see the test above."
+
+    profiles = tmp_path / "profiles"
+    _mcp_down_profile(profiles)
+    settings = Settings(
+        app_conninfo=_conninfo_for(_ABSENT_DATABASE),
+        profiles_dir=profiles,
+        policy_dir=tmp_path / "no-policy-here",
+        skills_dir=tmp_path / "skills",
+        media_dir=tmp_path / "media",
+    )
+
+    report = asyncio.run(module.preflight(settings, environ={}))
+
+    servable = [check for check in report.checks if check.name == "profile mcp_down"]
+    assert servable and servable[0].severity == "ok", (
+        f"the local half of this profile has no server on it and should compose cleanly: "
+        f"{servable}"
+    )
+
+    mcp_warnings = [
+        check
+        for check in report.warnings
+        if check.category == "profile" and "down" in check.name
+    ]
+    assert mcp_warnings, (
+        "the profile declares an MCP server nothing is listening on, and the report says "
+        f"nothing about it - a degraded start is invisible to the operator:\n"
+        f"{report.render()}"
+    )
+    assert mcp_warnings[0].remedy, (
+        f"an unreachable MCP server is reported with no remedy: {mcp_warnings[0]}"
+    )
+
+
 @pytest.mark.phase("F11")
 @_needs_postgres
 def test_serve_and_console_refuse_to_start_on_a_hard_failure(tmp_path: Path) -> None:
@@ -341,8 +485,9 @@ def test_the_audit_reader_seat_reads_through_the_audit_pool_and_retires_the_hand
     # Reaching for the console's own seat on purpose: `build_console` CHOOSES this
     # collaborator, and the choice - which pool the trail is read through - is what is
     # under test. Passing one in would assert that the parameter works.
-    log = console._tool_calls  # noqa: SLF001
-    asyncio.run(log.for_turn(TurnId(str(uuid4()))))
+    reader = console._audit  # noqa: SLF001
+    admin = console._admin  # noqa: SLF001
+    asyncio.run(reader.tool_calls_for_turn(admin, TurnId(str(uuid4()))))
 
     assert container.audit_pool.checkouts == 1, (
         "the console's tool-call read did not go through the AUDIT pool. A reader on the "
