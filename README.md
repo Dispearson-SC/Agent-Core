@@ -144,8 +144,20 @@ a tool nobody can run to find out what is wrong.
 ```
 python -m agent_core console      # an operator REPL — make, use and judge an agent
 python -m agent_core serve        # the HTTP process
+python -m agent_core peer-worker  # answers one agent's questions to another
 python -m agent_core              # same as `serve`
 ```
+
+**`peer-worker` is a second process, and delegation does not complete without it.** When
+one agent asks another, the question lands on a durable queue and the asking turn suspends
+— it does not block. Something has to claim that question, run a turn as the *answering*
+agent, and post the reply. That is this process. Without it the ask is queued, correct, and
+answered by nobody until the asking agent's `reply_timeout_seconds` runs out.
+
+It runs the answering turn under the target agent's own profile, toolset, policy and
+budget — never the asker's. Running it as the asking agent would make delegation a
+privilege escalation dressed as a question, and an invisible one: the audit row would name
+the asker and everything would look correct.
 
 Both start the same container, apply the same migrations, and run the same preflight
 before opening a socket or a prompt. The console is where an operator actually creates an
@@ -176,16 +188,41 @@ This is the distinction the whole phase is built to prove, and it is worth readi
 Watching a refusal and approving it end to end, with the shipped `delivery_optimizer`
 profile: `:use delivery_optimizer`, ask for a price change, watch `pricing_apply` come
 back `needs_approval` (`Core/policy/rules.yaml` is why), then `:pending` and `:approve
-<id>`. Orchestration end to end is `:use support_triage` asking something only
-`billing_specialist` can answer — the two shipped profiles already name each other.
+<id>`.
+
+**Orchestration end to end needs two more things than it looks like**, and neither is a
+detail you can discover later:
+
+```
+python -m agent_core peer-worker            # in one terminal
+python -m agent_core console --durable --role operator   # in another
+```
+
+then `:use support_triage` and ask something only `billing_specialist` can answer — the
+two shipped profiles already name each other.
+
+`--durable` matters because the step that hands a question to the mailbox lives in the
+workflow, and the console's default mode calls the use case directly. In direct mode the
+turn suspends and no mailbox is ever asked. `--role operator` matters because the grant in
+`Core/policy/rules.yaml` names both a role and a channel; without the role it does not
+match and the delegation is refused with `[no matching rule]`. **That refusal is the policy
+engine working, not a misconfiguration** — it is the same narrowing that stops a chat
+channel from reaching a tool an operator can use.
 
 ### 6. What the console does NOT prove
 
-The console calls `StartTurn` directly — it does not go through the DBOS workflow at all.
-Reading a turn there is real proof of the profile, the tool provider, the policy engine
-and the audit sink, because those are the exact collaborators this deployment was built
-with. It is **not** proof of three things a person judging this system needs to know are
-still untested by it:
+**This applies to the console's DIRECT mode, which is the default.** `:mode durable`
+enqueues through the DBOS workflow instead and exercises all three of the things below;
+the prompt carries `[direct]` or `[durable]` on every line so the mode is never something
+you have to remember. Direct mode stays the default because a REPL that answers
+immediately is what makes an agent worth iterating on — the trade is stated here rather
+than hidden.
+
+In direct mode the console calls `StartTurn` directly and does not go through the workflow
+at all. Reading a turn there is real proof of the profile, the tool provider, the policy
+engine and the audit sink, because those are the exact collaborators this deployment was
+built with. It is **not** proof of three things a person judging this system needs to know
+are still untested by it:
 
 - **Durability** — a crash mid-turn is not recovered and not replayed here; there is no
   workflow to recover from, because none was started.
@@ -196,8 +233,11 @@ still untested by it:
   it and `:approve` still answers it, but only because the console is standing in for both
   sides of that handoff.
 
-`serve` is the process that actually exercises all three. A turn that works in the console
-is proof of policy and tools; it is not proof of the process that will run it in production.
+`serve` and `:mode durable` are what actually exercise all three. A turn that works in the
+console's direct mode is proof of policy and tools; it is not proof of the process that
+will run it in production — and delegation is the one thing that does not merely go
+*unproven* there, it does not work at all, because the step that asks the mailbox is in the
+workflow this mode skips.
 
 ## Documents
 

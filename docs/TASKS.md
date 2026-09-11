@@ -934,8 +934,80 @@ writing a line of SQL**. See `docs/ROADMAP.md` for why each row below exists.
 | <a id="t-f11-38"></a>t-f11-38 | **`preflight` exits 0 with a FAIL check.** It printed "1 not ready" and returned success, so a deploy script that gates on it gets a green light on a deployment that cannot serve a turn | `adapters/driving/cli/preflight.py` | TODO |
 | <a id="t-f11-39"></a>t-f11-39 | **A shipped profile points its MCP server at a TEST FIXTURE**, `Core/tests/fixtures/mcp_echo_server.py`, by a path relative to the working directory — so it resolves only when the process is started from one place, and it ships a test as production configuration | `Core/profiles/delivery_optimizer.yaml` | TODO |
 | <a id="t-f11-40"></a>t-f11-40 | A raw `ExceptionGroup` traceback is printed to the operator's terminal when an MCP server does not answer. The `[warn]` line beside it is correct and sufficient; the traceback makes a handled, documented degraded start look like a crash | `adapters/driven/mcp/toolsets.py` | TODO |
+| <a id="t-f11-41"></a>t-f11-41 | **A deferred tool call crashes the turn.** With `ask_peer` allowed, the model calls it and the runner raises `UserError: A deferred tool call was present, but DeferredToolRequests is not among output types`. Neither `ask_peer` nor `request_evidence` — the two shared deferred mechanisms — has ever left a turn in production | `adapters/driven/agent_pydantic/runner.py` | **DONE — `output_type=[str, DeferredToolRequests]`; an inline handler would have to hold a coroutine open across a redeploy** |
+| <a id="t-f11-42"></a>t-f11-42 | **The ask never leaves.** Nothing turns a deferred `ask_peer` call into `AgentMailbox.ask()`, so the correlation id is never minted or persisted and the question never reaches the queue. `TurnWorkflowDependencies` has no mailbox seat to bind | `adapters/driving/workflow/turn_workflow.py` | **DONE** |
+| <a id="t-f11-43"></a>t-f11-43 | **Nobody runs the peer's turn.** The mailbox has an exactly-once `claim_next` and no consumer: a driving adapter must claim an ask, run a turn as the TARGET agent under its own profile and policy, and `answer()` — the sibling of `scheduler/cron.py`, and the piece nothing in this build anticipated | `adapters/driving/peers/worker.py` | **DONE — runs the turn as the TARGET agent** |
+| <a id="t-f11-44"></a>t-f11-44 | **The answer never comes back.** Nothing calls `read_answer` in production, so even a claimed and answered ask never resumes the turn that is waiting for it — under the provider's original `tool_call_id`, verbatim | `adapters/driving/workflow/turn_workflow.py` | **DONE** |
+| <a id="t-f11-45"></a>t-f11-45 | `PolicyEnforcement` **blocks** on NEEDS_APPROVAL instead of raising `ApprovalRequired`. That was `t-f3-02`'s open decision because the output type did not exist; it exists now, so an approval can suspend through the same deferred path a peer ask does | `adapters/driven/agent_pydantic/runner.py` | **DONE — an approval now suspends through the same deferred path a peer ask does** |
+| <a id="t-f11-46"></a>t-f11-46 | Two words that mislead a reader: the console labels a DEFERRED call `- executed` (the sink records intent and verdict before execution, correctly — but a call that deferred never ran), and `start_turn._notice_for` overwrites a DELEGATION's reason for **every** audience, so an admin can never see the raw ask | `adapters/driving/cli/console.py` | **DONE** |
+| <a id="t-f11-47"></a>t-f11-47 | **`max_hops` is not enforced.** `TurnRequest` has no seat for `hop`, so an answering turn starts at 0 and a cycle A→B→A resets the counter at every hop. Both allowlists and both `enabled` switches ARE enforced — this is the one half that is not | `domain/turn.py` | **DONE — `hop: int = 0`, and the default is a statement: a turn no peer delegated is at depth zero** |
+| <a id="t-f11-48"></a>t-f11-48 | **`PeerAsk` carries no asking `AgentId`**, so the ANSWERING side cannot re-run its own `may_ask` check on arrival. The asking side's gate still applies; this is the defence in depth that is missing, and it needs a column on `peer_messages` | `adapters/driven/peers/mailbox.py` | **PARTIAL — column, adapters and seat landed; the port widening is [`t-f11-50`](#t-f11-50)** |
+| <a id="t-f11-49"></a>t-f11-49 | The loop is wired and **cannot complete**: `main.py` leaves the wake seat unbound, `rules.yaml` has no rule a peer turn can reach (it runs as subject `peer-agent` on channel `peer`, so every tool is denied and B answers from its persona alone), and `test_durability.py` binds no `peers` seat | `Core/src/agent_core/main.py` | **DONE — but see [`t-f11-51`](#t-f11-51): nothing a human can type reaches the loop** |
+| <a id="t-f11-50"></a>t-f11-50 | Finish `t-f11-48`: widen `AgentMailbox.ask` with the `asker` seat, **and every stub and call site in the same change** — mypy rejects an implementation missing even a DEFAULTED protocol keyword, so the port cannot move alone. `_step_ask_peers` already computes the caller and drops it | `ports/agent_mailbox.py` | TODO |
+| <a id="t-f11-51"></a>t-f11-51 | **Nothing a human can type reaches the peer loop.** `_step_ask_peers` lives in the DBOS workflow; the console calls `StartTurn` DIRECTLY, so an `ask_peer` from the console suspends and no mailbox is ever asked. The only path through the workflow is `POST /turns` on channel `http`, where the `ask_peer` rule does not match — and no `cli` channel is registered, so a workflow turn on `cli` dies in `_step_deliver` | `adapters/driving/cli/console.py` | TODO |
 | <a id="t-f11-37"></a>t-f11-37 | **`max_cost_usd` accepts a non-finite `Decimal` and fails OPEN.** `Decimal("nan")` parses, every comparison against NaN is False, so `cost_exhausted` can never be True and the agent has NO SPEND LIMIT. This file already rejects non-finite literals in approval conditions and never applied the rule to its own money field | `domain/profile.py` | TODO |
 
+
+
+
+
+
+> **`t-f11-51` is the tenth instance, and the purest one yet: the loop works and nothing a
+> human can type reaches it.** Every move is wired, tested and green end to end — the ask
+> leaves, a worker runs the answering agent under its own identity, the answer comes back
+> under the provider's original `tool_call_id`, and the hop count travels. The test that
+> proves it drives the workflow directly.
+>
+> An operator has two doors and neither opens. The console calls `StartTurn` directly — which
+> is deliberate, documented in its own banner, and the reason a REPL answers immediately — so
+> the workflow step that asks the mailbox never runs. `POST /turns` does go through the
+> workflow, and arrives on channel `http`, where the `ask_peer` rule scoped to `cli` does not
+> match. Two correct decisions that do not compose.
+>
+> Whoever closes this is making a real choice, not a wiring fix: either the console gains a
+> durable path through the workflow — and its banner stops being true in the way it is true
+> today — or the grant names the channel the workflow actually serves, and an operator tests
+> delegation over HTTP rather than at the terminal they asked for. Write down which, and what
+> it costs.
+
+> **`t-f11-47` is the honest half of a security control, and the agent said so rather than
+> implying the whole thing worked.** The two-sided allowlist and both `enabled` switches are
+> enforced exactly as written — an agent cannot ask a peer neither side named. What is NOT
+> enforced is the DEPTH: `hop` is turn-level state, `TurnRequest` has no seat for it, so the
+> answering turn starts at zero and A→B→A→B never trips `max_hops`.
+>
+> The failure it allows is a loop between two agents that each legitimately allow the other —
+> not an unauthorised call, but an unbounded authorised one, which is a bill and a hung
+> conversation rather than a breach. Worth knowing precisely, which is why it is written this
+> way instead of as "hop limit: done".
+
+> **`t-f11-42`..`t-f11-44` are one loop, and the middle one is the piece nobody anticipated.**
+> F9 built the durable mailbox, the hop limit, the two-sided allowlist, the A2A adapter and
+> `ask_peer` as a shared deferred tool. `t-f11-14` made a profile able to name a peer. All of it
+> is the ASK side and the TRANSPORT — and **nothing ever runs the answering agent's turn.**
+> `PgAgentMailbox` has an exactly-once `claim_next` with a concurrent-claim test behind it, and
+> no consumer: the queue was built for a worker nobody wrote.
+>
+> It is a DRIVING adapter, the sibling of `scheduler/cron.py`: it claims work from outside and
+> calls a use case, and it must run the turn as the TARGET agent — B's profile, B's toolset,
+> B's policy, B's budget. Running it under A's identity would make delegation a privilege
+> escalation dressed as a question, which is the one thing the two-sided allowlist exists to
+> prevent.
+>
+> And B may itself suspend — to ask a human, or another peer. So the worker cannot assume an
+> answer arrives within one turn; that is why `ask` and `answer` are separated by a durable
+> queue rather than by a function call.
+
+> **`t-f11-41` is the ninth instance, and it was one policy rule away the whole time.**
+> `ask_peer` resolved into the toolset, the profile named its peer, the mailbox was bound — and
+> the tool was `deny [no matching rule]`, so the model was never offered it and the deferred
+> path was never walked. Granting it in YAML, which is the thing F11 claims should be enough,
+> is what reached the code nobody had run.
+>
+> Every test that exercised a deferred tool built the deferred result itself and handed it back
+> — `t-f3-10` resumes from a `ToolResolution`, `t-f9-04` asserts the suspension shape. None of
+> them asked Pydantic AI to PRODUCE one, because none of them ran an agent whose toolset
+> actually contained a deferred tool the model was allowed to call.
 
 > **`t-f11-38` is the one that would have shipped.** The preflight was built because every
 > failure in this phase surfaced one at a time, three commands apart — and it answers that
@@ -1100,7 +1172,7 @@ parallel pick the same one:
 | `0022` | [`t-f11-07`](#t-f11-07) | `reason` on `audit_tool_calls` — what the winning rule actually said |
 | `0023` | [`t-f11-21`](#t-f11-21) | `tenant_id` on `audit_tool_calls` — scoping a read without an evidence-erasing join |
 | `0024` | [`t-f1-24`](#t-f1-24) | `messages` re-encoded as `ModelMessage`; the unreadable legacy rows are deleted, not migrated |
-| `0025` | *unallocated* | held free |
+| `0025` | [`t-f11-48`](#t-f11-48) | `from_agent_id` on `peer_messages` — who asked, so the answering side can refuse |
 | `0026` | *unallocated* | held free |
 | `0027` | *unallocated* | held free |
 | `0024` | *unallocated* | held free |

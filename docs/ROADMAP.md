@@ -140,6 +140,104 @@ before they are in force. The cost is that changing a rule needs a restart, and 
 is deliberate — a permission that can be granted at a prompt is a permission granted
 without a record.
 
+## Day 1.6 — one agent asking another
+
+### F12 · Agent-to-agent orchestration
+
+**Done when** an operator gives one agent a question outside its competence, that agent
+delegates to a peer its own profile names, the peer answers under **its own** identity and
+permissions, and the first agent finishes the turn with that answer — surviving a redeploy
+in the middle, and with the answer treated as untrusted text the whole way.
+
+Anchored as `t-f11-42` … `t-f11-46`, which were written before this section existed: the
+loop arrived as a finding, not as a design, and this is that design written down after the
+fact. That order is itself the lesson — see *How this was found*, below.
+
+#### The shape, and why each piece is separate
+
+Delegation is **four moves**, and the reason they are four rather than one function call is
+that a peer may take hours to answer:
+
+| # | Move | Where it lives |
+|---|---|---|
+| 1 | A's model calls `ask_peer`; the turn **suspends** rather than blocking | `agent_pydantic/runner.py` (`t-f11-41`, done) |
+| 2 | The suspension becomes a real `AgentMailbox.ask()`; the correlation id is minted **and persisted together** | `workflow/turn_workflow.py` (`t-f11-42`) |
+| 3 | A worker claims the ask and runs a turn **as B** | `driving/peers/worker.py` (`t-f11-43`) |
+| 4 | The answer resumes A's turn under the provider's **original** `tool_call_id` | `workflow/turn_workflow.py` (`t-f11-44`) |
+
+Move 3 is a **driving** adapter, the sibling of `scheduler/cron.py`: it claims work from
+outside and calls a use case. It is not a service A calls.
+
+#### The five properties that must hold, and what breaks without each
+
+**1. The answering turn runs as B — B's profile, B's toolset, B's policy, B's budget.**
+Running it under A's identity makes delegation a privilege escalation dressed as a
+question: A asks B, B has tools A does not, and if the turn runs as A then A has just used
+them. It would be invisible, because the audit row would name A and everything would look
+correct. The two-sided allowlist exists to stop exactly this, and it stops nothing if the
+identity does not travel.
+
+**2. The wait is durable, and it is not sixty seconds.** `DBOS.recv()` defaults to a
+60-second timeout (`docs/FIELD-NOTES.md`), which is the trap F3 was warned about. B may
+itself suspend to ask a human. A durable wait that quietly becomes a one-minute wait looks
+fine on a fast machine and fails the first time a person is slow.
+
+**3. The `tool_call_id` is the provider's, byte for byte.** Non-negotiable #5. A regenerated
+or normalised id surfaces as a provider 400 much later, never as a failing test here.
+
+**4. A peer's answer is untrusted content.** Non-negotiable #10. *"It is our own agent"* is
+not a trust argument: an agent can be misled, and then it is a confused deputy holding our
+credentials. If B was the victim of an injection, what it sends A is hostile text with
+friendly provenance. `read_answer` already returns it fenced — the risk here is
+**double-wrapping**, not forgetting to wrap.
+
+**5. The hop count travels with the ask.** A cycle A→B→A that resets the counter at every
+hop is a limit that never fires.
+
+#### What suspends, and why they are one mechanism
+
+Three things park a turn and wait for something outside it: a peer ask, a human approval,
+and an evidence upload. They are deliberately the same mechanism — a deferred tool call
+whose result arrives later — and `PendingKind` tells them apart so the workflow can route
+each to something that can actually answer it. Publishing a peer ask to a person asks a
+question nobody can answer; `t-f9-08` exists for that.
+
+`t-f11-45` finishes the set: an approval currently **blocks** inside the run rather than
+suspending, because until `t-f11-41` there was no way to end a run with an unanswered call.
+There is now, and F3's criterion — approve 24 hours later, after a redeploy — is only
+reachable through it.
+
+#### What this phase deliberately does NOT do
+
+- **No agent discovers another.** A profile NAMES its peers, and an unnamed peer is refused.
+  `PeerPolicy.may_ask` is an allowlist whose empty value means *nobody*, and that default is
+  the whole design: a permission model whose default is "anyone" is not a permission model.
+- **No agent is an administrator.** The worker runs under a `CallerIdentity`, never an
+  `AdminIdentity` (non-negotiable #9). An answering agent is a caller with no human behind
+  it.
+- **No shared conversation.** A fresh session per answered ask, for `cron.py`'s reason:
+  inheriting a conversation would let one customer's history answer another's question.
+
+#### How this was found, which is the part worth keeping
+
+Every piece of the ASK side and the TRANSPORT was built and tested across F9: the durable
+mailbox with an exactly-once `claim_next` and a concurrent-claim test behind it, the hop
+limit, the two-sided allowlist, the A2A adapter, `ask_peer` as a shared deferred tool, and
+`PendingKind.DELEGATION` so a peer ask is never published to a human. `t-f11-14` then made
+a profile able to name a peer.
+
+**None of it had ever run.** `ask_peer` resolved into the toolset and the policy engine
+refused it — `deny [no matching rule]`, correctly, because no rule granted it — so the model
+was never offered the tool and the deferred path was never walked. Granting it in YAML,
+which is exactly what this architecture claims should be sufficient, is what finally reached
+the code nobody had executed: first a crash in the runner, then an empty middle where the
+worker should be.
+
+That is the ninth instance in this build of one shape — **a collaborator every test supplied
+and production never exercised** — and the queue with no consumer is its purest form: a
+durable, correct, concurrency-tested mechanism built for a caller nobody wrote. The table in
+`docs/STATE.md` lists the other eight.
+
 ## Day 2 — multi-tenant
 
 ### D2 · LiteLLM becomes a proxy, plus voice out
