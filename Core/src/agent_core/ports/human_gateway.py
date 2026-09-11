@@ -55,9 +55,13 @@ class HumanGateway(Protocol):
 
         ASYNC (D13): a correlation write followed by a channel send over the network.
 
-        1. Render each request for a human. For APPROVAL, the ask is
-           `PolicyDecision.reason` plus the tool arguments; for EVIDENCE it is
-           `PendingRequest.reason`.
+        1. Render each request for a human: THAT something is pending, plus a `reason` -
+           for APPROVAL, `PolicyDecision.reason`; for EVIDENCE, `PendingRequest.reason`.
+           NEVER the tool name and NEVER its arguments, redacted or otherwise -
+           non-negotiable #11's WHICH-tool half, not just argument-value redaction. See
+           the only adapter's REDACTION note (adapters/driven/human/gateway.py) for why
+           that is wider than it first looks: a tool's own NAME already tells a user
+           which tool is pending, before a single argument value leaves the process.
         2. Deliver on the session's channel.
         3. Include a correlation handle carrying (turn_id, tool_call_id) so the reply can
            be routed back without the human having to quote anything.
@@ -65,10 +69,6 @@ class HumanGateway(Protocol):
         MUST be idempotent per (turn_id, tool_call_id). A DBOS step can be retried after a
         crash, and re-publishing means the human is asked the same question twice - which
         is how you get two conflicting approvals for one action.
-
-        NEVER put raw tool arguments into the message without redaction. Arguments can
-        contain credentials, tokens or personal data, and the channel is usually less
-        trusted than the database.
         """
         ...
 

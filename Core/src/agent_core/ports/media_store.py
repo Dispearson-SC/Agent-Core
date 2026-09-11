@@ -1,11 +1,11 @@
 """Port: MediaStore - where does this binary live and how do I retrieve it?
 
 Phase:      F7
-Tasks:      docs/TASKS.md#t-f7-02
+Tasks:      docs/TASKS.md#t-f7-02, docs/TASKS.md#t-f7-10
 Adapter:    adapters/driven/media_fs/ (disk day 1, S3-compatible later)
 Per-vertical: NO
-Status:     FROZEN (t-f7-02) - members are async per D13; bodies stay pseudo-code
-            until the adapter lands at t-f7-04
+Status:     FROZEN (t-f7-02) - WIDENED ONCE at t-f7-10, because `signed_url` handed
+            back a bare string and the media type did not survive the trip
 
 WHY BYTES NEVER TOUCH THE DOMAIN
     The domain holds `MediaRef`. Payloads in domain objects make turn records enormous and
@@ -35,13 +35,52 @@ WHY signed_url IS ITS OWN MEMBER
     call site happened to pass. Two members keep the decision visible: code that wants a
     provider-reachable URL has to name it. Locked in tests/unit/test_ports_media_store.py,
     together with the rule that no member returns a payload inside a domain type.
+
+WHY signed_url HANDS BACK A REFERENCE AND NOT A STRING (t-f7-10)
+    A URL is not self-describing. `adapters/driven/media_fs/` signs a CONTENT-ADDRESSED
+    path - `<base>/<sha256>?expires=&sig=` - and that path deliberately carries no
+    extension, because the only thing that could put one there is a name the uploader
+    chose (t-f7-04: a user-supplied filename on disk is a traversal and an overwrite in
+    one). So a bare string reached the runner with `MediaRef.kind` and
+    `MediaRef.mime_type` already gone, while `ImageUrl` versus `DocumentUrl` decides
+    whether the provider LOOKS at the file or READS it. The store is the last place that
+    still knows the type; it travels from there or it does not travel.
+
+    THE SHAPE NOT CHOSEN, and why. The alternative was to keep the kind on the
+    RESOLUTION - widen `ports/agent_runner.py::ToolResolution` so an evidence answer
+    carries its own kind beside the payload. It works, and it was rejected because it
+    puts the type on the wrong object: a `ToolResolution` is a HUMAN'S ANSWER to a
+    pending call, and most answers are an approval or a refusal with no media in them at
+    all. A media field there is empty on nearly every instance, every producer of a
+    resolution has to learn about media to fill it, and the one participant that actually
+    knows the type - the store - would still be handing it to a use case to copy across
+    intact. Issuing the pair together means nothing in between can drop half of it.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
 from agent_core.domain.media import MediaId, MediaKind, MediaRef
+
+
+@dataclass(frozen=True, slots=True)
+class SignedMedia:
+    """A short-lived URL together with the reference it was issued for.
+
+    NO PAYLOAD LIVES HERE, and none may be added. `MediaRef` is the domain's pointer, and
+    the rule that keeps turn records small and exception traces readable applies to this
+    type exactly as it applies to the ref: bytes come back from `get`, as themselves, at
+    the adapter edge. The structural lock in tests/unit/test_ports_media_store.py walks
+    dataclass fields for precisely this reason, and it walks this one now.
+
+    `ref` is the reference the store already held, never one reconstructed from the URL:
+    the URL is derived from the ref, and a type read back off a URL is a guess.
+    """
+
+    url: str
+    ref: MediaRef
 
 
 class MediaStore(Protocol):
@@ -77,10 +116,16 @@ class MediaStore(Protocol):
         prints the file into exception traces, and nothing fails when it happens."""
         ...
 
-    async def signed_url(self, media_id: MediaId, *, ttl_seconds: int = 300) -> str:
+    async def signed_url(self, media_id: MediaId, *, ttl_seconds: int = 300) -> SignedMedia:
         """PSEUDO-CODE - F7, only reachable when policy delivery is SIGNED_URL.
 
         ASYNC (D13): the storage backend issues the signature.
+
+        RETURNS THE URL AND THE REF TOGETHER (t-f7-10). The caller has to type the
+        provider part - an image as an image - and a signed path is content-addressed, so
+        there is nothing in the URL to read a type off. Returning only the string loses
+        `kind` and `mime_type` at the one point in the system that still has them. See
+        the module docstring for the shape that was not chosen.
 
         Short TTL by default. The URL is handed to a third party (the model provider), so
         treat it as public the moment it is issued: no guessable ids, no long expiry, no

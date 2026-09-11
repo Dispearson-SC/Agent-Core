@@ -1,9 +1,20 @@
 """Port: AgentMailbox - how does one agent ask another?
 
 Phase:   F9 (foundations) / D2 (full A2A)
-Tasks:   docs/TASKS.md#t-f9-02
+Tasks:   docs/TASKS.md#t-f9-02, docs/TASKS.md#t-f9-09
 Adapter: adapters/driven/peers/
 Per-vertical: NO
+
+ASK AND READ-BACK ARE ONE QUESTION, NOT TWO
+    `ask` returns a correlation id, so a port stopping there describes half a
+    collaboration: whoever holds the handle has no typed way to redeem it. Both adapters
+    grew `read_answer` regardless and the A2A test called it on the concrete class - which
+    is the port cut leaking, because only a caller that already knows WHICH adapter it
+    holds could read an answer. `read_answer` is therefore on the Protocol (t-f9-09).
+
+    It is not a blocking receive. It redeems a handle the caller already has and returns
+    None when the peer has not replied yet; the durable wait is still `DBOS.recv()` in the
+    workflow.
 
 NO NEW SUSPENSION MACHINERY - THIS IS THE THIRD USER OF THE SAME PATTERN
     `ask_peer(agent_id, question)` is an externally-executed deferred tool, exactly like
@@ -76,5 +87,28 @@ class AgentMailbox(Protocol):
         """Deliver an answer back. The adapter signals the waiting workflow.
 
         Idempotent per correlation id: a retried delivery must not resume a turn twice.
+        """
+        ...
+
+    async def read_answer(self, correlation_id: str) -> str | None:
+        """The peer's answer WRAPPED as untrusted content, or None if it has not answered.
+
+        The other half of `ask`. It never blocks: an unanswered handle returns None rather
+        than waiting, because the durable wait is `DBOS.recv()` in the workflow and a wait
+        here would silently lose the turn on the next deploy.
+
+        THE WRAPPING IS THE CONTRACT, NOT THE METHOD. Every implementation returns the
+        answer inside the same delimiters an `mcp_*` result gets - CLAUDE.md
+        non-negotiable 10. A peer is a third party: it may have read a hostile page, been
+        lied to by a person, or - over A2A - be an impersonated process on the far end of
+        a socket. "It is our own agent" is not a trust argument. Returning the raw bytes
+        and trusting a caller to wrap them is what this signature exists to prevent, so an
+        implementation that hands back what the peer literally wrote does not satisfy this
+        port however well its types line up. Any delimiter inside the peer's own text is
+        neutralised before wrapping, or the boundary closes early and the rest of the
+        peer's text reaches the model as instructions.
+
+        The stored row keeps the peer's bytes verbatim; the wrapper is applied on read, so
+        the audit trail never disagrees with what the peer actually said.
         """
         ...

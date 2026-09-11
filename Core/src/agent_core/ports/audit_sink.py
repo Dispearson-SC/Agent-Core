@@ -1,7 +1,10 @@
 """Port: AuditSink - what happened, who asked, what did it cost?
 
-Phase:      F1
-Tasks:      docs/TASKS.md#t-f1-09
+Phase:      F1, widened in F3
+Tasks:      docs/TASKS.md#t-f1-09, docs/TASKS.md#t-f3-14
+Status:     FROZEN - widened once, for the refused-decision seat D25 named and left
+            unowned. `Core/tests/unit/test_ports_audit_sink.py` is the regression lock,
+            and its negative case is the four-member pre-widening shape.
 Adapter:    adapters/driven/persistence_pg/audit_repository.py
 Per-vertical: NO
 
@@ -22,6 +25,11 @@ WHAT MUST BE RECORDED - the "why was this allowed?" test
     reconstructible from this table alone: the caller, the profile, the tool, the
     arguments, the policy decision AND its rule_id, who approved it, and what it cost.
     If any of those is missing, the record does not answer the question.
+
+    The question has a second half, and it went unrecorded until t-f3-14: who tried and
+    was REFUSED. A control nobody can show fired is indistinguishable from one that was
+    never wired, so a refused attempt needs a row of its own - see
+    `record_rejected_decision` below and docs/DECISIONS.md#d25.
 
 WHY EVERY METHOD HERE IS ASYNC (D13)
     Every one of them is an append to Postgres on its own connection, and `record_tool_call`
@@ -84,6 +92,42 @@ class AuditSink(Protocol):
         `tool_call_id` is the domain `ToolCallId` that `PendingRequest` carries, not a
         bare string: an approval filed against an id no tool call ever had is indexed,
         queryable and wrong, and nothing downstream can tell.
+        """
+        ...
+
+    async def record_rejected_decision(
+        self,
+        turn_id: TurnId,
+        tool_call_id: ToolCallId,
+        subject_id: str,
+        reason: str,
+    ) -> None:
+        """Somebody tried to decide and was not allowed to. docs/DECISIONS.md#d25.
+
+        ASYNC (D13): an insert, written on the same path `record_human_decision` is.
+
+        WHY THIS IS NOT `record_human_decision(approved=False)`
+            Because it is not one. That member means "a human decided", and a refusal
+            filed through it reads in the trail as a decision to refuse that the human
+            never made - a false record, which is worse than the silence D25 chose over
+            it. The four-eyes check therefore runs BEFORE the audit row in
+            `DecideApproval`, and this is the member it writes instead.
+
+            The distinction survives only while these are two members. Collapsing them
+            behind a flag re-creates the exact row D25 refused to write.
+
+        WHY `reason` IS NOT OPTIONAL
+            The row is read once, months later, by someone asking why an approval did
+            not take effect. "Refused" with no grounds cannot be told apart from a
+            clerical error, and the grounds are the only part that answers them.
+
+        CARRIES NO VERDICT
+            No `approved` seat: nothing was decided. `subject_id` is whoever attempted
+            it, `tool_call_id` is the request they attempted it against.
+
+        Append-only and outside the domain transaction, like every member here
+        (CLAUDE.md non-negotiable #6). This is the one row a rejected attempt leaves,
+        so a rollback that takes it removes the only evidence the control fired.
         """
         ...
 

@@ -21,6 +21,9 @@ WHY SUSPENSION IS A FIRST-CLASS OUTCOME
     port (`HumanGateway`) serves approvals and evidence requests alike.
     See docs/DECISIONS.md#d9.
 
+    Externally-executed is itself two cases, split by WHO executes: the user (EVIDENCE)
+    or another agent (DELEGATION). See `PendingKind`.
+
 INVARIANTS (assert in tests)
     I1. Every dataclass here is frozen. A record of what happened must not be editable
         by the code reading it.
@@ -79,14 +82,93 @@ class UserInput:
 
 
 class PendingKind(StrEnum):
-    """APPROVAL - a tool wants to run and needs a human yes/no.
-    EVIDENCE - a tool needs a human to SUPPLY something (a photo, a document).
+    """WHAT the turn is waiting for, and therefore WHO can end the wait.
 
-    Both suspend the turn identically. Only the channel message and the shape of the
-    resumed result differ."""
+    APPROVAL   - a tool wants to run and needs a human yes/no.
+    EVIDENCE   - a tool needs a human to SUPPLY something (a photo, a document).
+    DELEGATION - a deferred call ANOTHER AGENT executes (`ask_peer`, t-f9-04). The answer
+                 arrives as a peer's own turn completing on the same durable topic an
+                 approval arrives on, which is why no new suspension machinery exists for
+                 it (D17) - and exactly why it needed a kind of its own.
+
+    All three suspend the turn identically. Only the channel message, the shape of the
+    resumed result, and whether a person is asked at all differ.
+
+    WHY DELEGATION IS A KIND AND NOT A TOOL NAME (t-f9-08)
+        Pydantic AI's deferred tools split into approval-required and externally-executed
+        (docs/DECISIONS.md#d9), and this enum used to stop there - so a peer ask arrived
+        labelled EVIDENCE, indistinguishable from a request for the user's photo. Two
+        modules then read `tool_name` to tell them apart
+        (`application/start_turn.py::_notice_for`,
+        `adapters/driving/workflow/turn_workflow.py::_answerable_by_a_human`), and both
+        said in a comment that this is not where the decision belongs. A third mechanism
+        has to be added to every such site, and the site somebody forgets fails in the
+        worst direction: a question only an agent can answer is put in front of a person,
+        who cannot act on it while the turn holds open for three days.
+
+        EXTERNALLY-EXECUTED was never one case. It is two, and the axis that separates
+        them is WHO executes - which is a property of the request, so it belongs on the
+        request.
+
+    THE ONE PLACE A TOOL NAME MAY STILL DECIDE THIS
+        Whoever translates `DeferredToolRequests` into `PendingRequest` values (t-f7-07,
+        the runner adapter) knows which tool it is translating and labels the kind there,
+        once. Every reader downstream asks `kind`. That is the whole point: the tool name
+        collapses from N consumers to one producer, and the producer is the only module
+        that already has to know the tool.
+
+    THE STORED-OUTCOME MIGRATION THIS MEMBER WAS FEARED TO NEED IS EMPTY
+        `start_turn.py` weighed "a domain change plus a migration of every stored outcome"
+        and deferred on the strength of it. The cost was never paid because there is
+        nothing to pay it on: `turns.pending` is written as JSON by
+        `persistence_pg/conversation_repository.py::_jsonable` and NOTHING reads it back
+        into a `PendingRequest` - no production module constructs one at all yet. So no
+        stored row can name a kind that did not exist, and no reader can misread one that
+        now does. A historic row that recorded a peer ask as `"evidence"` still carries
+        `tool_name` in the same blob, so a backfill remains possible for whoever first
+        needs to ask that question of history. Nobody does today.
+    """
 
     APPROVAL = "approval"
     EVIDENCE = "evidence"
+    DELEGATION = "delegation"
+
+    @property
+    def answerable_by_a_human(self) -> bool:
+        """Whether a PERSON can resolve a request of this kind.
+
+        The single answer to the question `HumanGateway`'s callers have to ask before
+        publishing anything. Reading `HUMAN_ANSWERABLE` rather than answering inline so
+        the grid below stays the one place the decision is recorded.
+        """
+        try:
+            return HUMAN_ANSWERABLE[self]
+        except KeyError:
+            raise KeyError(
+                f"PendingKind.{self.name} has no row in HUMAN_ANSWERABLE. A new kind must "
+                "be answered by hand: nothing may infer whether a person can resolve it."
+            ) from None
+
+
+# Who can end the wait. THE single source of truth: one row per PendingKind, one
+# hand-written answer, no default and no derivation.
+#
+# WHY IT IS NOT `{kind: kind is not DELEGATION}` OR ANY OTHER DERIVATION
+#     `t-f10-01` shipped a visibility table whose ADMIN row was `frozenset(EntryKind)`. It
+#     read as a decision and was not one - every member ever added answered itself - and the
+#     guard meant to catch an undecided member could not fail. Written out, a new
+#     `PendingKind` leaves a hole here, `answerable_by_a_human` raises on it, and
+#     `test_pending_kind.py` goes red until somebody answers True or False for it.
+#
+# WHY A FALSE ROW IS NOT "NOBODY IS TOLD ANYTHING"
+#     A DELEGATION is never PUBLISHED to a person as a question, but the user is still told
+#     THAT something is pending - CLAUDE.md non-negotiable #11 and
+#     `EntryKind.PENDING_PLACEHOLDER`. This grid answers who is ASKED, not who is informed.
+HUMAN_ANSWERABLE: dict[PendingKind, bool] = {
+    PendingKind.APPROVAL: True,
+    PendingKind.EVIDENCE: True,
+    PendingKind.DELEGATION: False,
+}
 
 
 @dataclass(frozen=True, slots=True)

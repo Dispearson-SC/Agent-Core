@@ -1,8 +1,9 @@
 """AgentProfile - how a generic core becomes a specific agent.
 
-Phase:   F1 (shape) / F4 (first real profile) / F6 (skills, mcp) / F7 (media)
-Tasks:   docs/TASKS.md#t-f1-04, docs/TASKS.md#t-f4-02
-Status:  TYPES DEFINED / APPROVAL RULES EVALUATED (F4) / F6 AND F7 FIELDS SHAPE-ONLY
+Phase:   F1 (shape) / F4 (first real profile) / F6 (skills, mcp) / F7 (media) / F11 (peers)
+Tasks:   docs/TASKS.md#t-f1-04, docs/TASKS.md#t-f4-02, docs/TASKS.md#t-f11-14
+Status:  TYPES DEFINED / APPROVAL RULES EVALUATED (F4) / PEER ALLOWLIST LOADED (F11) /
+         F6 AND F7 FIELDS SHAPE-ONLY
 
 THE CONTRACT THIS FILE EXISTS TO SERVE
     Adding a vertical is ONE profile file plus ONE tools package.
@@ -43,7 +44,7 @@ from typing import Any
 from agent_core.domain.compaction import CompactionPolicy
 from agent_core.domain.knowledge import KnowledgePolicy, RetrievalMode
 from agent_core.domain.media import MediaDelivery, MediaKind, MediaPolicy
-from agent_core.domain.peers import PeerPolicy, PeerVisibility
+from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy, PeerVisibility
 
 
 class ProfileValidationError(ValueError):
@@ -364,16 +365,48 @@ def _build_knowledge_policy(data: object) -> KnowledgePolicy:
     )
 
 
+def _build_agent_ref(data: object) -> AgentRef:
+    """One entry of a profile's peer allowlist. docs/TASKS.md#t-f11-14.
+
+    A peer entry is an AUTHORISATION RECORD, so the two keys that identify the peer are
+    required rather than defaulted. `_reject_unknown_keys` already turns `agent_ids:` into
+    a loud failure; without this check `display_name:` alone would parse into an entry
+    whose id came from nowhere, and the allowlist would then answer for an agent nobody
+    wrote down.
+
+    `capabilities` are A2A-shaped HINTS and `endpoint` is optional by design: a peer with
+    no endpoint is reached in-process through the durable mailbox rather than over the
+    wire (adapters/driven/peers/mailbox_a2a.py), which is a different arrangement and not
+    a missing value."""
+    mapping = _require_mapping(data, where="peers.peers[]")
+    _reject_unknown_keys(mapping, {f.name for f in fields(AgentRef)}, where="peers.peers[]")
+    missing = {"agent_id", "display_name"} - set(mapping)
+    if missing:
+        joined = ", ".join(sorted(missing))
+        raise ProfileValidationError(f"peers.peers[] is missing required key(s): {joined}")
+    return AgentRef(
+        agent_id=AgentId(str(mapping["agent_id"])),
+        display_name=str(mapping["display_name"]),
+        capabilities=tuple(mapping.get("capabilities", ())),
+        endpoint=mapping.get("endpoint"),
+    )
+
+
 def _build_peer_policy(data: object) -> PeerPolicy:
     mapping = _require_mapping(data, where="peers")
-    # `peers` (the list of AgentRef) has no loader yet - F9, docs/TASKS.md#t-f9-01.
-    # Excluding it from `allowed` means a profile that sets it fails loudly instead of
-    # the setting being dropped.
-    allowed = {f.name for f in fields(PeerPolicy)} - {"peers"}
-    _reject_unknown_keys(mapping, allowed, where="peers")
+    _reject_unknown_keys(mapping, {f.name for f in fields(PeerPolicy)}, where="peers")
     defaults = PeerPolicy()
     return PeerPolicy(
         enabled=bool(mapping.get("enabled", defaults.enabled)),
+        # THE SEAT EVERY A2A MECHANISM WAS BUILT FOR - docs/TASKS.md#t-f11-14.
+        # This key was excluded until F11 ("no loader yet"), which was the right call while
+        # F9 was unbuilt: `may_ask` is an allowlist where empty means NOBODY, so a profile
+        # naming a peer refused to LOAD rather than quietly being served an empty list.
+        # Nothing has been relying on a half-working peer list, which is exactly what makes
+        # populating it safe now. Order is preserved because it is the order an operator
+        # wrote, and `_canonical` hashes it - adding an agent to an allowlist is a change to
+        # what this agent may do, so it moves the content hash and earns a version (D20).
+        peers=tuple(_build_agent_ref(item) for item in mapping.get("peers", defaults.peers)),
         max_hops=int(mapping.get("max_hops", defaults.max_hops)),
         visibility=PeerVisibility(mapping.get("visibility", defaults.visibility)),
         reply_timeout_seconds=int(
