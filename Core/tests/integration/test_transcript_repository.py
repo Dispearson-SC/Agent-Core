@@ -234,9 +234,10 @@ def test_the_cursor_stays_stable_when_rows_are_inserted_mid_page() -> None:
         conn.execute("DELETE FROM messages WHERE session_id = %s", (str(_SESSION.session_id),))
         conn.execute("DELETE FROM turns WHERE session_id = %s", (str(_SESSION.session_id),))
         conn.execute(
-            "INSERT INTO turns (turn_id, session_id, tenant_id, profile_id, state, created_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s)",
-            (_TURN_ID, str(_SESSION.session_id), str(_TENANT), "p-1", "started", base),
+            "INSERT INTO turns (turn_id, session_id, tenant_id, profile_id, state, "
+            "created_at, profile_version, profile_snapshot)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (_TURN_ID, str(_SESSION.session_id), str(_TENANT), "p-1", "started", base, 1, "{}"),
         )
         for index in range(6):
             conn.execute(

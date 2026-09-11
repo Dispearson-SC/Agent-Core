@@ -172,8 +172,13 @@ def test_a_signed_url_is_issued_with_a_short_expiry_when_delivery_says_so(
     ref = asyncio.run(store.put(PNG, kind=MediaKind.IMAGE, mime_type="image/png"))
 
     issued_at = int(time.time())
-    url = asyncio.run(store.signed_url(ref.media_id))
+    signed = asyncio.run(store.signed_url(ref.media_id))
+    # t-f7-10: the store hands back the URL AND the ref it was issued for. The path is
+    # still the content hash - deliberately extensionless, per the traversal reasoning at
+    # the top of this file - so the type travels beside it or not at all.
+    url = signed.url
 
+    assert signed.ref == ref, "the URL arrives with the reference it names"
     assert url.startswith("https://media.example.invalid/evidence/")
     assert PNG_SHA256 in url, "the URL names one medium and cannot be reused for another"
 
@@ -184,7 +189,7 @@ def test_a_signed_url_is_issued_with_a_short_expiry_when_delivery_says_so(
     )
     assert query["sig"][0], "an unsigned URL is a guessable path with extra steps"
 
-    shorter = asyncio.run(store.signed_url(ref.media_id, ttl_seconds=30))
+    shorter = asyncio.run(store.signed_url(ref.media_id, ttl_seconds=30)).url
     assert int(parse_qs(urlsplit(shorter).query)["expires"][0]) < expires
     assert parse_qs(urlsplit(shorter).query)["sig"][0] != query["sig"][0], (
         "the signature covers the expiry, or the ttl is decoration"

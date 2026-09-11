@@ -22,6 +22,15 @@ promise to survive contact with a caller, and neither of them is behaviour - bot
    rather than trusting a hand-copied literal. A sixth member added without an incident to
    justify it, or a documented strategy that no longer exists, both fail here.
 
+3. EVERY IMPLEMENTATION AND EVERY FAKE FOLLOWS THE PORT WHEN IT MOVES. `t-later-03`
+   widened `classify_error` to take a `ModelAttempt`, and the stand-ins did not follow:
+   one production adapter satisfied the new shape while the fakes still declared the old
+   one, so `ModelGateway` meant two different things depending on which module you read.
+   The test below type-checks the REAL adapter source and the REAL fakes source against
+   the port - not hand-copied stubs, which would only prove a copy is conformant - and
+   locks the widening with the `t-f1-05` precedent: the NEGATIVE case is the PRE-widening
+   signature, because a lock that only checked the new shape would accept the old one too.
+
 The structural half runs mypy in a subprocess over a throwaway module, the same way the
 `AgentRunner` port test does: `inspect` sees names and arities, never whether the
 assignment `x: ModelGateway = Stub()` is legal, and that assignment is the only property
@@ -47,11 +56,30 @@ from agent_core.ports.model_gateway import ModelGateway, RecoveryStrategy
 
 CORE_DIR = Path(__file__).resolve().parents[2]
 SRC_DIR = CORE_DIR / "src"
+FAKES_MODULE = CORE_DIR / "tests" / "fakes" / "ports.py"
+
+# One assignment per real ModelGateway in the tree. Each is APPENDED to the module that
+# actually defines the class, so what gets type-checked is the shipped implementation and
+# not a stub that merely resembles it.
+_PRODUCTION_ADAPTER = """
+from __future__ import annotations
+
+from agent_core.adapters.driven.llm_litellm.gateway import LiteLLMGateway
+from agent_core.ports.model_gateway import ModelGateway
+
+gateway: ModelGateway = LiteLLMGateway()
+"""
+
+_FAKE_ASSIGNMENT = """
+from agent_core.ports.model_gateway import ModelGateway as _ModelGateway
+
+gateway: _ModelGateway = FakeModelGateway()
+"""
 
 CONFORMING_STUB = """
 from __future__ import annotations
 
-from agent_core.ports.model_gateway import ModelGateway, RecoveryStrategy
+from agent_core.ports.model_gateway import ModelAttempt, ModelGateway, RecoveryStrategy
 
 
 class StubGateway:
@@ -61,7 +89,7 @@ class StubGateway:
     def base_url(self) -> str | None:
         raise NotImplementedError
 
-    def classify_error(self, error: Exception) -> RecoveryStrategy:
+    def classify_error(self, error: Exception, attempt: ModelAttempt) -> RecoveryStrategy:
         raise NotImplementedError
 
 
@@ -76,14 +104,14 @@ def caller_reads_the_proxy_address_from_the_port(gateway: ModelGateway) -> str |
 STUB_WITHOUT_BASE_URL = """
 from __future__ import annotations
 
-from agent_core.ports.model_gateway import ModelGateway, RecoveryStrategy
+from agent_core.ports.model_gateway import ModelAttempt, ModelGateway, RecoveryStrategy
 
 
 class GatewayWithoutBaseUrl:
     def model_id_for(self, profile_model: str) -> str:
         raise NotImplementedError
 
-    def classify_error(self, error: Exception) -> RecoveryStrategy:
+    def classify_error(self, error: Exception, attempt: ModelAttempt) -> RecoveryStrategy:
         raise NotImplementedError
 
 
@@ -219,4 +247,87 @@ def test_the_gateway_is_sync_because_nothing_here_does_io(name: str) -> None:
     assert not inspect.iscoroutinefunction(member), (
         f"ModelGateway.{name} is a pure lookup over configuration already in memory. "
         "Making it async puts an await on the hot path of every model call for nothing."
+    )
+
+
+# --- The widening, and the lock that stops it being undone ---------------------------
+
+PRE_WIDENING_STUB = """
+from __future__ import annotations
+
+from agent_core.ports.model_gateway import ModelGateway, RecoveryStrategy
+
+
+class GatewayClassifyingOnTheErrorAlone:
+    def model_id_for(self, profile_model: str) -> str:
+        raise NotImplementedError
+
+    def base_url(self) -> str | None:
+        raise NotImplementedError
+
+    def classify_error(self, error: Exception) -> RecoveryStrategy:
+        raise NotImplementedError
+
+
+gateway: ModelGateway = GatewayClassifyingOnTheErrorAlone()
+"""
+
+
+def _model_gateway_sources() -> dict[str, str]:
+    """Every ModelGateway in the tree, as a module that assigns it to the port.
+
+    The fakes module is read from disk and extended rather than imported, exactly as
+    `test_fakes.py` does: a name-level import would make a missing class a collection
+    error instead of a red assertion, and a hand-written copy would prove nothing about
+    the fake the rest of the suite actually injects.
+    """
+    return {
+        "LiteLLMGateway": _PRODUCTION_ADAPTER,
+        "FakeModelGateway": FAKES_MODULE.read_text(encoding="utf-8") + _FAKE_ASSIGNMENT,
+    }
+
+
+@pytest.mark.phase("F1")
+@pytest.mark.parametrize("implementation", sorted(_model_gateway_sources()))
+def test_every_gateway_implementation_and_fake_takes_the_attempt(
+    implementation: str, tmp_path: Path
+) -> None:
+    """A port that moved and a stand-in that did not is a port with two meanings.
+
+    `t-later-03` widened `classify_error` because, with one provider, ROTATE_KEY ("this
+    credential is the problem") and FALLBACK_MODEL ("this route is the problem") are
+    indistinguishable without the attempt. A fake still declaring the old signature makes
+    every use case tested against it pass while the production seat cannot be filled.
+    """
+    result = _type_check(_model_gateway_sources()[implementation], tmp_path)
+
+    assert result.returncode == 0, (
+        f"{implementation} does not satisfy ModelGateway. `classify_error` takes "
+        "`(error, attempt: ModelAttempt)` since t-later-03; an implementation or fake "
+        "left on the old shape means the port means one thing in src/ and another in "
+        "tests/.\n"
+        f"{result.stdout}{result.stderr}"
+    )
+
+
+@pytest.mark.phase("F1")
+def test_a_gateway_classifying_on_the_error_alone_is_not_a_model_gateway(
+    tmp_path: Path,
+) -> None:
+    """The negative case IS the pre-widening shape - that is what makes this a lock.
+
+    Per the `t-f1-05` precedent: asserting only that the widened signature is accepted
+    would pass just as happily against the old one, because widening a parameter list is
+    invisible to a check that never tries the narrower form.
+    """
+    result = _type_check(PRE_WIDENING_STUB, tmp_path)
+
+    assert result.returncode != 0, (
+        "ModelGateway accepted a gateway whose classify_error takes only the exception. "
+        "The widening has been undone, and with it the only evidence that separates a "
+        "dead credential from a dead route."
+    )
+    assert "Incompatible types in assignment" in result.stdout, (
+        "Expected the assignment to ModelGateway to be the rejected expression.\n"
+        f"{result.stdout}{result.stderr}"
     )

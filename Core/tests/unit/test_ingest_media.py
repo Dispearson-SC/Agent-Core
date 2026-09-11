@@ -18,9 +18,10 @@ THE ANCHOR ASSERTION IS AN ORDERING ONE
     a sniff-first implementation would also reject it and the test would prove nothing about
     order.
 
-Fakes only: no database, no network, no model. The shared fakes file (tests/fakes/ports.py)
-still lists `FakeMediaStore` as an F7 TODO and this task does not own that file, so the fake
-is declared here.
+Fakes only: no database, no network, no model. `FakeMediaStore` is the one shared stand-in
+for the port (tests/fakes/ports.py, docs/TASKS.md#t-f7-02) - this module used to hand-roll
+its own, and `PutCall` is imported from there too so the equality assertions below compare
+against the same dataclass the fake actually appends.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 
 import pytest
 
@@ -41,9 +41,11 @@ from agent_core.application.ingest_media import (
     UnacceptedMediaKindError,
     UnrecognisedMediaError,
 )
-from agent_core.domain.media import MediaDelivery, MediaId, MediaKind, MediaPolicy, MediaRef
+from agent_core.domain.media import MediaDelivery, MediaKind, MediaPolicy, MediaRef
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import TurnId
+from tests.fakes.ports import FakeMediaStore
+from tests.fakes.ports import MediaPutCall as PutCall
 
 PNG_HEADER = b"\x89PNG\r\n\x1a\n"
 JPEG_HEADER = b"\xff\xd8\xff\xe0"
@@ -53,51 +55,6 @@ OGG_HEADER = b"OggS\x00\x02"
 
 def _png(payload_size: int = 32) -> bytes:
     return PNG_HEADER + b"\x00" * payload_size
-
-
-@dataclass
-class PutCall:
-    data: bytes
-    kind: MediaKind
-    mime_type: str
-    filename: str | None
-
-
-@dataclass
-class FakeMediaStore:
-    """Records every call. `calls` being empty is the assertion, not an implementation
-    detail: it is the only externally visible difference between checking size first and
-    checking it after the bytes are already on disk."""
-
-    calls: list[PutCall] = field(default_factory=list)
-
-    async def put(
-        self,
-        data: bytes,
-        *,
-        kind: MediaKind,
-        mime_type: str,
-        filename: str | None = None,
-    ) -> MediaRef:
-        self.calls.append(PutCall(data, kind, mime_type, filename))
-        digest = hashlib.sha256(data).hexdigest()
-        return MediaRef(
-            media_id=MediaId(f"m-{digest[:12]}"),
-            kind=kind,
-            mime_type=mime_type,
-            size_bytes=len(data),
-            sha256=digest,
-            created_at=datetime(2026, 1, 1, tzinfo=UTC),
-            filename=filename,
-        )
-
-    async def get(self, media_id: MediaId) -> bytes:  # pragma: no cover - unused here
-        raise KeyError(media_id)
-
-    async def signed_url(
-        self, media_id: MediaId, *, ttl_seconds: int = 300
-    ) -> str:  # pragma: no cover - unused here
-        raise NotImplementedError
 
 
 @dataclass
@@ -119,6 +76,9 @@ class FakeAuditSink:
 
     async def record_human_decision(self, *args: object, **kwargs: object) -> None:
         raise AssertionError("IngestMedia must not record human decisions")
+
+    async def record_rejected_decision(self, *args: object, **kwargs: object) -> None:
+        raise AssertionError("IngestMedia must not record refused decisions")
 
     async def record_media(self, turn_id: TurnId, media: MediaRef, direction: str) -> None:
         self.media.append(RecordedAudit(turn_id, media, direction))

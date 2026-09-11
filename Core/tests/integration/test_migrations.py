@@ -56,7 +56,13 @@ def test_ensure_databases_creates_app_and_dbos_separately(
 ) -> None:
     """The app and dbos logical databases are created through two separate calls -
     never a single statement naming both. No real Postgres required: the connector is
-    faked."""
+    faked.
+
+    THE SECOND NAME IS DERIVED, NOT PASSED (t-f11-20). `ensure_databases` ignores
+    `dbos_database` and creates `<app>_dbos_sys`, which is the name DBOS itself opens; the
+    repo convention `<app>_dbos` had exactly one consumer and nothing ever connected to
+    it. The parameter is still accepted so callers written against the old convention keep
+    working, so it is still passed here - and deliberately not expected back."""
     created: list[str] = []
 
     def fake_ensure_database_sync(admin_conninfo: str, database: str) -> None:
@@ -75,7 +81,7 @@ def test_ensure_databases_creates_app_and_dbos_separately(
         )
     )
 
-    assert created == ["agent_core_app", "agent_core_dbos"]
+    assert created == ["agent_core_app", "agent_core_app_dbos_sys"]
 
 
 @pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
@@ -98,4 +104,10 @@ def test_migrations_are_idempotent_on_rerun() -> None:
         applied_ids = [row[0] for row in rows]
 
     assert len(applied_ids) == len(set(applied_ids)), "a migration id was applied twice"
-    assert set(applied_ids) == {migration.id for migration in migrations.APP_MIGRATIONS}
+    # `discover_app_migrations()`, not `APP_MIGRATIONS`: `run_migrations` is now an alias
+    # for `apply_all_migrations` (see its own docstring - the partial applier was a trap
+    # twenty fixtures reached for), so every sibling module's migration is applied too.
+    # Comparing against the eight in APP_MIGRATIONS could not pass on any database.
+    assert set(applied_ids) == {
+        migration.id for migration in migrations.discover_app_migrations()
+    }

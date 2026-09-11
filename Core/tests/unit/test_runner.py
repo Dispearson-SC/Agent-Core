@@ -469,9 +469,14 @@ def test_a_history_of_model_messages_is_prepended_to_the_run() -> None:
 
 
 def test_an_unrecognised_history_shape_is_refused_with_its_anchor() -> None:
-    """The store's on-disk message encoding is not settled while `append_outcome` is
-    pending (t-f1-13), so the runner accepts Pydantic AI's own message type and refuses
-    anything else rather than guessing at a format that is still being designed."""
+    """The runner accepts Pydantic AI's own message type and refuses anything else by name.
+
+    The dict below is EXACTLY what `PgConversationStore` used to return, and this refusal
+    is what the operator console hit on its very first turn - correctly, because guessing
+    at another module's encoding here would put a second, drifting copy of it inside the
+    adapter. t-f1-24 settled that encoding in the store, where it belongs; the anchor in
+    the message moved with it so the next reader is sent to the module that decides the
+    format rather than to a closed task."""
     scripted = ScriptedModel(call_tool=False)
     runner = _runner(
         scripted=scripted, policy=_allowing_policy(), audit=fakes.FakeAuditSink()
@@ -482,7 +487,11 @@ def test_an_unrecognised_history_shape_is_refused_with_its_anchor() -> None:
             runner.run(TURN_ID, _request(), _profile(), [{"role": "user", "content": "hi"}])
         )
 
-    assert "t-f1-13" in str(raised.value)
+    assert "t-f1-24" in str(raised.value)
+    assert "conversation_repository.py" in str(raised.value), (
+        "the message must name the module that OWNS the encoding: a reader who arrives "
+        "here is looking at the reader, and the writer is what they have to change"
+    )
     assert scripted.requests == 0
 
 
@@ -515,20 +524,46 @@ def test_an_exhausted_iteration_budget_finishes_the_turn_instead_of_raising() ->
 # The seams left for later phases
 
 
-def test_resume_is_an_explicit_f3_stub_that_names_its_phase() -> None:
-    """`resume` genuinely needs F3: there is no `HumanGateway`, no `DeferredToolRequests`
-    output type and nothing that can suspend, so a resumable id could not round-trip. It
-    says so rather than pretending."""
+def test_resume_refuses_an_empty_resolution_batch_instead_of_calling_the_model() -> None:
+    """This guard used to assert `resume` raised `NotImplementedError` naming F3.
+    `t-f3-10` implemented `resume`, so that property is simply no longer true and
+    re-asserting it would only pin the stub back in place. Deleting it outright would
+    have been worse: a removed guard and a passing suite look identical from outside.
+
+    So it is inverted into the property that IS true now and is worth holding. A resume
+    carrying no resolutions answers nothing: the pending tool call is still pending, so
+    re-entering the model would spend a request to arrive back at the same suspended
+    turn - and, because Pydantic AI synthesizes a return for a dangling tool call when no
+    `deferred_tool_results` is supplied (`test_runner_history.py`), it would come back
+    LOOKING finished with a fabricated result in the history rather than the human's
+    answer. It is refused here, before the model, exactly as an unknown `tool_call_id`
+    is (`test_runner_resume.py`).
+
+    The `caller` and `session` seats are supplied because the port requires them
+    (docs/TASKS.md#t-f3-16) - a resumed continuation is policed and audited like any
+    other - and the refusal has to come BEFORE either is used, which is what this
+    asserts by reaching the model zero times.
+    """
     scripted = ScriptedModel(call_tool=False)
     runner = _runner(
         scripted=scripted, policy=_allowing_policy(), audit=fakes.FakeAuditSink()
     )
 
-    with pytest.raises(NotImplementedError) as raised:
-        asyncio.run(runner.resume(TURN_ID, _profile(), None, ()))
+    with pytest.raises(ValueError) as raised:
+        asyncio.run(
+            runner.resume(
+                TURN_ID,
+                _profile(),
+                None,
+                (),
+                caller=_caller(),
+                session=_request().session,
+            )
+        )
 
-    assert "F3" in str(raised.value)
-    assert "t-f3-02" in str(raised.value)
+    assert "no resolutions" in str(raised.value)
+    # Refused BEFORE the provider: the model was never asked anything.
+    assert scripted.requests == 0
 
 
 def test_the_default_model_factory_serves_day_one_instead_of_refusing_it(

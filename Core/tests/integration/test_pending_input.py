@@ -33,6 +33,7 @@ from agent_core.adapters.driven.persistence_pg import migrations
 from agent_core.adapters.driven.persistence_pg.pending_input_repository import (
     _DRAIN_SQL,
     PgPendingInputBuffer,
+    _session_key,
     apply_pending_input_migration,
 )
 from agent_core.domain.turn import SessionRef, UserInput
@@ -85,14 +86,15 @@ def test_drain_returns_arrival_order_and_is_transactional_no_loss_no_duplicate()
     # would, then abandon the transaction WITHOUT committing - the crash. If draining
     # is truly one atomic unit, nothing was actually removed.
     with psycopg.connect(app_conninfo) as crashed:
-        crashed_rows = crashed.execute(_DRAIN_SQL, (session.session_id,)).fetchall()
+        crashed_rows = crashed.execute(_DRAIN_SQL, _session_key(session)).fetchall()
         crashed.rollback()
     assert len(crashed_rows) == 3, "the fixture must see all three rows before the crash"
 
     with psycopg.connect(app_conninfo, autocommit=True) as conn:
         remaining = conn.execute(
-            "SELECT count(*) FROM pending_inputs WHERE session_id = %s",
-            (session.session_id,),
+            "SELECT count(*) FROM pending_inputs"
+            " WHERE tenant_id = %s AND session_id = %s",
+            _session_key(session),
         ).fetchone()
     assert remaining is not None and remaining[0] == 3, (
         "a crash before commit must lose nothing - the buffered rows must still be there"

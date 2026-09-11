@@ -109,6 +109,9 @@ from agent_core.adapters.driven.llm_litellm.gateway import LiteLLMGateway
 from agent_core.adapters.driven.persistence_pg import migrations
 from agent_core.adapters.driven.persistence_pg.audit_repository import PgAuditSink
 from agent_core.adapters.driven.persistence_pg.policy_repository import PgToolPolicy
+from agent_core.adapters.driven.persistence_pg.policy_tenant_migration import (
+    apply_policy_tenant_migration,
+)
 from agent_core.domain.policy import Effect
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
@@ -244,6 +247,14 @@ def app_conninfo() -> str:
     )
     conninfo = re.sub(r"/[^/?]+(\?.*)?$", rf"/{_APP_DATABASE}\1", _ADMIN_CONNINFO)
     asyncio.run(migrations.run_migrations(conninfo))
+    # 0012 lives in its own module, not in APP_MIGRATIONS - the convention
+    # `policy_tenant_migration.py` explains, so seven anchors do not all write one list.
+    # `PgToolPolicy` REQUIRES the column it adds: `_RULE_TENANT` names `tenant_id` in both
+    # the projection and the WHERE clause, so without this the first `load_rules` raises
+    # UndefinedColumn and this test never reaches the model. Applied here rather than
+    # worked around in the seed, because the schema the adapter reads is part of what this
+    # test drives.
+    asyncio.run(apply_policy_tenant_migration(conninfo))
     return conninfo
 
 

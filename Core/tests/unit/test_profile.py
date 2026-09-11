@@ -37,11 +37,16 @@ PROFILES_DIR = Path(__file__).resolve().parents[2] / "profiles"
 
 
 def _delivery_optimizer_mapping() -> dict[str, Any]:
-    """The same agent `Core/profiles/delivery_optimizer.yaml` describes, as plain data."""
+    """The same agent `Core/profiles/delivery_optimizer.yaml` describes, as plain data.
+
+    The model tracks that file: `_assert_is_the_delivery_optimizer` below is run against
+    BOTH this mapping and the real YAML, so a model named here and not there is a test
+    asserting about an agent nobody deploys.
+    """
     return {
         "id": "delivery_optimizer",
         "persona": "You optimize delivery routing and pricing.",
-        "model": "claude-sonnet-5",
+        "model": "minimax/MiniMax-M3",
         "toolsets": ["delivery"],
         "mcp_servers": [],
         "skill_namespaces": ["delivery"],
@@ -72,7 +77,7 @@ def _delivery_optimizer_mapping() -> dict[str, Any]:
 
 def _assert_is_the_delivery_optimizer(profile: Any) -> None:
     assert profile.id == "delivery_optimizer"
-    assert profile.model == "claude-sonnet-5"
+    assert profile.model == "minimax/MiniMax-M3"
     assert profile.toolsets == ("delivery",)
     assert profile.skill_namespaces == ("delivery",)
     assert profile.max_iterations == 15

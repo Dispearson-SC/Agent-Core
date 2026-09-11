@@ -52,7 +52,9 @@ from agent_core.ports.tool_provider import ToolProvider
 
 _profile = AgentProfile(id="a", persona="p", model="m")
 _outcome = TurnOutcome(turn_id=TurnId("t1"), result=TurnResult(text="hi"))
-_rules = RuleSet(subject_roles=frozenset(), channel="cli")
+# `tenant_id` is a keyword-only seat with no default (t-d2-06): a snapshot carries the
+# tenant it was narrowed for, so this stand-in names one too.
+_rules = RuleSet(subject_roles=frozenset(), channel="cli", tenant_id=_TenantId("t1"))
 _session = SessionRef(session_id="s1", tenant_id=_TenantId("t1"))  # type: ignore[arg-type]
 
 runner: AgentRunner = FakeAgentRunner(outcome=_outcome)
@@ -121,15 +123,26 @@ def test_fake_audit_sink_records_calls_in_order() -> None:
         # human decision, which happened before tool_b.
         await sink.record_tool_call(turn_id, caller, "tool_a", {"x": 1}, decision)
         await sink.record_human_decision(turn_id, ToolCallId("call-1"), "u-1", True, "approved")
+        # A REFUSED attempt, recorded between the two tool calls. It carries its own kind:
+        # a fake that appended it as "human_decision" would make a refusal and a decision
+        # to refuse indistinguishable, which is the row docs/DECISIONS.md#d25 refused to
+        # write and the reason `record_rejected_decision` is a second member.
+        await sink.record_rejected_decision(
+            turn_id, ToolCallId("call-1"), "u-2", "requester cannot approve their own"
+        )
         await sink.record_tool_call(turn_id, caller, "tool_b", {"y": 2}, decision)
         await sink.record_turn_end(turn_id, Usage(input_tokens=10), Decimal("0.01"))
 
     asyncio.run(_drive())
 
     kinds = [call.kind for call in sink.calls]
-    assert kinds == ["tool_call", "human_decision", "tool_call", "turn_end"], (
-        "FakeAuditSink must preserve call ORDER, not merely record content."
-    )
+    assert kinds == [
+        "tool_call",
+        "human_decision",
+        "rejected_decision",
+        "tool_call",
+        "turn_end",
+    ], "FakeAuditSink must preserve call ORDER, not merely record content."
 
     tool_names = [call.payload[2] for call in sink.calls if call.kind == "tool_call"]
     assert tool_names == ["tool_a", "tool_b"], (

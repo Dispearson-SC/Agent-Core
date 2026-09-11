@@ -29,22 +29,43 @@ WHAT IS BEING DEFENDED
        and the channel is less trusted than the database, so what leaves the process
        carries the ask and never the arguments.
 
+    4. `render_ask`'S EXHAUSTIVENESS IS STATIC, NOT A RUNTIME PROMISE. The function's own
+       docstring says a `PendingKind` it has no sentence for "must be a type error at the
+       moment the domain grows one". A wave-14 agent added `PendingKind.DELEGATION` and
+       mypy strict reported nothing, because the `match` assigned to a local (`ask`)
+       instead of returning - and mypy's `possibly-undefined` check is off by default. A
+       kind reaching that shape at runtime is an `UnboundLocalError`, discovered only by
+       whoever happens to trigger it in production.
+
+       So this is proven against mypy itself, not against a runtime call: the function's
+       real source (lifted with `inspect.getsource`, so a regression to the old shape
+       breaks this test too) is type-checked against a stand-in `PendingKind` that carries
+       one member today's function does not handle - "the domain grows one" - and the
+       assertion is that mypy fails BY NAME (`[return]`, "Missing return statement"), while
+       the same call against today's real three members is clean.
+
 The randomness test needs no infrastructure and always runs. The idempotence test needs a
 real Postgres and skips cleanly without one, the same pattern as
-test_conversation_repository.py and test_profile_snapshot.py.
+test_conversation_repository.py and test_profile_snapshot.py. The exhaustiveness tests need
+no infrastructure either - they shell out to `mypy`, not to a database - and always run.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import os
 import re
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 
 import psycopg
 import pytest
 
+from agent_core.adapters.driven.human import gateway as human_gateway_module
 from agent_core.adapters.driven.human.gateway import ChannelHumanGateway, new_correlation_id
 from agent_core.adapters.driven.persistence_pg import human_requests_migration, migrations
 from agent_core.adapters.driving.channels.registry import (
@@ -204,3 +225,169 @@ def test_publishing_the_same_request_twice_creates_exactly_one_row() -> None:
         "a raw tool argument reached the channel; arguments carry credentials and the "
         "channel is less trusted than the database"
     )
+
+
+# --------------------------------------------------------------------------------------
+# `render_ask` exhaustiveness - see item 4 in the module docstring.
+#
+# The probe never touches `agent_core.domain.turn.PendingKind`: that enum is not
+# ours to widen, and doing it in-process would also make every OTHER module that
+# matches on it (`turn_workflow.py`, `start_turn.py`) part of this test's blast
+# radius. Instead a throwaway package on disk stands in for "the domain", carrying
+# `render_ask`'s OWN real source unchanged, so the only thing under test is whether
+# that source's shape lets mypy see a member it does not handle.
+# --------------------------------------------------------------------------------------
+
+_STUB_ASK_CONSTANTS = '_APPROVAL_ASK = "approval-ask"\n_EVIDENCE_ASK = "evidence-ask"\n'
+
+
+def _render_ask_source() -> str:
+    """`render_ask`'s literal body, lifted from production.
+
+    Lifting the source rather than re-typing an equivalent function means a regression
+    back to the old "assign to a local, return once at the end" shape breaks THIS test
+    too, on the same commit that reintroduces the bug - the whole point of item 4.
+    """
+    return inspect.getsource(human_gateway_module.render_ask)
+
+
+def _write_pending_kind_stub(package_dir: Path, *, with_unhandled_member: bool) -> None:
+    """A stand-in `PendingKind` + the two tiny types `render_ask` needs, nothing else.
+
+    Three members mirror `agent_core.domain.turn.PendingKind` today (APPROVAL, EVIDENCE,
+    DELEGATION). `with_unhandled_member` adds a fourth - simulating "the domain grows
+    one" - that `render_ask`'s `match` was never told about.
+    """
+    members = [
+        'APPROVAL = "approval"',
+        'EVIDENCE = "evidence"',
+        'DELEGATION = "delegation"',
+    ]
+    if with_unhandled_member:
+        members.append('FUTURE_KIND = "future_kind"  # the hypothetical new member')
+
+    lines = [
+        "from __future__ import annotations",
+        "",
+        "from dataclasses import dataclass",
+        "from enum import StrEnum",
+        "",
+        "",
+        "class PendingKind(StrEnum):",
+        *(f"    {member}" for member in members),
+        "",
+        "",
+        "@dataclass(frozen=True, slots=True)",
+        "class PendingRequest:",
+        "    kind: PendingKind",
+        "    reason: str",
+        "",
+        "",
+        "@dataclass(frozen=True, slots=True)",
+        "class OutboundMessage:",
+        "    text: str",
+        "",
+    ]
+    (package_dir / "stub_types.py").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _typecheck_render_ask(tmp_path: Path, *, with_unhandled_member: bool) -> str:
+    """Run mypy strict on production `render_ask`'s real source against the stub enum.
+
+    Returns combined stdout+stderr so callers assert on the named error code, never on
+    exit status alone - a probe that is merely broken (a bad import, a typo) also exits
+    non-zero, and that must not be mistaken for the exhaustiveness check firing.
+    """
+    package_dir = tmp_path / "exhaustiveness_probe"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    _write_pending_kind_stub(package_dir, with_unhandled_member=with_unhandled_member)
+
+    probe_source = "\n".join(
+        [
+            "from __future__ import annotations",
+            "",
+            "from exhaustiveness_probe.stub_types import (",
+            "    OutboundMessage,",
+            "    PendingKind,",
+            "    PendingRequest,",
+            ")",
+            "",
+            _STUB_ASK_CONSTANTS,
+            _render_ask_source(),
+        ]
+    )
+    (package_dir / "under_test.py").write_text(probe_source, encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--strict",
+            "--no-error-summary",
+            "--no-incremental",
+            str(package_dir / "under_test.py"),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout + result.stderr
+
+
+def test_render_ask_typechecks_cleanly_against_todays_three_pending_kinds(
+    tmp_path: Path,
+) -> None:
+    """Baseline: the probe itself is not what fails. Today's shape is clean under mypy."""
+    output = _typecheck_render_ask(tmp_path, with_unhandled_member=False)
+    assert output == "", (
+        "render_ask no longer type-checks cleanly against today's three PendingKind "
+        f"members; the probe itself regressed, not the exhaustiveness guarantee:\n{output}"
+    )
+
+
+def test_render_ask_rejects_an_unhandled_pending_kind_statically_not_at_runtime(
+    tmp_path: Path,
+) -> None:
+    """The docstring's promise: a kind with no sentence is a mypy error BY NAME.
+
+    Before this file's fix, `render_ask` assigned the ask sentence to a local variable
+    and returned once at the end - which mypy strict does not flag when a `match` leaves
+    it possibly unbound (`possibly-undefined` is off by default, see item 4 above). A
+    kind reaching that shape was an `UnboundLocalError` a human found in production, not
+    a type error a developer found on save. This test fails on that old shape (mypy
+    reports nothing) and passes only once every case returns for itself.
+    """
+    output = _typecheck_render_ask(tmp_path, with_unhandled_member=True)
+    assert "[return]" in output, (
+        "adding a PendingKind render_ask has no sentence for did not produce a NAMED "
+        "mypy error ([return], \"Missing return statement\"); render_ask's match "
+        f"assigns to a local instead of returning per case, so the gap is discoverable "
+        f"only as a runtime UnboundLocalError, not at type-check time. mypy output:\n"
+        f"{output!r}"
+    )
+
+    # The other half of the claim: this is NOT something a runtime call would ever catch
+    # for you. Confirms the static check earns its keep rather than merely duplicating
+    # what a unit test already exercises.
+    sys.path.insert(0, str(tmp_path))
+    try:
+        import importlib
+
+        probe = importlib.import_module("exhaustiveness_probe.under_test")
+        stub_types = importlib.import_module("exhaustiveness_probe.stub_types")
+        pending = stub_types.PendingRequest(kind=stub_types.PendingKind.FUTURE_KIND, reason="x")
+        try:
+            probe.render_ask(pending, "corr-1")
+        except UnboundLocalError as exc:
+            pytest.fail(
+                "the unhandled member raised UnboundLocalError at runtime instead of "
+                f"being caught by mypy before the code ever ran: {exc}"
+            )
+    finally:
+        sys.path.remove(str(tmp_path))
+        for name in ("exhaustiveness_probe.under_test", "exhaustiveness_probe.stub_types",
+                     "exhaustiveness_probe"):
+            sys.modules.pop(name, None)

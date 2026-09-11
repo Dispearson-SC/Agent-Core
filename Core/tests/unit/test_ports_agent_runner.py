@@ -40,7 +40,13 @@ CONFORMING_STUB = """
 from __future__ import annotations
 
 from agent_core.domain.profile import AgentProfile
-from agent_core.domain.turn import TurnId, TurnOutcome, TurnRequest
+from agent_core.domain.turn import (
+    CallerIdentity,
+    SessionRef,
+    TurnId,
+    TurnOutcome,
+    TurnRequest,
+)
 from agent_core.ports.agent_runner import AgentRunner, ToolResolution
 
 
@@ -60,6 +66,9 @@ class StubRunner:
         profile: AgentProfile,
         history: object,
         resolutions: tuple[ToolResolution, ...],
+        *,
+        caller: CallerIdentity,
+        session: SessionRef,
     ) -> TurnOutcome:
         raise NotImplementedError
 
@@ -71,7 +80,13 @@ WRONG_ARITY_STUB = """
 from __future__ import annotations
 
 from agent_core.domain.profile import AgentProfile
-from agent_core.domain.turn import TurnId, TurnOutcome, TurnRequest
+from agent_core.domain.turn import (
+    CallerIdentity,
+    SessionRef,
+    TurnId,
+    TurnOutcome,
+    TurnRequest,
+)
 from agent_core.ports.agent_runner import AgentRunner, ToolResolution
 
 
@@ -79,6 +94,11 @@ class WrongArityRunner:
     # The signature the port carried BEFORE the turn_id seat was added. It is the exact
     # shape the lock now has to reject: a `run` that cannot be handed the identifier its
     # own return type requires.
+    #
+    # `resume` below is DELIBERATELY correct, seats and all (docs/TASKS.md#t-f3-16). This
+    # stub must fail for one reason only, or it would keep passing on the day `run` is
+    # fixed. The pre-widening `resume` has a lock of its own in
+    # `tests/unit/test_runner_resume_identity.py`, where it is the single wrong thing.
     async def run(
         self, request: TurnRequest, profile: AgentProfile, history: object
     ) -> TurnOutcome:
@@ -90,6 +110,9 @@ class WrongArityRunner:
         profile: AgentProfile,
         history: object,
         resolutions: tuple[ToolResolution, ...],
+        *,
+        caller: CallerIdentity,
+        session: SessionRef,
     ) -> TurnOutcome:
         raise NotImplementedError
 

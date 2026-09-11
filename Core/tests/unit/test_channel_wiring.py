@@ -23,17 +23,24 @@ WHY THIS TEST EXISTS
 NO INFRASTRUCTURE NEEDED
     `build_container` already does no I/O (composition.py's own "NOTHING HERE CONNECTS"
     guarantee), and this test never opens the pools it returns. Default `Settings`
-    carries no channel credentials, so the registry under test is legitimately empty -
-    which is exactly the case that must raise instead of quietly resolving to nothing.
+    carries no channel credentials, so the registry under test only ever has `http`
+    wired - which is exactly the case that must raise instead of quietly resolving to
+    nothing for every OTHER channel id.
     The one positive-wiring test below constructs `Settings` directly with a fake token,
     never through the environment, so it needs no real Telegram credential either.
 """
 
 from __future__ import annotations
 
+import pickle
+
 import pytest
 
-from agent_core.adapters.driving.channels.registry import ChannelRegistry, UnknownChannelError
+from agent_core.adapters.driving.channels.registry import (
+    ChannelRegistry,
+    DuplicateChannelError,
+    UnknownChannelError,
+)
 from agent_core.composition import Settings, build_container
 from agent_core.domain.turn import TenantId
 
@@ -67,9 +74,10 @@ def test_container_exposes_a_real_channel_registry() -> None:
 def test_an_unknown_channel_id_raises_at_wiring_time_rather_than_dropping_delivery() -> None:
     """The behaviour the task names directly.
 
-    With no channel credentials configured, nothing is registered - and asking the
-    wired registry for ANY channel id must raise loudly rather than a later delivery
-    step discovering a miss and quietly swallowing the answer.
+    With no push-channel credentials configured, only `http` is registered - it is
+    always here (composition.py), the push channels are conditional - and asking the
+    wired registry for an UNCONFIGURED channel id must raise loudly rather than a later
+    delivery step discovering a miss and quietly swallowing the answer.
     """
     container = build_container(_settings_with_no_channels())
 
@@ -97,3 +105,52 @@ def test_a_configured_channel_registers_and_an_unconfigured_one_still_raises() -
     assert "telegram" in container.channels
     with pytest.raises(UnknownChannelError):
         container.channels.get("whatsapp")
+
+
+def test_unknown_channel_error_round_trips_through_pickle_like_dbos_does() -> None:
+    """t-f3-18: a channel error must survive the durable boundary as ITSELF.
+
+    DBOS pickles a workflow's exception to hand it to `get_result()`. Before this fix,
+    `BaseException.__reduce__` handed back only `self.args` - the already-formatted
+    message string - and reconstructing called `UnknownChannelError(that_string)`,
+    which is one positional argument short of the real `__init__(channel_id, known)`.
+    The caller of `get_result()` saw `TypeError: UnknownChannelError.__init__()
+    missing 1 required positional argument: 'known'` - a failure about our own
+    constructor, with the channel id nowhere in it.
+
+    This asserts the PROPERTY the fix owes, not its shape (a defaulted parameter and a
+    custom `__reduce__` both satisfy this): pickle it, unpickle it, and the result must
+    still be an `UnknownChannelError` naming the channel - never a `TypeError`.
+    """
+    original = UnknownChannelError("telegram", ("http",))
+
+    restored = pickle.loads(pickle.dumps(original))
+
+    assert isinstance(restored, UnknownChannelError), (
+        f"unpickling produced {type(restored)!r} instead of UnknownChannelError - this "
+        "is the TypeError-from-our-own-constructor a get_result() caller would see "
+        "instead of the real delivery failure."
+    )
+    assert "telegram" in str(restored), (
+        "the channel id must survive the round trip; a caller three layers past the "
+        "durable boundary needs to know WHICH channel had no wiring."
+    )
+    assert restored.channel_id == "telegram"
+    assert restored.known == ("http",)
+
+
+def test_duplicate_channel_error_round_trips_through_pickle_like_dbos_does() -> None:
+    """Same trap, identical shape: a second positional-only constructor argument.
+
+    `DuplicateChannelError.__init__` takes only `channel_id`, so it happens to survive
+    today's `BaseException.__reduce__` - but only because it has one required argument,
+    not zero. Pinning the round trip here too means nobody "fixes" `UnknownChannelError`
+    in a way that reintroduces the trap for its sibling.
+    """
+    original = DuplicateChannelError("whatsapp")
+
+    restored = pickle.loads(pickle.dumps(original))
+
+    assert isinstance(restored, DuplicateChannelError)
+    assert "whatsapp" in str(restored)
+    assert restored.channel_id == "whatsapp"

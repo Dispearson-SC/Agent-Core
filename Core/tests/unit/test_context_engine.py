@@ -1,7 +1,7 @@
 """The ladder engine - a SILENT-BUG AREA (CLAUDE.md). Wrong here shows up on the BILL.
 
 Phase:   F5 - Context compaction
-Tasks:   docs/TASKS.md#t-f5-04
+Tasks:   docs/TASKS.md#t-f5-04, docs/TASKS.md#t-f5-11
 
 WHAT THIS MODULE PINS, AND WHY NEITHER PROPERTY HAS ANY OTHER WITNESS
 
@@ -28,6 +28,28 @@ WHAT THIS MODULE PINS, AND WHY NEITHER PROPERTY HAS ANY OTHER WITNESS
 
     A third test guards the first one's integrity: "stops at the first rung" is only
     evidence if the ladder can be shown to CLIMB when the first rung falls short.
+
+    3. `estimated_tokens` IS CONTEXT SIZE, NOT TOTAL SPEND (t-f5-11).
+       The trigger divides this number by the window. A running total of every token ever
+       billed only ever grows, so once it crosses `trigger_fraction` it stays across it
+       for the rest of the session and the ladder runs on EVERY turn - the per-turn
+       prompt-prefix rewriting that `domain/compaction.py` says costs more than it saves.
+       Nothing catches it today because `runner.py::_history_processor` measures the live
+       messages itself and never reads the accumulator, so the wrong value is DORMANT,
+       sitting exactly where the trigger's input belongs. The test below asks the port's
+       own `should_compress` rather than the number directly, because "the trigger latches
+       True forever" is the failure, not the arithmetic.
+
+    4. THE ASYNC TWIN CLIMBS IN THE LADDER'S ORDER, NOT THE PROFILE'S (t-f5-11).
+       `climb_ladder_async` iterates `sorted(set(policy.enabled_rungs))`. Pinning it
+       against the domain over `CompactionPolicy()` is an agreement about nothing: the
+       DEFAULT rungs are already sorted and already unique, so `sorted`, `set` and both
+       together give the identical sequence and deleting either is invisible. The rungs
+       below are therefore scrambled AND carry a duplicate, which is the only input where
+       each half of `sorted(set(...))` has a witness: drop `set` and L2 is climbed twice,
+       drop `sorted` and the profile's order decides which rung runs first. That order is
+       CLAUDE.md non-negotiable #7 - compaction runs inside a `@DBOS.step()`, and an order
+       taken from a set replays differently after a crash.
 """
 
 from __future__ import annotations
@@ -54,12 +76,13 @@ from agent_core.adapters.driven.context.engine import (
 )
 from agent_core.domain.compaction import (
     CompactionPolicy,
+    ContextState,
     Rung,
     climb_ladder,
     is_within_target,
     target_tokens,
 )
-from agent_core.domain.turn import SessionId, SessionRef, TenantId
+from agent_core.domain.turn import SessionId, SessionRef, TenantId, Usage
 from agent_core.ports.context_engine import ContextEngine
 
 SESSION = SessionRef(session_id=SessionId("s-ladder"), tenant_id=TenantId("t-1"))
@@ -231,6 +254,25 @@ def test_the_second_pass_folds_the_previous_summary_instead_of_starting_over() -
     assert summariser.requests[-1].previous_summary == first.checkpoint.summary
 
 
+# Scrambled on purpose, and carrying L2 twice. See point 4 of this module's header: over
+# the DEFAULT rungs `sorted`, `set` and `sorted(set(...))` are indistinguishable, so a test
+# written against the default cannot fail when either half is deleted.
+SCRAMBLED_RUNGS = (
+    Rung.L4_ITERATIVE_RESUMMARY,
+    Rung.L2_SLIDING_WINDOW,
+    Rung.L1_PRUNE_TOOL_OUTPUT,
+    Rung.L2_SLIDING_WINDOW,
+    Rung.L3_SUMMARISE_MIDDLE,
+)
+
+LADDER_ORDER = (
+    Rung.L1_PRUNE_TOOL_OUTPUT,
+    Rung.L2_SLIDING_WINDOW,
+    Rung.L3_SUMMARISE_MIDDLE,
+    Rung.L4_ITERATIVE_RESUMMARY,
+)
+
+
 @pytest.mark.silent
 @pytest.mark.phase("F5")
 def test_the_async_climb_agrees_with_the_domain_ladder() -> None:
@@ -238,33 +280,34 @@ def test_the_async_climb_agrees_with_the_domain_ladder() -> None:
     await a model (D13). So the adapter carries an async twin of that loop, and a twin
     that is free to drift is a bug waiting for a bill.
 
-    This pins them together over the one input where both are total - a ladder whose
-    rungs are pure arithmetic.
+    The profile below lists the rungs out of order and lists L2 twice - the only input
+    that can tell `sorted(set(...))` apart from either half of it. Every rung frees the
+    same small amount and none of them reaches the target, so the whole ladder is climbed
+    and the sequence of calls is the entire evidence.
     """
-    policy = CompactionPolicy()
-    frees = {
-        Rung.L1_PRUNE_TOOL_OUTPUT: 10_000,
-        Rung.L2_SLIDING_WINDOW: 20_000,
-        Rung.L3_SUMMARISE_MIDDLE: 30_000,
-        Rung.L4_ITERATIVE_RESUMMARY: 0,
-    }
+    policy = CompactionPolicy(enabled_rungs=SCRAMBLED_RUNGS)
+    freed_per_rung = 5_000
 
+    sync_order: list[Rung] = []
     tokens = 90_000
 
     def apply_sync(rung: Rung) -> int:
         nonlocal tokens
-        tokens -= frees[rung]
+        sync_order.append(rung)
+        tokens -= freed_per_rung
         return tokens
 
     expected = climb_ladder(
         policy, tokens_before=90_000, context_window=WINDOW, apply_rung=apply_sync
     )
 
+    async_order: list[Rung] = []
     async_tokens = 90_000
 
     async def apply_async(rung: Rung) -> int:
         nonlocal async_tokens
-        async_tokens -= frees[rung]
+        async_order.append(rung)
+        async_tokens -= freed_per_rung
         return async_tokens
 
     actual = asyncio.run(
@@ -273,7 +316,79 @@ def test_the_async_climb_agrees_with_the_domain_ladder() -> None:
         )
     )
 
+    # The domain is the reference, so a drift in either direction names itself.
     assert actual == expected
+    assert sync_order == list(LADDER_ORDER)
+
+    # Stated against the ladder's own order rather than only against the domain, so the
+    # twin still fails alone if both loops are ever edited together.
+    assert async_order == list(LADDER_ORDER)
+    assert actual.rungs_applied == LADDER_ORDER
+    # Dropping `set` climbs L2 twice and pays for the duplicate. Verified by mutation.
+    assert len(actual.rungs_applied) == len(set(actual.rungs_applied))
+    # Dropping BOTH iterates the profile's own tuple and starts at L4 - a summary bought
+    # before free pruning was even tried. Verified by mutation.
+    assert actual.rungs_applied[0] is Rung.L1_PRUNE_TOOL_OUTPUT
+
+    # HONEST LIMIT, so nobody reads more into this test than it proves. Dropping `sorted`
+    # while KEEPING `set` cannot be made to fail here, and that is a property of the data
+    # rather than a hole in the assertions: `Rung` is an `IntEnum`, so a rung hashes to its
+    # own small value, and a CPython set holding 1..4 iterates them in ascending order for
+    # every hash seed. `sorted` is therefore a no-op TODAY and load-bearing the moment a
+    # rung is renumbered, inserted, or the ladder outgrows one hash table - which is why it
+    # stays, and why relying on the set's order instead would be CLAUDE.md #7 exactly.
+
+
+@pytest.mark.silent
+@pytest.mark.phase("F5")
+def test_the_trigger_input_is_context_size_not_the_running_total() -> None:
+    """Two responses in a row do not add up. Each one reports the whole prompt it was
+    billed for, so the LATEST is already the size of the conversation - adding them counts
+    every earlier turn again, once per turn that follows it."""
+    engine = LadderContextEngine(context_window=WINDOW)
+
+    engine.update_from_response(SESSION, Usage(input_tokens=30_000, output_tokens=400))
+    engine.update_from_response(SESSION, Usage(input_tokens=34_000, output_tokens=600))
+
+    assert engine.estimated_tokens(SESSION) == 34_600
+
+
+@pytest.mark.silent
+@pytest.mark.phase("F5")
+def test_the_trigger_stops_firing_once_a_compaction_has_freed_the_room() -> None:
+    """A running total never decreases, so a trigger fed one latches True for the rest of
+    the session and compacts on EVERY turn - the prompt-prefix rewriting that costs more
+    than it saves. Asked through `should_compress`, because the latch is the failure.
+    """
+    policy = CompactionPolicy()
+    engine = LadderContextEngine(_RecordingSummariser(), context_window=WINDOW)
+
+    # Tool output is the whole volume, so the free rung alone frees most of it.
+    history = _history(5, user_chars=40, tool_chars=48_000)
+    engine.update_from_response(SESSION, Usage(input_tokens=80_000, output_tokens=500))
+
+    before = engine.estimated_tokens(SESSION)
+    assert engine.should_compress(_trigger_state(engine), policy)
+
+    result = asyncio.run(engine.compress(SESSION, history, policy))
+    assert result.made_progress
+
+    after = engine.estimated_tokens(SESSION)
+    assert after < before
+    assert after == result.tokens_after
+    assert not engine.should_compress(_trigger_state(engine), policy)
+
+
+def _trigger_state(engine: LadderContextEngine) -> ContextState:
+    """The state the runner builds, with `window_used` None - the common case, and the one
+    where the engine's own number is the only input the trigger has."""
+    return ContextState(
+        session=SESSION,
+        window_used=None,
+        estimated_tokens=engine.estimated_tokens(SESSION),
+        context_window=WINDOW,
+        message_count=0,
+    )
 
 
 @pytest.mark.phase("F5")
