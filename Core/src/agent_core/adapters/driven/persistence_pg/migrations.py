@@ -285,13 +285,37 @@ async def run_migrations(app_conninfo: str) -> None:
 
 
 class DuplicateMigrationIdError(RuntimeError):
-    """Two different migrations were allocated the same id.
+    """Two different migrations were allocated the same NUMBER.
 
     A silent double-allocation is the failure docs/TASKS.md's pre-allocated id table
     exists to prevent, and it is unrecoverable once one of the two has run anywhere:
     `schema_migrations` records the id, so the other one is skipped on every database that
     already saw the first and never runs again. Loud at startup, before either applies.
+
+    THE NUMBER IS THE ALLOCATION; THE SUFFIX IS A COMMENT - t-f11-30. This check compared
+    whole ids, one character narrower than the thing it guards, so `0023_audit_tool_calls_tenant`
+    and `0023_anything_else` coexisted silently - which is exactly what happened:
+    `audit_tenant_migration.py` took `0023` outside the table at the same moment the table
+    allocated it, and nothing said so.
+
+    Whole-id comparison also makes the failure WORSE than not checking, because it fails
+    per-database rather than everywhere. `_apply_all_migrations_sync` skips an id already
+    in `schema_migrations`, so both run on a fresh database and look fine; on a database
+    that recorded one of them before the other existed, the second never runs and its
+    table never appears. The bug is then a schema that differs by deployment age.
     """
+
+
+def _allocation_number(migration_id: str) -> str:
+    """The leading digits of an id - `0023` from `0023_audit_tool_calls_tenant`.
+
+    The whole id when there are no leading digits, so a non-numeric id collides only with
+    itself rather than with every other non-numeric one. Nothing in the tree is shaped
+    that way today; the fallback exists so that the day something is, this check reports a
+    real duplicate instead of inventing one.
+    """
+    digits = len(migration_id) - len(migration_id.lstrip("0123456789"))
+    return migration_id[:digits] if digits else migration_id
 
 
 def _iter_package_modules() -> list[tuple[str, ModuleType]]:
@@ -336,24 +360,30 @@ def discover_app_migrations() -> tuple[Migration, ...]:
     do; the risk here runs the other way, and it is a table that never gets created.
 
     A module that imports another's `Migration` object is not a second allocation - the
-    same object is deduplicated. Two DIFFERENT migrations sharing an id is
+    same object is deduplicated. Two DIFFERENT migrations sharing an allocation NUMBER is
     `DuplicateMigrationIdError`, raised here rather than discovered as a table that
-    silently never appeared.
+    silently never appeared. Keyed on the number and not the whole id, for the reason on
+    that exception (t-f11-30).
     """
-    by_id: dict[str, tuple[str, Migration]] = {}
+    by_number: dict[str, tuple[str, Migration]] = {}
     for module_name, module in _iter_package_modules():
         for migration in _migrations_in(module):
-            previous = by_id.get(migration.id)
+            number = _allocation_number(migration.id)
+            previous = by_number.get(number)
             if previous is None:
-                by_id[migration.id] = (module_name, migration)
+                by_number[number] = (module_name, migration)
                 continue
             if previous[1] != migration:
                 raise DuplicateMigrationIdError(
-                    f"migration id {migration.id!r} is defined twice with different SQL: "
-                    f"{previous[0]}.py and {module_name}.py. Ids are pre-allocated in "
-                    "docs/TASKS.md; allocate a new one rather than reusing this."
+                    f"migration number {number!r} is allocated twice: "
+                    f"{previous[1].id!r} in {previous[0]}.py and {migration.id!r} in "
+                    f"{module_name}.py. The number is the allocation and the suffix is a "
+                    "comment, so these are the same slot. Numbers are pre-allocated in "
+                    "docs/TASKS.md; take a new one rather than reusing this."
                 )
-    return tuple(migration for _, migration in sorted(by_id.values(), key=lambda pair: pair[1].id))
+    return tuple(
+        migration for _, migration in sorted(by_number.values(), key=lambda pair: pair[1].id)
+    )
 
 
 def _apply_all_migrations_sync(app_conninfo: str) -> None:

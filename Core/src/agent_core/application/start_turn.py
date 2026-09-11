@@ -1,7 +1,7 @@
 """Use case: StartTurn - run one turn from a fresh request.
 
 Phase:   F1 / F9 (communicable suspension)
-Tasks:   docs/TASKS.md#t-f1-11, docs/TASKS.md#t-f9-06
+Tasks:   docs/TASKS.md#t-f1-11, docs/TASKS.md#t-f9-06, docs/TASKS.md#t-f11-29
 Status:  IMPLEMENTED (t-f1-11, t-f9-06) - STEP 4 STILL PENDING, SEE THE SEAT NOTE BELOW
 
 LAYER RULE
@@ -255,6 +255,17 @@ class StartTurn:
 
         # STEP 7 - ACCOUNT AND PERSIST. A SUSPENDED outcome is persisted exactly like a
         # finished one: the process may die while a human takes three days to answer.
+        #
+        # AND THIS IS WHERE THE AGENT'S HALF OF THE CONVERSATION IS WRITTEN (t-f11-29).
+        # `outcome.messages` carries what the runner added - the model's replies, its tool
+        # calls and the returns answering them - and `append_outcome` persists them with
+        # the terminal state in one transaction. Step 2 wrote the prompt and nothing wrote
+        # the answer, so a stored conversation used to be the user's sentences alone.
+        #
+        # THIS USE CASE NEVER LOOKS INSIDE ONE. They are opaque by construction (see
+        # `TurnOutcome.messages`): the runner adapter produced them and the store adapter
+        # encodes them, and an `application/` module that read a part would be naming
+        # Pydantic AI, which the layer rule at the top of this file forbids.
         if outcome.result is not None:
             self._context.update_from_response(request.session, outcome.result.usage)
 
@@ -315,6 +326,12 @@ def _communicable(outcome: TurnOutcome) -> TurnOutcome:
     A FINISHED outcome and a suspension with nothing to rewrite are returned unchanged -
     the identical object, not a rebuilt equal one. Rebuilding would be harmless today and
     would quietly become the thing that drops a field the day `TurnOutcome` grows one.
+
+    THAT DAY WAS t-f11-29. `TurnOutcome` grew `messages` - the agent's half of the
+    conversation - and the rebuild below now carries it explicitly. Dropping it here would
+    have lost the model's replies for exactly the turns that suspended, i.e. the ones whose
+    history matters most, and no test between here and the provider's eventual 400 would
+    have said so.
     """
     if not outcome.pending:
         return outcome
@@ -323,7 +340,9 @@ def _communicable(outcome: TurnOutcome) -> TurnOutcome:
         return outcome
     # `result` is None by I2 for any outcome carrying `pending`, so this rebuild cannot
     # drop an answer: `TurnOutcome.__post_init__` refuses the both-shapes case outright.
-    return TurnOutcome(turn_id=outcome.turn_id, pending=rewritten)
+    return TurnOutcome(
+        turn_id=outcome.turn_id, pending=rewritten, messages=outcome.messages
+    )
 
 
 def _notice_for(pending: PendingRequest) -> PendingRequest:

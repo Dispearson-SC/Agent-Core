@@ -38,6 +38,25 @@ REDACTION
     fields to store, never a denylist of key names - a denylist misses the field somebody
     adds next month, and misses it silently.
 
+    AN EMPTY ALLOWLIST IS NOT A SAFE DEFAULT, IT IS AN ABSENT DECISION (t-f11-35). This
+    map shipped as `{}` for eleven waves, so `_redact` kept nothing and every call in the
+    trail rendered "arguments: none recorded". Deny-by-default is right for a PERMISSION:
+    the cost of not deciding is that something cannot happen. For a RECORD the cost runs
+    the other way - the trail is blank exactly where an incident needs it, and "we do not
+    know what this agent did" is the one answer this table must never give.
+
+    So each field of each shipped tool is opted in DELIBERATELY, and the decision per
+    field is between two dispositions, not between on and off:
+
+      VALUE    (`ARGUMENT_ALLOWLIST`)     the operator needs to read what was passed
+      PRESENCE (`ARGUMENT_PRESENCE_ONLY`) the operator needs to know it was passed
+
+    A delivery address is personal data; a delivery code is an identifier. The address
+    answers nothing the row is read for and outlives the reason it was collected, so if it
+    were ever an argument it would be PRESENCE. The code names the thing the call was
+    about and is the only way to line the row up against the order, so it is VALUE. That
+    distinction is the whole design, and it is stated next to each entry below.
+
 audit_turn_costs IS THE COMPACTION DASHBOARD
     Cost per turn over a long conversation is the ONLY place a bad compaction strategy is
     visible. Rising cost after enabling compaction means the trigger is too low and the
@@ -47,6 +66,7 @@ audit_turn_costs IS THE COMPACTION DASHBOARD
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from decimal import Decimal
@@ -65,11 +85,96 @@ from agent_core.domain.turn import CallerIdentity, ToolCallId, TurnId, Usage
 # convention instead of a structure.
 ConnectionFactory = Callable[[], AbstractContextManager[Any]]
 
-# Per-tool ALLOWLIST of argument fields that may be stored, never a denylist of key names.
-# Empty by default and looked up per tool, so a tool nobody has opted in stores no
-# arguments at all. A vertical supplies its own map through the constructor - no file under
-# domain/, application/ or ports/ changes to add one.
-ARGUMENT_ALLOWLIST: Mapping[str, frozenset[str]] = {}
+# What a PRESENCE-only field is stored as. A fixed sentence, never the value, and never
+# `True` - the console prints `name = <value>` straight from this jsonb (cli/console.py
+# `_render_arguments`, which deliberately does not redact a second time), and an operator
+# reading `note = True` would have to guess what that meant.
+PRESENCE_RECORDED = "<present, value not recorded>"
+
+# Per-tool ALLOWLIST of argument fields stored BY VALUE, never a denylist of key names.
+# Looked up per tool, so a tool nobody has opted in stores no arguments at all - see
+# `_redact`, which says that out loud rather than dropping them in silence.
+#
+# A vertical supplies its own map through the constructor, and the shipped verticals are
+# listed here; either way no file under domain/, application/ or ports/ changes to add one.
+# The entries below cover exactly the tools `composition.TOOL_PACKAGES` serves - the
+# delivery package and the fraud package - and each says why the operator needs the value.
+ARGUMENT_ALLOWLIST: Mapping[str, frozenset[str]] = {
+    # --- delivery package (adapters/driven/tools/delivery/tools.py) ---
+    #
+    # `order_id` is an IDENTIFIER, not personal data. It names the order the call was
+    # about and it is the only way to line an audit row up against the order it changed;
+    # without it the row says an agent priced something and cannot say what. It carries no
+    # customer detail of its own - the address, the name and the phone live in the orders
+    # system behind their own retention rules, and none of them is ever an argument here.
+    "orders_lookup": frozenset({"order_id"}),
+    "routing_estimate": frozenset({"order_id"}),
+    "pricing_quote": frozenset({"order_id"}),
+    # `new_price` is the NUMBER THE RULE WAS EVALUATED AGAINST. `delivery_optimizer.yaml`
+    # gates this tool on `abs(pct_change) > 15`, so the amount is the entire subject of
+    # the approval decision on this very row, and it is the one field that cannot be
+    # reconstructed from anything else here - the order's price afterwards is the price
+    # the LAST call set, not the price this one asked for.
+    "pricing_apply": frozenset({"order_id", "new_price"}),
+    # --- fraud package (adapters/driven/tools/fraud/tools.py) ---
+    #
+    # `account_id` is an identifier for the same reason `order_id` is: it names the
+    # account, and the holder's name and risk score are the tool's RESULT, not its
+    # argument. Freezing an account is the highest-risk action in this deployment and a
+    # trail that cannot say WHICH account was frozen is not evidence of anything.
+    "account_history": frozenset({"account_id"}),
+    "freeze_account": frozenset({"account_id"}),
+    # `case_id` names the case; the note body does not travel with it - see
+    # ARGUMENT_PRESENCE_ONLY below.
+    "case_notes_append": frozenset({"case_id"}),
+    # `query` IS THE ACTION, which is why this one is by value despite being free text a
+    # model wrote. For every other tool the name plus the identifiers describe what
+    # happened; for `sql_readonly` the statement is the only description that exists, and
+    # this is the tool its own module calls the most dangerous in the project. Presence
+    # here would render `query = <present, value not recorded>` on an incident row, which
+    # is the "we do not know" answer this table exists to prevent.
+    #
+    # The counter-argument is real and loses on purpose: a WHERE clause can embed personal
+    # data. What it cannot embed is anything the tool would have run - `sql_readonly`
+    # refuses everything but a bare SELECT against one fixture table before the query
+    # reaches data at all. A production replica changes the risk, not this column: it adds
+    # a read-only ROLE, a timeout and a row cap, and if a deployment ever needs the
+    # statement itself withheld, the honest move is to move this field to presence here
+    # and accept that its trail no longer says what was asked.
+    "sql_readonly": frozenset({"query"}),
+    # --- shared A2A tool (adapters/driven/tools/peers.py), served by t-f11-34's package ---
+    #
+    # `target` names WHICH agent this one delegated to. A peer's answer is untrusted
+    # content (non-negotiable #10) and the profile's two-sided allowlist and hop limit are
+    # both decisions about this field, so an incident that starts "an agent was misled by
+    # another agent" begins by asking which one - and only this column can answer.
+    #
+    # `question` is by value for the reason `sql_readonly.query` is: it IS the action.
+    # Every other tool is described by its name plus its identifiers; a delegation is
+    # described by nothing but what was asked, and "asked billing_specialist something" is
+    # the "we do not know" answer. It is also the half of the exchange this deployment
+    # WROTE - the answer comes back untrusted and is not an argument here at all.
+    "ask_peer": frozenset({"target", "question"}),
+}
+
+# Per-tool fields recorded BY PRESENCE: the key is stored with `PRESENCE_RECORDED` in
+# place of the value, so the trail can say the argument was passed without keeping what
+# was in it. A field in neither map is dropped entirely and the row cannot distinguish it
+# from one the model never sent - which is the right outcome for a credential and the
+# wrong one for an action somebody has to account for.
+#
+# A field listed in BOTH maps is stored by value; VALUE already answers PRESENCE.
+ARGUMENT_PRESENCE_ONLY: Mapping[str, frozenset[str]] = {
+    # `note` is free text the model wrote about a person under fraud investigation. What
+    # an operator needs from the trail is that a note was appended and to which case; the
+    # text itself already lives in the case file, under the retention rules that file has,
+    # and copying it into an append-only table that outlives the case duplicates personal
+    # data into the one place it can never be corrected or removed (non-negotiable #6 -
+    # this row is written once and never updated). Presence keeps the fact, not the copy.
+    "case_notes_append": frozenset({"note"}),
+}
+
+_LOG = logging.getLogger(__name__)
 
 # `reason` is migration 0022's column (audit_reason_migration.py, t-f11-07). It is the
 # SENTENCE the winning rule gave - what the model is handed as the tool result on DENY and
@@ -127,11 +232,31 @@ class PgAuditSink:
         connect: ConnectionFactory,
         *,
         argument_allowlist: Mapping[str, frozenset[str]] | None = None,
+        argument_presence_only: Mapping[str, frozenset[str]] | None = None,
     ) -> None:
+        """`connect` is this sink's own connection source - non-negotiable #6.
+
+        The two redaction seats are ONE decision in two shapes: what is stored by value
+        and what is stored by presence. Each defaults to its module constant, which is
+        what `composition.build_container` gets - it passes neither, so the constants ARE
+        the shipped redaction policy and a test that overrides them proves nothing about
+        this deployment. An embedding host that registers its own tools overrides BOTH or
+        neither; overriding one leaves the other reading a map of tool names it has never
+        heard of, which is harmless but says something the caller did not mean.
+        """
         self._connect = connect
         self._argument_allowlist: Mapping[str, frozenset[str]] = (
             ARGUMENT_ALLOWLIST if argument_allowlist is None else dict(argument_allowlist)
         )
+        self._argument_presence_only: Mapping[str, frozenset[str]] = (
+            ARGUMENT_PRESENCE_ONLY
+            if argument_presence_only is None
+            else dict(argument_presence_only)
+        )
+        # Tool names already warned about, so a turn that calls an undecided tool forty
+        # times leaves one line and not forty. Per instance, never global: a process that
+        # builds a second sink with a different map is asking a different question.
+        self._undecided_tools_warned: set[str] = set()
 
     async def record_tool_call(
         self,
@@ -241,12 +366,46 @@ class PgAuditSink:
     def _redact(self, tool_name: str, arguments: Mapping[str, object]) -> dict[str, object]:
         """Keep the fields this tool opted in; drop everything else.
 
-        Fail closed on an unknown tool: no entry means no argument is stored. The row is
-        still written, because the caller, the tool and the verdict are the evidence - the
-        arguments are only ever a bonus, and a leaked credential is not.
+        Three outcomes per field, and the third is the one t-f11-35 added. A field in the
+        VALUE map is stored as it arrived. A field in the PRESENCE map is stored as
+        `PRESENCE_RECORDED`, so the row says it was passed without keeping what was in it
+        - and a field the model did not pass stays absent either way, because presence
+        means presence and inventing the key would assert an argument nobody sent. A field
+        in neither map is dropped whole.
+
+        WHAT A NEW TOOL GETS, AND WHY IT IS SAID OUT LOUD
+            Nothing, until somebody decides. That is deliberate - a tool added next month
+            may take a credential, and a default that stored its arguments would leak it
+            on the first call, which is exactly the failure an allowlist exists to make
+            impossible. The row is still written, because the caller, the tool and the
+            verdict are the evidence; the arguments are a bonus and a leaked credential
+            is not.
+
+            But fail-closed-and-QUIET is the state this anchor exists to fix: `{}` shipped
+            for eleven waves and nothing ever said so, and the trail read as "the model
+            passed nothing" rather than "nobody decided". So the drop is logged once per
+            tool name - the NAME only, never a key and never a value, because the reason
+            this branch was taken is that nothing here is known to be safe to record.
         """
         allowed = self._argument_allowlist.get(tool_name, frozenset())
-        return {name: value for name, value in arguments.items() if name in allowed}
+        presence = self._argument_presence_only.get(tool_name, frozenset())
+        if not allowed and not presence and tool_name not in self._undecided_tools_warned:
+            self._undecided_tools_warned.add(tool_name)
+            _LOG.warning(
+                "No audit argument decision for tool %r: every argument of this call is "
+                "dropped and its trail will read 'arguments: none recorded'. Add the tool "
+                "to ARGUMENT_ALLOWLIST (by value) or ARGUMENT_PRESENCE_ONLY (by presence) "
+                "in %s.",
+                tool_name,
+                __name__,
+            )
+        redacted: dict[str, object] = {}
+        for name, value in arguments.items():
+            if name in allowed:
+                redacted[name] = value
+            elif name in presence:
+                redacted[name] = PRESENCE_RECORDED
+        return redacted
 
     async def _append(self, sql: str, params: Sequence[Any]) -> None:
         """One INSERT on this sink's own connection, off the event loop.

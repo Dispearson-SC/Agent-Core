@@ -4,7 +4,7 @@ Phase:   F1 (hooks, policy, audit) / F3 (deferred) / F5 (compaction) / F6 (MCP, 
          F8 (knowledge)
 Tasks:   docs/TASKS.md#t-f1-12, docs/TASKS.md#t-f3-10, docs/TASKS.md#t-f3-16,
          docs/TASKS.md#t-f5-07, docs/TASKS.md#t-f6-04, docs/TASKS.md#t-f7-07,
-         docs/TASKS.md#t-f8-05
+         docs/TASKS.md#t-f8-05, docs/TASKS.md#t-f11-25, docs/TASKS.md#t-f11-29
 Status:  ENFORCEMENT HOOK AND F1 RUNNER BODY IMPLEMENTED (t-f1-12)
          RESUME IMPLEMENTED (t-f3-10)
          RESUME NOW POLICED, AUDITED AND COMPACTED LIKE A FIRST TURN (t-f3-16)
@@ -12,6 +12,8 @@ Status:  ENFORCEMENT HOOK AND F1 RUNNER BODY IMPLEMENTED (t-f1-12)
          UNTRUSTED-RESULT WRAPPING AND THE REDUCED MCP BUDGET IMPLEMENTED (t-f6-04)
          EVIDENCE TYPED AS BYTES, URL OPT-IN ONLY (t-f7-07, docs/DECISIONS.md#d26)
          knowledge_search AND ITS enabled GATE IMPLEMENTED (t-f8-05)
+         THE PER-SERVER MCP RESULT BUDGET NOW ACTUALLY BOUNDS A RESULT (t-f11-25)
+         THE AGENT'S OWN MESSAGES NOW LEAVE THE RUN ON THE OUTCOME (t-f11-29)
          Suspension side of F3 / skills index F6 / peers F9
 Implements: ports/agent_runner.py
 
@@ -92,6 +94,7 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     ToolCallPart,
+    UserPromptPart,
     VideoUrl,
 )
 from pydantic_ai.models import Model
@@ -105,6 +108,7 @@ from pydantic_ai.tools import (
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 
+from agent_core.adapters.driven.mcp.toolsets import result_budget_for
 from agent_core.application.ingest_media import sniff_media
 from agent_core.domain.compaction import CompactionPolicy, ContextState
 from agent_core.domain.knowledge import KnowledgeHit, TenantKnowledgePolicy
@@ -170,7 +174,7 @@ def is_untrusted(tool_name: str) -> bool:
     return lowered.startswith(UNTRUSTED_PREFIXES)
 
 
-def budget_for(tool_name: str) -> int:
+def budget_for(tool_name: str, *, profile: AgentProfile | None = None) -> int:
     """How many characters of this tool's result the model is allowed to read.
 
     CLAUDE.md non-negotiable #4: an MCP result gets a SMALLER budget than a local tool.
@@ -181,7 +185,34 @@ def budget_for(tool_name: str) -> int:
     Every untrusted prefix shares the reduced budget, not `mcp_` alone: a `web_` or
     `browser_` result is the same third-party text arriving through a different door, and
     a budget that only names one door is a budget an added toolset walks around.
+
+    PER SERVER IS THE GRANULARITY THAT MATTERS (t-f11-25)
+        `MCPServerRef.result_budget_chars` used to be inert: this function decided from
+        the name prefix alone, so the number an operator wrote in a profile changed
+        nothing. That is worse than no knob, because it looks like a safety control - an
+        operator bounding a chatty or untrusted server believed they had bounded it. One
+        hostile server must not be held to the same number as a trusted one, so when a
+        `profile` is in hand the per-server number decides.
+
+        The question "which server does this prefixed name belong to" has exactly one
+        owner, `mcp_toolsets.result_budget_for` - it is the module that builds the
+        prefixes, and answering it a second way here is the drifting duplicate
+        CLAUDE.md's conventions forbid. It returns None for a name that is not an MCP
+        tool, which is not "no budget": a `web_` or `browser_` result belongs to no
+        server and keeps the default.
+
+    THE CEILING IS NOT A KNOB
+        A profile may only ever LOWER the bound on untrusted text. Letting configuration
+        raise it above `MCP_RESULT_BUDGET_CHARS` would make non-negotiable #4 something a
+        YAML file can withdraw, and a hostile server would be free to ask for the whole
+        window. `min` is the entire enforcement, and it is deliberate that there is no
+        warning attached: an operator who writes a bigger number gets the ceiling, not a
+        log line nobody reads.
     """
+    if profile is not None:
+        per_server = result_budget_for(profile, tool_name)
+        if per_server is not None:
+            return min(per_server, MCP_RESULT_BUDGET_CHARS)
     return MCP_RESULT_BUDGET_CHARS if is_untrusted(tool_name) else LOCAL_RESULT_BUDGET_CHARS
 
 
@@ -290,7 +321,21 @@ class UntrustedResultWrapping(AbstractCapability[Any]):
     per-profile number this hook has no access to - and double-fencing would put a second
     pair of delimiters inside the first, which is exactly the shape the escape defence
     exists to keep out of the conversation.
+
+    IT NOW CARRIES THE PROFILE, AND ONLY FOR THE BUDGET (t-f11-25)
+        `profile` is the whole reason `MCPServerRef.result_budget_chars` stops being
+        inert: this hook is the last place a result passes before the model reads it, and
+        it was deciding the cap from the tool name alone. Nothing else is read off the
+        profile here - the VERDICT (fence or do not fence) still comes from the name and
+        must, because a result's trustworthiness cannot depend on configuration.
+
+        It stays optional. A caller with no profile in hand gets the prefix defaults,
+        which is what every budget in this file was before F11 and remains the answer for
+        `web_`/`browser_`/`media_` names, which belong to no server.
     """
+
+    def __init__(self, profile: AgentProfile | None = None) -> None:
+        self._profile = profile
 
     async def after_tool_execute(
         self,
@@ -306,8 +351,12 @@ class UntrustedResultWrapping(AbstractCapability[Any]):
         The verdict comes from the tool NAME and nothing else, exactly as `budget_for`
         reads it. Deciding from the toolset a result arrived through would make the answer
         depend on composition order, and composition order is not a security boundary.
+
+        The BUDGET, unlike the verdict, may be narrowed per server by the profile - see
+        `budget_for`. A name still decides which server it came from, so this stays
+        independent of composition order too.
         """
-        budget = budget_for(call.tool_name)
+        budget = budget_for(call.tool_name, profile=self._profile)
         if is_untrusted(call.tool_name):
             return _wrap_result(result, budget)
         return _truncate_local(result, budget)
@@ -649,6 +698,43 @@ def _as_message_history(history: object) -> list[ModelMessage] | None:
                 "docs/TASKS.md#t-f1-24."
             )
     return messages
+
+
+def _messages_the_turn_added(new_messages: Sequence[ModelMessage]) -> tuple[object, ...]:
+    """What this run added to the conversation and the store has not written yet (t-f11-29).
+
+    `AgentRunResult.new_messages()` is everything after the history that was handed in:
+    the prompt request, then the model's responses and the tool returns answering them.
+    All of it belongs in the conversation - and until this function existed NONE of it was
+    persisted, because `TurnOutcome` had no seat to carry it back on and the store was
+    never handed the agent's half at all.
+
+    THE ONE MESSAGE THAT IS DROPPED, AND WHY IT IS IDENTIFIED RATHER THAN COUNTED
+        `ConversationStore.append_request` already wrote the prompt, BEFORE the model ran -
+        that ordering is what makes a crash mid-turn reconstructable
+        (ports/conversation_store.py). Returning it again would store the customer's own
+        sentence twice and hand it to the model twice on the next turn, which is the defect
+        `t-f1-24` paid for once already in the other direction.
+
+        So the leading message is dropped when it IS that prompt - a `ModelRequest`
+        carrying a `UserPromptPart` - and not because of where it sits. `resume` supplies
+        no user prompt, so its first new message is the tool RETURN and survives; a
+        positional `[1:]` would silently eat it and break the pairing CLAUDE.md
+        non-negotiable #5 exists to protect. One function serves both paths because the
+        test is the message's own shape, not the caller's.
+
+    RETURNS `object` VALUES, deliberately: `TurnOutcome.messages` is opaque by design (see
+    its docstring), and typing the tuple here as `ModelMessage` would only invite a use
+    case to believe it may read one.
+    """
+    messages = list(new_messages)
+    if (
+        messages
+        and isinstance(messages[0], ModelRequest)
+        and any(isinstance(part, UserPromptPart) for part in messages[0].parts)
+    ):
+        del messages[0]
+    return tuple(messages)
 
 
 def _unpaired(messages: Sequence[ModelMessage]) -> tuple[frozenset[str], frozenset[str]]:
@@ -1106,14 +1192,16 @@ class PydanticAgentRunner:
             caller=request.caller,
         )
 
-        # `UntrustedResultWrapping` is attached for every turn without exception. It is
-        # stateless, so there is no per-turn reason for it to be here rather than on the
-        # cached agent - it is here so that the two hooks that make this file the
-        # enforcement point are read, attached and reviewed side by side. A wrapper that
-        # is attached somewhere else is a wrapper somebody edits without seeing the gate.
+        # `UntrustedResultWrapping` is attached for every turn without exception. It was
+        # stateless, and was here anyway so that the two hooks that make this file the
+        # enforcement point are read, attached and reviewed side by side. Since t-f11-25
+        # it carries the profile - the per-server MCP budget - which makes being built per
+        # turn a requirement rather than a convention: the cached agent is shared across
+        # profiles and a budget frozen onto it would bound one profile's server by
+        # another's number.
         capabilities: list[AbstractCapability[Any]] = [
             enforcement,
-            UntrustedResultWrapping(),
+            UntrustedResultWrapping(profile),
         ]
         history_capability = self._history_capability(request.session, profile)
         if history_capability is not None:
@@ -1141,8 +1229,13 @@ class PydanticAgentRunner:
 
         # F1 has no deferred tools, so the run can only have FINISHED - see LEFT FOR LATER
         # PHASES above. The two-shaped translation arrives with F3, not a third shape here.
+        #
+        # `messages` is the agent's half of the conversation and this is the only thing in
+        # production that produces it (t-f11-29). The store writes it in `append_outcome`;
+        # see `_messages_the_turn_added` for the one message that is NOT in it.
         return TurnOutcome(
             turn_id=turn_id,
+            messages=_messages_the_turn_added(result.new_messages()),
             result=TurnResult(
                 text=str(result.output),
                 usage=_domain_usage(result.usage),
@@ -1251,7 +1344,11 @@ class PydanticAgentRunner:
                 turn_id=turn_id,
                 caller=caller,
             ),
-            UntrustedResultWrapping(),
+            # The same profile, so a resumed turn bounds a server by the same number the
+            # first half of it did (t-f11-25). A continuation that forgot the profile
+            # would quietly widen every per-server budget back to the default, and the
+            # only turns affected would be the ones a human had already looked at.
+            UntrustedResultWrapping(profile),
         ]
         history_capability = self._history_capability(session, profile)
         if history_capability is not None:
@@ -1275,8 +1372,14 @@ class PydanticAgentRunner:
                 ),
             )
 
+        # The continuation's own messages, by the same rule `run` uses: the tool RETURN
+        # that answered the human, everything the model said after it, and no prompt to
+        # drop because a resume supplies none. `ResumeTurn` awaits the same
+        # `append_outcome`, so the answer a human waited three days for is persisted by the
+        # turn that consumed it rather than only by the one that asked.
         return TurnOutcome(
             turn_id=turn_id,
+            messages=_messages_the_turn_added(result.new_messages()),
             result=TurnResult(
                 text=str(result.output),
                 usage=_domain_usage(result.usage),

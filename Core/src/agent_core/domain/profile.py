@@ -69,6 +69,32 @@ def _reject_unknown_keys(data: dict[str, Any], allowed: set[str], *, where: str)
         raise ProfileValidationError(f"Unknown key(s) in {where}: {joined}")
 
 
+def _require_positive_int(value: object, *, where: str) -> int:
+    """A configured count that BOUNDS something, refused when it cannot bound anything.
+
+    Nothing here coerces. The neighbouring `_build_*` helpers wrap their numbers in
+    `int(...)`, which turns `"25"` into 25 and a typo into a plausible value; a bound on
+    how much untrusted text reaches the model is not a place to guess what an operator
+    meant. A value that is not already an integer is a malformed profile.
+
+    `bool` is excluded even though it is an `int` in Python - `true` is a YAML scalar an
+    operator can reach by accident, and it would otherwise become a budget of one
+    character.
+
+    docs/TASKS.md#t-f11-32, docs/TASKS.md#t-f11-37."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ProfileValidationError(
+            f"{where} must be a positive integer, got {value!r} "
+            f"({type(value).__name__}); nothing coerces it."
+        )
+    if value <= 0:
+        raise ProfileValidationError(
+            f"{where} must be a positive integer, got {value!r}; "
+            f"a budget that bounds nothing is not a bound."
+        )
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class MCPServerRef:
     """One MCP server this profile may borrow tools from.
@@ -83,7 +109,9 @@ class MCPServerRef:
 
     `result_budget_chars` defaults lower than local tools on purpose. Hermes uses 50K for
     mcp_* against 100K for local, with the stated reason that MCP servers routinely
-    return un-paginated 20-50K payloads."""
+    return un-paginated 20-50K payloads. It must be a POSITIVE INTEGER, and
+    `_build_mcp_server_ref` refuses anything else at load - it is a slice bound now, not
+    a note."""
 
     name: str
     transport: str
@@ -213,6 +241,43 @@ def _decimal(text: str) -> Decimal:
     return number
 
 
+def _require_finite_decimal(value: object, *, where: str) -> Decimal:
+    """A configured amount of MONEY, refused when it cannot bound a spend.
+
+    THE SAME PARSER, NOT A SECOND ONE. `_decimal` above already refuses a non-finite
+    literal on the right-hand side of an approval condition, and says why: "a condition
+    that silently never matches is precisely the fail-open this module exists to prevent".
+    That rule was written down here and never applied to this file's own money field.
+    Reusing the helper rather than growing a second finiteness check beside it is the
+    point - two validators for one idea is how the strict one gets bypassed.
+
+    What it was hiding: `Decimal("nan")` and `Decimal("Infinity")` both parse happily, so
+    `max_cost_usd: nan` loaded cleanly. `domain/budget.py` then reads
+    `self.max_cost_usd > 0 and self.spent_usd >= self.max_cost_usd`, and EVERY comparison
+    against NaN is `False` - `cost_exhausted` could never become true and the agent ran
+    with no spend limit at all. Silent, unbounded, and surfacing only on the bill, which is
+    the failure mode CLAUDE.md's silent-bug table names.
+
+    TEXT IS ACCEPTED ON PURPOSE, unlike `_require_positive_int` above. Every profile in
+    `Core/profiles/` writes `max_cost_usd: "0.25"` quoted, because a YAML float is binary
+    and does not hold a decimal amount exactly. What is refused is text that is not a
+    finite number - never text as such.
+
+    It also fixes the shape of the failure for a value that is not a number at all:
+    `Decimal(str(...))` raised `decimal.InvalidOperation` straight out of the loader, an
+    arithmetic error naming neither the key nor the file.
+
+    docs/TASKS.md#t-f11-37."""
+    try:
+        return _decimal(str(value))
+    except _UnreadableCondition:
+        raise ProfileValidationError(
+            f"{where} must be a finite decimal amount, got {value!r}; "
+            f"every comparison against NaN is False, so a ceiling that is not finite "
+            f"is not a ceiling."
+        ) from None
+
+
 def _as_number(value: object) -> Decimal:
     """A runtime ARGUMENT as a number, or a refusal to decide.
 
@@ -288,23 +353,61 @@ def _compare(actual: Decimal, operator: str, expected: Decimal) -> bool:
 
 
 def _build_mcp_server_ref(data: object) -> MCPServerRef:
+    """One MCP server entry, with the one number on it that now reaches a slice.
+
+    `result_budget_chars` was inert until docs/TASKS.md#t-f11-25: the runner budgeted by
+    tool-name prefix and no code path read the per-server value, so every integer a
+    profile could write was equally harmless. It is read now - `budget_for` takes it and
+    `wrap_untrusted` does `body[:budget]` with it - which makes every value the field can
+    hold reachable, and two of them wrong in a way nothing downstream can notice:
+
+    - **Non-positive.** `body[:-100]` cuts 100 characters off an untrusted payload while
+      the omission notice, computed as `len(body) - budget`, reports `len(body) + 100`
+      removed. That notice sits outside the delimiters precisely so a reader can trust our
+      accounting over the third party's, and here it is describing a cut that did not
+      happen. `0` empties the fence on every result instead, which is `tool_exclude`'s job
+      done invisibly.
+    - **Not an integer.** `min("50000", MCP_RESULT_BUDGET_CHARS)` raises `TypeError` while
+      handling a tool result, from a quoted scalar in a YAML file.
+
+    Refused at LOAD, the way docs/TASKS.md#t-f11-05 made an unservable profile fail at
+    load rather than at turn three: a budget is only consulted once a third-party server
+    actually replies, so a profile carrying a broken one would start, serve, and misreport
+    an untrusted result at some later hour with nobody watching."""
     mapping = _require_mapping(data, where="mcp_servers[]")
     _reject_unknown_keys(mapping, {f.name for f in fields(MCPServerRef)}, where="mcp_servers[]")
+    # `_build_agent_ref` already set this shape: a required key that is simply read as
+    # `mapping["name"]` leaves the loader as a bare `KeyError`, which names neither the
+    # block nor the file the operator has to edit.
+    missing = {"name", "transport"} - set(mapping)
+    if missing:
+        joined = ", ".join(sorted(missing))
+        raise ProfileValidationError(f"mcp_servers[] is missing required key(s): {joined}")
+    name = mapping["name"]
     return MCPServerRef(
-        name=mapping["name"],
+        name=name,
         transport=mapping["transport"],
         command=mapping.get("command"),
         args=tuple(mapping.get("args", ())),
         url=mapping.get("url"),
         tool_include=tuple(mapping.get("tool_include", ())),
         tool_exclude=tuple(mapping.get("tool_exclude", ())),
-        result_budget_chars=mapping.get("result_budget_chars", 50_000),
+        result_budget_chars=_require_positive_int(
+            mapping.get("result_budget_chars", 50_000),
+            where=f"mcp_servers[{name!r}].result_budget_chars",
+        ),
     )
 
 
 def _build_approval_rule(data: object) -> ApprovalRule:
     mapping = _require_mapping(data, where="approval_rules[]")
     _reject_unknown_keys(mapping, {f.name for f in fields(ApprovalRule)}, where="approval_rules[]")
+    # Same precedent as `_build_agent_ref`. An approval rule is an authorisation record:
+    # neither the tool it guards nor the reason a human is shown can be defaulted.
+    missing = {"tool_name", "reason"} - set(mapping)
+    if missing:
+        joined = ", ".join(sorted(missing))
+        raise ProfileValidationError(f"approval_rules[] is missing required key(s): {joined}")
     return ApprovalRule(
         tool_name=mapping["tool_name"],
         reason=mapping["reason"],
@@ -524,8 +627,20 @@ class AgentProfile:
                 _build_mcp_server_ref(item) for item in mapping.get("mcp_servers", ())
             ),
             skill_namespaces=tuple(mapping.get("skill_namespaces", defaults.skill_namespaces)),
-            max_iterations=int(mapping.get("max_iterations", defaults.max_iterations)),
-            max_cost_usd=Decimal(str(mapping.get("max_cost_usd", defaults.max_cost_usd))),
+            # THE TWO CEILINGS A TURN IS ACTUALLY RUN AGAINST - docs/TASKS.md#t-f11-37.
+            # They fail in opposite directions and only one of them is loud.
+            # `max_iterations: 0` fails CLOSED: `used_iterations >= max_iterations` is true
+            # before the first step, so the profile parses and cannot serve a single turn -
+            # the t-f11-05 shape, refused at LOAD rather than discovered at turn one.
+            # `max_cost_usd: nan` fails OPEN, which is worse: see `_require_finite_decimal`.
+            max_iterations=_require_positive_int(
+                mapping.get("max_iterations", defaults.max_iterations),
+                where="profile.max_iterations",
+            ),
+            max_cost_usd=_require_finite_decimal(
+                mapping.get("max_cost_usd", defaults.max_cost_usd),
+                where="profile.max_cost_usd",
+            ),
             approval_rules=tuple(
                 _build_approval_rule(item) for item in mapping.get("approval_rules", ())
             ),

@@ -1,8 +1,8 @@
 """Driven adapter: ConversationStore over Postgres.
 
-Phase:   F1 (history) / F5 (checkpoints) / F10 (reasoning)
+Phase:   F1 (history) / F5 (checkpoints) / F10 (reasoning) / F11 (the agent's half)
 Tasks:   docs/TASKS.md#t-f1-13, docs/TASKS.md#t-f1-18, docs/TASKS.md#t-f10-04,
-         docs/TASKS.md#t-f1-22
+         docs/TASKS.md#t-f1-22, docs/TASKS.md#t-f11-29
 Implements: ports/conversation_store.py
 Status:  load_history(), append_messages(), append_request(), append_reasoning(),
          load_reasoning() and append_outcome() DONE. save_checkpoint() and
@@ -22,10 +22,22 @@ HOW A MESSAGE IS ENCODED, AND WHY IT IS NOT OUR FORMAT (t-f1-24)
         serialised `ModelMessage` rather than `{"text": ...}`. That is strictly more than
         it carried before and nothing user-visible reads a field that moved - but a
         `ModelResponse` can carry a `ThinkingPart`, and reasoning is ADMIN-only
-        (t-f10-04). Nothing writes a `ModelResponse` to this table today; the day
-        something does, the view needs a projection that names the parts it may show
-        rather than handing the blob over. Recorded here because the guard has to be
-        written before that writer exists, not after.
+        (t-f10-04). This paragraph used to end "nothing writes a `ModelResponse` to this
+        table today"; `t-f11-29` is the anchor that made one, so the guard it asked for is
+        now `without_reasoning` below.
+
+    THE PROJECTION IS NAMED AT THE WRITE, NOT AT THE READ (t-f11-29)
+        `without_reasoning` runs on every message this module stores, so a `ThinkingPart`
+        never becomes part of a `messages` row at all. That is deliberately the write side
+        rather than a narrowed view: `transcript_entries` is one reader, `load_history` is
+        another, and anybody may add a third - a rule enforced once per reader is a rule
+        that leaks through the reader somebody forgets. A USER read path cannot disclose
+        what was never written to the table it reads, which is the same structural argument
+        `turn_reasoning` is built on and the same one CLAUDE.md non-negotiable #8 makes
+        about a tool that does not exist.
+
+        Reasoning is not lost by this: `append_reasoning` below is its write path and
+        `turn_reasoning` is where it lives, ADMIN-only from the moment it lands.
 
     THIS COLUMN USED TO HOLD A DIFFERENT THING AND NOTHING NOTICED
         It held `{"role": "user", "content": {"text": ...}}`, an OpenAI-wire shape no
@@ -50,8 +62,9 @@ HOW A MESSAGE IS ENCODED, AND WHY IT IS NOT OUR FORMAT (t-f1-24)
 
     REASONING IS STILL NOT A MESSAGE (t-f10-04, and see below)
         A `ThinkingPart` is ADMIN-only and lives in `turn_reasoning`. Nothing writes one
-        here, and nothing should: `messages` is what `load_history` returns to the model
-        and the raw material of the USER transcript.
+        here, and `without_reasoning` is now what makes that true rather than the fact that
+        nothing yet wrote a `ModelResponse`: `messages` is what `load_history` returns to
+        the model and the raw material of the USER transcript.
 
 TABLES
     turns              (turn_id pk, session_id, tenant_id, profile_id, state,
@@ -120,7 +133,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -131,6 +144,8 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
     ModelRequest,
+    ModelResponse,
+    ThinkingPart,
     UserPromptPart,
 )
 
@@ -144,7 +159,9 @@ from agent_core.domain.transcript import (
     TranscriptEntry,
 )
 from agent_core.domain.turn import (
+    SessionId,
     SessionRef,
+    TenantId,
     TurnId,
     TurnOutcome,
     TurnRequest,
@@ -239,6 +256,50 @@ _APPEND_OUTCOME_SQL = """
     WHERE turn_id = %s
 """
 
+# Which conversation this turn is in - the one thing `TurnOutcome` cannot answer, because
+# it names a turn and `messages` rows are keyed by session. Read from the row
+# `append_request` already wrote rather than adding a seat to the port, so there stays ONE
+# answer to the question.
+#
+# FOR UPDATE because what follows is a check-then-act (read the tail, then append). Without
+# the lock two concurrent calls both find nothing stored and both append. D19 gives one turn
+# at a time per session, but a store must not depend on the caller's concurrency model to
+# stay correct.
+_SELECT_TURN_FOR_OUTCOME_SQL = """
+    SELECT session_id, tenant_id
+    FROM turns
+    WHERE turn_id = %s
+    FOR UPDATE
+"""
+
+# The last N messages of a session, oldest first. The inner ORDER BY ... DESC LIMIT is what
+# uses `ix_messages_session_seq`; the outer one only puts the window back in reading order.
+#
+# WHY THE REPLAY GUARD IS THE CONTENT AND NOT THE TURN'S STATE (t-f11-29)
+#     `append_outcome` was idempotent for free while it only UPDATEd one row; appending is
+#     not. The obvious guard - "skip unless the turn is still `started`" - is WRONG, and
+#     wrong in the silent direction: a suspended turn is written once by `StartTurn` and
+#     again by `ResumeTurn` when the human finally answers, with DIFFERENT messages the
+#     second time. A state check would have dropped every resumed turn's tool return and
+#     every answer the agent gave after it, and the only symptom would have been a
+#     conversation that forgets the thing somebody waited three days for.
+#
+#     The question that actually separates the two cases is whether THESE messages are
+#     already there. A `ModelResponse` carries its own `timestamp`, so two genuinely
+#     separate replies never encode identically even when the model says the same words -
+#     which is what makes the comparison a replay test rather than a repetition test.
+_TAIL_MESSAGES_SQL = """
+    SELECT content
+    FROM (
+        SELECT seq, content
+        FROM messages
+        WHERE session_id = %s
+        ORDER BY seq DESC
+        LIMIT %s
+    ) AS tail
+    ORDER BY seq ASC
+"""
+
 
 class UnversionedProfileError(ValueError):
     """A turn was about to be persisted under a profile whose version is not verifiable.
@@ -261,6 +322,44 @@ class UnversionedProfileError(ValueError):
 # inside the payload, which is where the library keeps it.
 _ROLE_USER = "user"
 _ROLE_ASSISTANT = "assistant"
+
+
+def without_reasoning(message: ModelMessage) -> ModelMessage | None:
+    """The message with every `ThinkingPart` removed, or None when nothing else was in it.
+
+    THE NAMED PROJECTION t-f10-04 ASKED FOR AND t-f11-29 MADE URGENT
+        `domain/transcript.py` answers REASONING as `USER: False, ADMIN: True`, and
+        `docs/FIELD-NOTES.md` records that MiniMax M3 returns reasoning in BOTH modes - so
+        every turn produces a block the user must never read. `transcript_entries` projects
+        `messages.content` verbatim, so the moment a `ModelResponse` reaches this table a
+        `ThinkingPart` inside it is one unnamed projection away from a USER read: CLAUDE.md
+        non-negotiable #11, breached through a door nobody opened deliberately.
+
+        This function is that door, held shut at the WRITE. It names the one part kind that
+        may not be stored rather than enumerating the ones that may, because the parts that
+        must survive are not a list anybody can freeze: a `ToolCallPart` and the
+        `ToolReturnPart` answering it are CLAUDE.md non-negotiable #5, and a part type the
+        library adds next release belongs in the conversation until somebody decides it
+        does not. Dropping the known-secret kind fails towards keeping the conversation
+        whole; keeping an allow-list would fail towards a provider 400 nobody can trace.
+
+    A RESPONSE THAT WAS NOTHING BUT REASONING BECOMES NO ROW AT ALL
+        None, not an empty `ModelResponse`. An assistant turn with no parts is a message
+        the model said nothing in - it costs a row, reads as a gap in the transcript, and
+        providers differ on whether they will even accept one back. There is nothing of the
+        conversation in it to preserve.
+
+    THE UNTOUCHED MESSAGE IS RETURNED ITSELF, not a rebuilt equal one, so the common case
+    cannot be where a future field is quietly dropped.
+    """
+    if not isinstance(message, ModelResponse):
+        return message
+    kept = [part for part in message.parts if not isinstance(part, ThinkingPart)]
+    if len(kept) == len(message.parts):
+        return message
+    if not kept:
+        return None
+    return replace(message, parts=kept)
 
 
 def encode_message(message: ModelMessage) -> tuple[str, str]:
@@ -308,6 +407,63 @@ def _user_message(user_input: UserInput) -> ModelMessage:
             "silently; see UnpersistableInputError. docs/TASKS.md#t-f1-24."
         )
     return ModelRequest(parts=[UserPromptPart(content=user_input.text)])
+
+
+def _encoded_rows(messages: Sequence[ModelMessage]) -> list[tuple[str, str]]:
+    """The messages as `messages` rows, with reasoning projected out and empties dropped.
+
+    THE ONE PLACE A MESSAGE BECOMES A ROW. `without_reasoning` runs here and nowhere else,
+    so every write path in this module - `append_request`, `append_messages`,
+    `append_outcome` - is covered by construction rather than by three people remembering.
+    """
+    rows: list[tuple[str, str]] = []
+    for message in messages:
+        storable = without_reasoning(message)
+        if storable is None:
+            continue
+        rows.append(encode_message(storable))
+    return rows
+
+
+class UnpersistableOutcomeError(TypeError):
+    """`TurnOutcome.messages` carries something this store cannot encode as a message.
+
+    The seat is typed `tuple[object, ...]` because `domain/` may not name Pydantic AI (see
+    `TurnOutcome.messages`), which leaves this adapter as the one place the real type is
+    known - and therefore the one place a mismatch can be reported by name instead of as an
+    AttributeError inside `ModelMessagesTypeAdapter`.
+
+    The mirror image of `runner.py::UnsupportedHistoryError`, and for the same reason: the
+    two adapters agree on one encoding because each refuses anything else at its own
+    boundary, not because either guesses what the other meant.
+    """
+
+
+class OrphanOutcomeError(LookupError):
+    """An outcome carrying messages names a turn that has no row in `turns`.
+
+    `append_request` creates that row BEFORE the model runs, so the only ways to get here
+    are a caller that skipped it or a turn id that was regenerated somewhere. Both mean the
+    session these messages belong to is unknown, and the alternative to raising is dropping
+    the agent's half of a conversation with nothing anywhere reporting it - which is the
+    defect `t-f11-29` exists to close, reintroduced one layer down.
+    """
+
+
+def _outcome_messages(turn_id: TurnId, outcome: TurnOutcome) -> tuple[ModelMessage, ...]:
+    """`outcome.messages` as the values this store knows how to encode, or refuse by name."""
+    messages: list[ModelMessage] = []
+    for message in outcome.messages:
+        if not isinstance(message, (ModelRequest, ModelResponse)):
+            raise UnpersistableOutcomeError(
+                f"the outcome of turn {turn_id!r} carries a {type(message).__name__} among "
+                "its messages; this store encodes Pydantic AI ModelMessage values through "
+                "ModelMessagesTypeAdapter. The runner adapter produces them "
+                "(adapters/driven/agent_pydantic/runner.py::_messages_the_turn_added) and "
+                "nothing between it and here may reshape one. docs/TASKS.md#t-f11-29."
+            )
+        messages.append(message)
+    return tuple(messages)
 
 
 def decode_message(payload: object) -> ModelMessage:
@@ -549,11 +705,30 @@ class PgConversationStore:
     ) -> None:
         """The rows, on an already-open connection, so a caller can widen the transaction.
 
-        `append_request` needs the turn row and the first message to land together, which
-        is only true if both statements run on the same connection.
+        `append_request` needs the turn row and the first message to land together, and
+        `append_outcome` needs the whole of what a turn said to land with its terminal
+        state - CLAUDE.md non-negotiable #5. Both are only true if the statements run on
+        the same connection.
+
+        EVERY WRITE PATH IN THIS MODULE FUNNELS THROUGH `_encoded_rows`, which is what
+        makes `without_reasoning` structural rather than remembered: there is no second
+        place a `ThinkingPart` could enter the table from.
         """
-        for message in messages:
-            role, content = encode_message(message)
+        self._write_rows(conn, session, _encoded_rows(messages))
+
+    def _write_rows(
+        self,
+        conn: psycopg.Connection[Any],
+        session: SessionRef,
+        rows: Sequence[tuple[str, str]],
+    ) -> None:
+        """Already-encoded `(role, content)` rows, in order, on an open connection.
+
+        Split out from `_write_messages` because `append_outcome` has to LOOK at the
+        encoded form before it writes it - see `_TAIL_MESSAGES_SQL` - and encoding twice
+        would invite the comparison and the insert to disagree about what a message is.
+        """
+        for role, content in rows:
             conn.execute(
                 _APPEND_MESSAGE_SQL,
                 (session.session_id, role, content, session.session_id),
@@ -677,7 +852,7 @@ class PgConversationStore:
         )
 
     async def append_outcome(self, turn_id: TurnId, outcome: TurnOutcome) -> None:
-        """Persist the turn's terminal state - SUSPENDED or FINISHED alike (t-f1-22).
+        """Persist the turn's terminal state AND what the agent said - t-f1-22, t-f11-29.
 
         `StartTurn` step 7 awaits this on EVERY turn, so a suspended turn is exactly as
         durable as a finished one: the process may die while a human takes three days to
@@ -685,16 +860,33 @@ class PgConversationStore:
         what makes the turn resumable afterwards (see `PendingRequest.tool_call_id`'s own
         docstring on why it must round-trip verbatim).
 
+        AND THIS IS WHERE THE AGENT'S HALF OF THE CONVERSATION IS WRITTEN (t-f11-29).
+        `append_request` wrote the prompt before the model ran; `outcome.messages` is
+        everything the turn added after it - the model's replies, its tool calls and the
+        returns answering them. Before this seat existed nothing in production wrote a
+        `ModelResponse` at all, so a stored conversation was the customer's sentences and
+        nothing else: compaction had half a history to compact, the transcript showed half
+        an exchange, and a model asked what it had just said could not answer.
+
+        ALL OF THEM, WITH THE STATE, IN ONE TRANSACTION - CLAUDE.md non-negotiable #5. A
+        tool call and its return are two messages, and a crash between them would leave a
+        history the provider rejects with a 400 on some LATER turn, far from here. There is
+        no second write to fail on its own.
+
         ASYNC (D13): a database write; the sync psycopg call runs in a thread.
         """
         await asyncio.to_thread(self._append_outcome_sync, turn_id, outcome)
 
     def _append_outcome_sync(self, turn_id: TurnId, outcome: TurnOutcome) -> None:
+        rows = _encoded_rows(_outcome_messages(turn_id, outcome))
         finished_at = outcome.result.finished_at if outcome.result is not None else None
         result_json = (
             json.dumps(_jsonable(outcome.result)) if outcome.result is not None else None
         )
+        # No autocommit: the state, the pending blob and every message of the turn are one
+        # write or none of them. See the method docstring.
         with psycopg.connect(self._conninfo) as conn:
+            turn = conn.execute(_SELECT_TURN_FOR_OUTCOME_SQL, (turn_id,)).fetchone()
             conn.execute(
                 _APPEND_OUTCOME_SQL,
                 (
@@ -705,6 +897,53 @@ class PgConversationStore:
                     turn_id,
                 ),
             )
+            if not rows:
+                return
+            if turn is None:
+                raise OrphanOutcomeError(
+                    f"turn {turn_id!r} has no row in `turns`, so the {len(rows)} "
+                    "message(s) this outcome carries belong to no conversation. "
+                    "append_request writes that row before the model runs "
+                    "(ports/conversation_store.py); an outcome arriving without it means "
+                    "the ordering rule was skipped, and storing the agent's half of a "
+                    "conversation whose session is unknown would lose it silently."
+                )
+            session_id, tenant_id = turn
+            session = SessionRef(
+                session_id=SessionId(session_id), tenant_id=TenantId(tenant_id)
+            )
+            if self._already_appended(conn, session, rows):
+                return
+            self._write_rows(conn, session, rows)
+
+    def _already_appended(
+        self,
+        conn: psycopg.Connection[Any],
+        session: SessionRef,
+        rows: Sequence[tuple[str, str]],
+    ) -> bool:
+        """Whether these exact rows are already the tail of this session's conversation.
+
+        THE REPLAY GUARD, AND IT ASKS THE CONVERSATION RATHER THAN THE TURN (t-f11-29).
+        `append_outcome` is called twice for one turn on the ordinary suspended path -
+        once by `StartTurn` and once by `ResumeTurn` - with different messages each time,
+        so anything keyed on the turn alone drops the resumed half. Comparing the content
+        distinguishes "this outcome again" from "the next outcome for this turn", which is
+        the question actually being asked.
+
+        `ModelResponse` carries its own `timestamp`, so two genuinely separate replies do
+        not encode identically even when the model repeats itself word for word. The
+        comparison therefore tests for a REPLAY and never for a repetition.
+        """
+        stored = conn.execute(
+            _TAIL_MESSAGES_SQL, (session.session_id, len(rows))
+        ).fetchall()
+        if len(stored) != len(rows):
+            return False
+        return all(
+            json.loads(content) == payload
+            for (_role, content), (payload,) in zip(rows, stored, strict=True)
+        )
 
     async def save_checkpoint(self, checkpoint: CompactionCheckpoint) -> None:
         """PSEUDO-CODE - F5. Append-only: INSERT, never UPDATE. Chain via

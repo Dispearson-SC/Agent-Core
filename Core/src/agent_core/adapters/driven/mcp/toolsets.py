@@ -22,6 +22,13 @@ NON-NEGOTIABLE #4 - THREE PARTS, ALL REQUIRED
        (`MCPServerRef.result_budget_chars`, 50K against 100K for local) and Hermes' stated
        reason is that MCP servers routinely return un-paginated 20-50K payloads.
 
+       Since t-f11-25 the runner's `budget_for` CALLS `result_budget_for`, which is what
+       makes that number configuration rather than decoration: until then the runner
+       budgeted by name prefix alone and a profile's per-server figure changed nothing at
+       all. A knob that does not turn is worse than no knob, and this one looks like a
+       safety control. The runner clamps the answer to its own `MCP_RESULT_BUDGET_CHARS`
+       ceiling, so a profile can only ever narrow the bound on untrusted text.
+
 NAME PREFIXING IS A SECURITY CONTROL, NOT COSMETICS
     `mcp_<server>_<tool>`. It lets a policy rule match `mcp_*`, and it stops a malicious
     server shadowing a local tool by naming itself `write_file`. The prefix is applied by
@@ -122,6 +129,12 @@ def result_budget_for(profile: AgentProfile, tool_name: str) -> int | None:
     None means "not an MCP tool", not "no budget": a local tool keeps the local budget,
     which is the runner's business. Longest prefix wins, so a server named `files` and a
     server named `files_ro` cannot be confused with each other.
+
+    This is the ONLY code that maps a prefixed name back to the server it came from, and
+    the runner's `budget_for` calls it rather than re-deriving the mapping (t-f11-25).
+    Two answers to "which server is this" would drift the day someone changes `PREFIX` or
+    the longest-prefix rule, and the symptom would be a budget silently applied to the
+    wrong server - invisible until the bill or an injection.
     """
     best: MCPServerRef | None = None
     for server in profile.mcp_servers:
@@ -249,11 +262,19 @@ class _GuardedToolset(WrapperToolset[Any]):
 
 
 class MCPToolProvider:
-    """`ToolProvider` that composes a local provider with the profile's MCP servers.
+    """`ToolProvider` over the profile's MCP servers, optionally joined with a local one.
 
-    `local` is the vertical's own provider (F4). It is optional because MCP is useful on
-    its own and because F1's local adapter is not written yet; when it is absent the
-    profile simply has whatever its servers offer. Local names are NOT prefixed - the
+    HOW PRODUCTION COMPOSES, SINCE t-f11-28. The other way round: `build_tool_provider`
+    builds this with `local=None` and hands it to `LocalToolProvider` as its MCP half.
+    That direction is forced rather than chosen - `build_tool_provider` owns the registry
+    of local packages and is what `composition.build_container` and
+    `adapters/driving/cli/preflight.py` both call, so the composed object has to be the
+    one it returns. The join itself is the same either way: local names unprefixed and
+    first, then `mcp_<server>_<tool>`.
+
+    `local` therefore stays for the case it was written for - composing from this side,
+    which the F6 tests do - and for a host that has an MCP-only agent. When it is absent
+    the profile simply has whatever its servers offer. Local names are NEVER prefixed: the
     prefix exists to mark tools that came from third-party code.
     """
 

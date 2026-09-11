@@ -43,17 +43,47 @@ WHY THE NAMES ARE READ OFF THE TOOLSET AND NOT DECLARED AT REGISTRATION
     servers, which cannot be listed without either a cache or a spawned process - which is
     why the port keeps the two methods separate in the first place.
 
-WHAT F6 ADDS AND WHAT IT DOES NOT
-    MCP composes INSIDE this adapter (docs/DECISIONS.md#d10): `toolset_for` will build an
-    `MCPToolset` per `profile.mcp_servers`, apply tool_include/tool_exclude, prefix the
-    names `mcp_<server>_<tool>`, and return them in the same composed object. Nothing above
-    this file changes when that lands - which is what "only two ports change per vertical"
-    means in practice.
+HOW MCP COMPOSES IN HERE - t-f11-28
+    MCP composes INSIDE this adapter (docs/DECISIONS.md#d10), and now actually does.
+    `LocalToolProvider` takes an optional `mcp` collaborator - the F6 adapter,
+    `adapters/driven/mcp/toolsets.py` - and hands it the profile's `mcp_servers`. That
+    adapter owns everything third-party about them: the transports, the
+    `mcp_<server>_<tool>` prefix, `tool_include`/`tool_exclude`, the schema cache, and the
+    per-server timeouts. This file owns only the JOIN: local names first in profile order,
+    then the servers', in one flat list and one composed toolset. Nothing above this file
+    changed when that landed - which is what "only two ports change per vertical" means in
+    practice.
 
-    Until then a profile that DECLARES an MCP server is refused rather than served a
-    silently smaller toolset. A capability the profile granted and the agent never received
-    is the failure mode that produces "the agent is mysteriously less capable, with nothing
-    in the logs" - the same sentence the port uses about swallowing an unknown name.
+    The MCP half is composed the same way for both port methods, because they are two
+    resolution paths answering one question. `tool_names_for` reads the schema cache and
+    therefore never spawns a server merely to let `ToolPolicy` narrow a list.
+
+    `build_tool_provider` ALWAYS supplies that collaborator. A bare `LocalToolProvider(...)`
+    still refuses a profile that declares a server, with `MCPNotComposedYetError`: a
+    capability the profile granted and the agent never received is the failure mode that
+    produces "the agent is mysteriously less capable, with nothing in the logs" - the same
+    sentence the port uses about swallowing an unknown name. Composed or refused; never
+    silently smaller.
+
+    THIS IS STILL NOT AUTO-DISCOVERY. A profile NAMES its servers, exactly as it names its
+    toolsets (`t-f1-07` froze the port that way). Nothing here scans a directory of server
+    definitions, and an `mcp_servers` entry this adapter cannot build is `MCPConfigurationError`
+    from the F6 adapter rather than a skipped line.
+
+AN UNREACHABLE SERVER IS A DEGRADED START, NOT A REFUSAL - AND THAT IS A DECISION
+    A server that is down at startup costs the profile THAT SERVER'S tools and nothing
+    else. The local toolsets are untouched, `toolset_for` returns, `tool_names_for` returns
+    the local names, and the process starts. The F6 adapter already made this choice for a
+    running turn (`_GuardedToolset.get_tools` and `_discover_raw_names` both log at WARNING
+    and contribute nothing); composition inherits it rather than inventing a second answer.
+
+    The alternative was considered and rejected: refusing to start would let any third
+    party stop this deployment booting by going offline, and MCP is the flakiest dependency
+    in the system. The cost of the choice is real - a profile can come up quietly smaller
+    than its file says - which is why it is a WARNING in the log and why
+    `adapters/driving/cli/preflight.py` is where an operator is meant to see it. A refusal
+    there is reserved for what a restart cannot fix: an unregistered toolset name, or a
+    server this adapter cannot build at all.
 """
 
 from __future__ import annotations
@@ -62,8 +92,10 @@ from collections.abc import Callable, Mapping
 
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, FunctionToolset
 
+from agent_core.adapters.driven.mcp.toolsets import MCPToolProvider
 from agent_core.adapters.driven.tools.delivery import tools as delivery_tools
 from agent_core.domain.profile import AgentProfile
+from agent_core.ports.tool_provider import ToolProvider
 
 __all__ = [
     "DEFAULT_TOOL_PACKAGES",
@@ -102,10 +134,16 @@ class ToolNameCollisionError(ValueError):
 
 
 class MCPNotComposedYetError(NotImplementedError):
-    """The profile declares MCP servers and this adapter is the F1 local-only one.
+    """The profile declares MCP servers and this provider was built without an MCP half.
 
-    Loud rather than ignored: see WHAT F6 ADDS in the module docstring. The composition
-    seat is docs/TASKS.md#t-f6-05.
+    t-f11-28 filled that seat, so `build_tool_provider` never produces a provider that
+    raises this. It survives for the one case that is still real: a `LocalToolProvider`
+    constructed directly with no `mcp` collaborator - an embedding host wiring its own
+    handful of local tools, or a test - handed a profile that names a server.
+
+    Loud rather than ignored, for the reason in the module docstring: composed or refused,
+    never silently smaller. Note the distinction it draws with a DEGRADED start - this is
+    "nothing here can ever serve that server", not "that server is down right now".
     """
 
 
@@ -116,35 +154,75 @@ class LocalToolProvider:
     `runtime_checkable` precisely so that can be asserted without importing this class.
     """
 
-    def __init__(self, packages: Mapping[str, ToolsetBuilder]) -> None:
+    def __init__(
+        self, packages: Mapping[str, ToolsetBuilder], mcp: ToolProvider | None = None
+    ) -> None:
         # Copied, not aliased. A registry a caller can keep mutating after construction is
         # auto-discovery with extra steps: what an agent may do would depend on when the
         # turn ran rather than on what the profile says.
         self._packages: dict[str, ToolsetBuilder] = dict(packages)
+        # t-f11-28. The F6 adapter, used for the MCP half of the profile and nothing else.
+        # `None` is the honest F1 shape and still refuses an MCP profile - see
+        # `MCPNotComposedYetError`. Held for the life of the provider because the schema
+        # cache lives on it (t-f6-05): rebuilding one per turn would spawn a server per
+        # turn to answer a question whose answer has not changed.
+        self._mcp = mcp
 
     async def toolset_for(self, profile: AgentProfile) -> AbstractToolset[None]:
         """One object for `PydanticAgentRunner` to hand Pydantic AI.
 
-        ASYNC (D13): F6 opens MCP transports here. F1 awaits nothing real, exactly as the
-        port says it should.
+        ASYNC (D13): the MCP half builds transports here - constructed, not connected. A
+        server is reached on first use and on schema discovery, never merely because a
+        container was built (`composition.py`: NOTHING HERE CONNECTS).
 
         Always a `CombinedToolset`, even for one package and even for none, so the runner
         sees one shape rather than three. `AbstractToolset` is what
         `PydanticAgentRunner._toolsets_for` type-checks for, and an empty profile getting
         an empty toolset is the honest answer - an agent with no tools, not a fake one.
         """
-        return CombinedToolset(self._resolve(profile))
+        toolsets: list[AbstractToolset[None]] = list(self._resolve(profile))
+        if self._mcp is not None and profile.mcp_servers:
+            toolsets.append(await self._mcp_toolset_for(profile))
+        return CombinedToolset(toolsets)
 
     async def tool_names_for(self, profile: AgentProfile) -> tuple[str, ...]:
         """The flat name list, in profile order, for `ToolPolicy` and the audit record.
 
-        ASYNC (D13): F6 reads the persisted schema cache here, which is I/O even on a hit.
+        ASYNC (D13): the MCP half reads the persisted schema cache here, which is I/O even
+        on a hit - and which is why this method exists separately from `toolset_for` at
+        all: policy filtering runs every turn and must never need a live connection.
 
         Resolves the same way `toolset_for` does - same registry, same refusals, same
-        collision check - so the names the policy narrows are the names the model is
-        offered. Two resolution paths would be two answers to one question.
+        collision check, same MCP collaborator - so the names the policy narrows are the
+        names the model is offered. Two resolution paths would be two answers to one
+        question.
+
+        Local names come first, unprefixed; the servers' follow under `mcp_<server>_`. A
+        local tool and a server tool of the same name are therefore two entries, never one
+        - that is the whole of the shadowing defence (docs/TASKS.md#t-f6-06), and it is
+        this join that could have lost it.
         """
-        return tuple(name for toolset in self._resolve(profile) for name in toolset.tools)
+        names = [name for toolset in self._resolve(profile) for name in toolset.tools]
+        if self._mcp is not None and profile.mcp_servers:
+            names.extend(await self._mcp.tool_names_for(profile))
+        return tuple(names)
+
+    async def _mcp_toolset_for(self, profile: AgentProfile) -> AbstractToolset[None]:
+        """The MCP half, validated at the boundary the way the runner validates this one.
+
+        `ToolProvider.toolset_for` is typed `-> object` - the port names no Pydantic AI
+        type on purpose - so the cast back is checked here rather than assumed, and a
+        collaborator that returns the wrong shape says so at composition instead of at
+        `Agent.run`.
+        """
+        assert self._mcp is not None
+        toolset = await self._mcp.toolset_for(profile)
+        if not isinstance(toolset, AbstractToolset):
+            raise TypeError(
+                f"the MCP ToolProvider returned {type(toolset).__name__}; this adapter "
+                "composes Pydantic AI AbstractToolset values."
+            )
+        return toolset
 
     def _resolve(self, profile: AgentProfile) -> list[FunctionToolset[None]]:
         """`profile.toolsets` -> built toolsets, in the profile's own order.
@@ -153,12 +231,14 @@ class LocalToolProvider:
         (domain/profile.py: "`toolsets` order is meaningful"), and because the flat name
         list feeds an audit record a human reads.
         """
-        if profile.mcp_servers:
+        if profile.mcp_servers and self._mcp is None:
             declared = ", ".join(server.name for server in profile.mcp_servers)
             raise MCPNotComposedYetError(
-                f"profile {profile.id!r} declares MCP server(s) {declared}; this is the "
-                "F1 local-only ToolProvider (docs/TASKS.md#t-f6-05). Refusing rather "
-                "than serving a silently smaller toolset."
+                f"profile {profile.id!r} declares MCP server(s) {declared}, and this "
+                "LocalToolProvider was built with no MCP collaborator. Build it with "
+                "`build_tool_provider(...)`, which always supplies one "
+                "(docs/TASKS.md#t-f11-28). Refusing rather than serving a silently "
+                "smaller toolset."
             )
 
         built: list[FunctionToolset[None]] = []
@@ -199,11 +279,27 @@ DEFAULT_TOOL_PACKAGES: Mapping[str, ToolsetBuilder] = {
 
 def build_tool_provider(
     packages: Mapping[str, ToolsetBuilder] | None = None,
+    mcp: ToolProvider | None = None,
 ) -> LocalToolProvider:
     """The provider the composition root wires. `packages` overrides the registry.
 
     The override exists for an embedding host, which is the case ports/tool_provider.py
     argues the whole no-auto-discovery rule for: someone embedding this core wants to
     register their own handful of tools, not inherit ours.
+
+    ALWAYS COMPOSED WITH AN MCP HALF - t-f11-28. This is the one constructor production
+    uses (`composition.build_container`) and the one `preflight` asks its question of, so
+    a profile that declares a server is servable from both. Before this line existed, the
+    F6 machinery was complete and reachable only from a test, `delivery_optimizer.yaml`
+    declared a real server, and `preflight` correctly refused to start the process over a
+    capability the tree already had.
+
+    `mcp` is a seam, not a switch: pass a fake to test the join without spawning anything.
+    Passing `None` here means "build the default F6 adapter", NOT "no MCP" - a bare
+    `LocalToolProvider(packages)` is how you ask for a local-only provider, and it refuses
+    an MCP profile out loud rather than serving it short.
     """
-    return LocalToolProvider(DEFAULT_TOOL_PACKAGES if packages is None else packages)
+    return LocalToolProvider(
+        DEFAULT_TOOL_PACKAGES if packages is None else packages,
+        mcp=MCPToolProvider() if mcp is None else mcp,
+    )

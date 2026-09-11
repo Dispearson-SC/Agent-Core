@@ -1,7 +1,7 @@
 """Turn vocabulary - the nouns every other layer speaks.
 
 Phase:   F1 - Real hexagonal core
-Tasks:   docs/TASKS.md#t-f1-01
+Tasks:   docs/TASKS.md#t-f1-01, docs/TASKS.md#t-f11-29
 Status:  TYPES DEFINED / BEHAVIOUR PENDING
 
 WHAT THIS FILE IS
@@ -232,11 +232,54 @@ class TurnOutcome:
     Exclusivity is enforced at construction: an adapter producing a third shape fails
     here, at the boundary, instead of three steps deep inside a DBOS workflow where the
     traceback no longer names the culprit.
+
+    `messages` IS THE AGENT'S HALF OF THE CONVERSATION (t-f11-29)
+        Everything this turn ADDED to the conversation that the store has not already
+        written: the model's replies, its tool calls and the returns answering them. It is
+        NOT the prompt - `ConversationStore.append_request` wrote that before the model ran
+        (the ordering rule in ports/conversation_store.py), and a runner that returned it
+        again would have the customer's own sentence stored twice and read back to the
+        model twice.
+
+        Until this seat existed, `TurnOutcome` carried a result and a pending list and no
+        messages, so `StartTurn` had nothing to append but the prompt and the agent's own
+        replies were never persisted by anything. A conversation with no agent turns in it
+        is not a conversation: compaction has half a history to compact, the transcript
+        shows half an exchange, and a model asked what it said a moment ago cannot answer.
+
+    WHY THE ELEMENT TYPE IS `object` AND NOT THE ENCODED FORM
+        I4: this module imports only the standard library and `agent_core.domain`, and
+        `test_contract.py` walks the AST to keep it that way - so the element cannot be a
+        Pydantic AI `ModelMessage`. Two shapes could cross instead, and the opaque one is
+        the one that was chosen:
+
+        - THE ENCODED FORM - the `(role, content json)` pair a `messages` row is made of -
+          would put a second copy of the encoding decision outside `encode_message`, the
+          one place `t-f1-24` settled it. Worse, whoever PRODUCES the outcome is the
+          Pydantic AI adapter, so it would have to import the Postgres adapter to encode -
+          coupling two driven adapters to each other and making the store's row shape a
+          fact the model adapter has to know.
+        - AN OPAQUE OBJECT the adapters own is exactly the arrangement this port pair
+          already uses in the other direction: `ConversationStore.load_history` returns
+          `object` and `AgentRunner.run` takes `history: object`, both so that no use case
+          and no domain type has to name the library (D7). The runner produces the values,
+          the store validates and encodes them, and `application/` carries them across
+          without ever looking inside. This field is the return leg of that same trip.
+
+        So the domain records THAT a turn added messages and never what one is made of.
+        `StartTurn` moves them; only an adapter may open them.
+
+    CLAUDE.md NON-NEGOTIABLE #5 IS WHY THEY TRAVEL AS ONE TUPLE
+        A tool call and the return answering it are two messages, and a history holding one
+        without the other is rejected by the provider - as a 400 on some LATER request,
+        far from the turn that caused it. One field, written by one `append_outcome` in one
+        transaction, makes the half-written pair unrepresentable rather than unlikely.
     """
 
     turn_id: TurnId
     pending: tuple[PendingRequest, ...] = ()
     result: TurnResult | None = None
+    messages: tuple[object, ...] = ()
 
     def __post_init__(self) -> None:
         """I2: SUSPENDED or FINISHED, never both and never neither."""
