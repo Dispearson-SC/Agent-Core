@@ -8,12 +8,36 @@ persona: |
   You optimize delivery routing and pricing to maximize the operator's margin without
   degrading delivery times. State the margin impact of every recommendation in currency,
   not percentages. When a price change exceeds policy, propose it and wait - never assume.
-model: claude-sonnet-5
+model: minimax/MiniMax-M3
 
 toolsets:
   - delivery
 
-mcp_servers: []          # F6: add the maps/traffic server here
+# Tools this agent BORROWS from a third-party process. Everything below is data: swapping
+# in a real traffic service is a change to `command` and `args`, and to nothing else in
+# the tree - that is the claim F11 makes and docs/TASKS.md#t-f11-16 checks.
+#
+# Read it as: "this agent may also call whatever the `routing` server offers, under names
+# that all begin `mcp_routing_`, and never under a name of ours."
+mcp_servers:
+  - name: routing
+    # `mcp_routing_<tool>` is the name the model sees and the name a policy rule matches.
+    # The prefix is a security control, not tidiness: the vertical's own `routing_*` tools
+    # keep their bare names, so a rule written for THEM can never reach this server's.
+    transport: stdio
+    command: python
+    # Relative to the repository root - the directory every command here runs from. Today
+    # this is the repository's own stdio MCP server, which is what lets a fresh clone run
+    # this profile with no network and no credentials; point it at the real service and
+    # nothing else changes.
+    args: ["Core/tests/fixtures/mcp_echo_server.py"]
+    # A scope reducer applied at discovery, NOT the security boundary - ToolPolicy is.
+    # `hang` is the fixture's deliberately wedged tool and no agent should be offered it.
+    tool_exclude: ["hang"]
+    # Smaller than the 100,000 characters a local tool gets: a third-party server
+    # routinely answers with 20-50K of un-paginated text, and it is not our code.
+    result_budget_chars: 50000
+
 skill_namespaces:
   - delivery
 

@@ -1,0 +1,75 @@
+# The policy this deployment starts with. docs/TASKS.md#t-f11-03.
+#
+# THIS FILE IS THE WHOLE TRUTH ABOUT WHAT IS IN FORCE.
+#   `adapters/driven/policy_fs/loader.py` RECONCILES `policy_rules` with this directory at
+#   every startup: a rule added here is granted, a rule edited here is changed, and a rule
+#   DELETED from here stops applying. Nothing else in production writes that table, so the
+#   diff a reviewer reads is the diff that takes effect.
+#
+# REVIEW THIS FILE LIKE CODE THAT CANNOT BE TESTED, BECAUSE IT IS.
+#   The policy engine is a silent-bug area (CLAUDE.md): a wrong rule here fails on the day
+#   it matters and never in a suite. A green run proves the reducer works, never that the
+#   rules are the ones you meant.
+#
+# THE FIELDS
+#   rule_id       stable, unique across this directory. It is what the audit trail records
+#                 as the reason a tool call was allowed or refused, so renaming one breaks
+#                 the join from six months of audit rows to the rule that produced them.
+#   tool_pattern  exact, or a trailing `*` for a PREFIX (never a substring). Lowercased
+#                 before matching, so a provider advertising `Pricing_Apply` still matches.
+#   effect        allow | needs_approval | deny. DENY beats NEEDS_APPROVAL beats ALLOW,
+#                 whatever the order here or the specificity of the pattern.
+#   reason        REQUIRED, and it has two audiences. On DENY the model reads it as the
+#                 tool result and can adapt; on NEEDS_APPROVAL a human reads it as the ask.
+#   subject_roles empty or absent means ANY ROLE - not "no roles". Same for `channels` and
+#                 `tenant_id`: an absent constraint widens, it never narrows.
+#
+# WHY THERE ARE THREE EFFECTS HERE AND NOT ONE
+#   A fresh deployment used to deny every tool with `[no matching rule]`, which teaches an
+#   operator that policy is a switch. The delivery vertical below is graded instead: read
+#   freely, apply a price change only with a human, and never apply one from a chat
+#   channel at all. That is a decision an operator can read, disagree with, and edit.
+
+rules:
+  # ---- delivery: the read-only half. Nothing here changes anything. ----
+  - rule_id: delivery-orders-lookup
+    tool_pattern: orders_lookup
+    effect: allow
+    reason: >-
+      Reading an order changes nothing. The agent cannot explain a routing or pricing
+      recommendation without the order it is about.
+
+  - rule_id: delivery-routing-estimate
+    tool_pattern: routing_estimate
+    effect: allow
+    reason: >-
+      A routing estimate is a computation over data the agent may already read. It commits
+      the operator to nothing.
+
+  - rule_id: delivery-pricing-quote
+    tool_pattern: pricing_quote
+    effect: allow
+    reason: >-
+      A quote is a proposal, not a change. Separating quoting from applying is what makes
+      the approval below worth asking for.
+
+  # ---- delivery: the half that costs money. ----
+  - rule_id: delivery-pricing-apply-needs-a-human
+    tool_pattern: pricing_apply
+    effect: needs_approval
+    reason: >-
+      Applying a price change moves real money and is not reversible by the agent. State
+      the order, the current price and the new price, then wait for a human.
+
+  # Two rules on one tool, and that is deliberate: DENY beats NEEDS_APPROVAL, so on a chat
+  # channel this wins outright and no approval is ever offered. It is also the one place an
+  # operator can watch the precedence rule do something, on a tool they can actually run.
+  - rule_id: delivery-pricing-apply-never-from-a-chat-channel
+    tool_pattern: pricing_apply
+    effect: deny
+    channels:
+      - telegram
+      - whatsapp
+    reason: >-
+      A price change may not be applied from a chat channel. Approval over chat proves who
+      holds the handset, not who holds the authority; ask from the operator console.
