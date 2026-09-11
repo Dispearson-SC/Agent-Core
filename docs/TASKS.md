@@ -54,7 +54,7 @@ Done when a POST returns a model response that used the tool, with the `tool_cal
 | <a id="t-f0-04"></a>t-f0-04 | `ModelGateway` over LiteLLM in library mode (`base_url()` returns None), **plus the day-1 `Model` that endpoint-less mode needs** | `adapters/driven/llm_litellm/` | **DONE** |
 | <a id="t-f0-05"></a>t-f0-05 | **Process entry point.** An ASGI app that builds the container once at startup and mounts the routes, plus `python -m agent_core` to serve it | `Core/src/agent_core/main.py` | **DONE** |
 | <a id="t-f0-06"></a>t-f0-06 | `GET /turns/{turn_id}` — the pull half of the 202. **Also reconciles the two ids**: `run_turn_workflow` mints its `TurnId` inside `_step_new_turn_id`, so the id a caller could poll and the id every audit row is filed under are different values and nothing joins them. **Also export a send-side function from the workflow**: a `DecisionSignal` keyed on the domain `turn_id` cannot reach the running workflow through `DBOS.send_async(destination_id=...)` while the two ids differ, which blocks `t-f3-11` | `adapters/driving/http/routes.py` | **DONE — the two ids are one id: `_step_new_turn_id` now returns the running workflow's id** |
-| <a id="t-f0-07"></a>t-f0-07 | **An operator console.** A REPL driving adapter for inspecting and exercising each agent: list profiles, read a profile's resolved configuration, see the toolset it actually gets, hold a conversation with it, and watch every tool call with the policy decision and `rule_id` that admitted or refused it | `adapters/driving/cli/console.py` | TODO |
+| <a id="t-f0-07"></a>t-f0-07 | **An operator console.** A REPL driving adapter for inspecting and exercising each agent: list profiles, read a profile's resolved configuration, see the toolset it actually gets, hold a conversation with it, and watch every tool call with the policy decision and `rule_id` that admitted or refused it | `adapters/driving/cli/console.py` | **DONE** |
 
 > **`t-f0-05` had no anchor, and that is why nothing could be started.** Every F0 anchor
 > above was closed and the repository was still a library with tests: no `main`, no ASGI
@@ -149,7 +149,7 @@ tool result, and the denial is in the audit table.
 | <a id="t-f1-12"></a>t-f1-12 | Pydantic AI adapter + the seven hooks; policy and audit in `before_tool_execute`. **F1's share only** — the file closes across F1, F3, F5, F6 and F7; the other five anchors are listed below | `adapters/driven/agent_pydantic/runner.py` | **F1 SHARE DONE — hook and runner body; F3/F5/F6/F7/F9 seams stubbed with anchors** |
 | <a id="t-f1-13"></a>t-f1-13 | Postgres `ConversationStore`; index on `(session_id, seq)` | `adapters/driven/persistence_pg/conversation_repository.py` | **DONE — `load_history` and `append` only; `append_outcome` split out to [`t-f1-22`](#t-f1-22)** |
 | <a id="t-f1-22"></a>t-f1-22 | `PgConversationStore.append_outcome` — persist a turn's terminal state; `StartTurn` step 7 awaits it on **every** turn, finished or suspended | `adapters/driven/persistence_pg/conversation_repository.py` | **DONE** |
-| <a id="t-f1-24"></a>t-f1-24 | **The store and the runner disagree about how history is encoded, and no test ever crossed that seam.** A second turn in one session raises `UnsupportedHistoryError: history carries a dict; this adapter accepts only Pydantic AI ModelMessage values`. Every test injected its own history, so the round trip `append` → `load_history` → `run` was never driven end to end | `adapters/driven/persistence_pg/conversation_repository.py` | TODO |
+| <a id="t-f1-24"></a>t-f1-24 | **The store and the runner disagree about how history is encoded, and no test ever crossed that seam.** A second turn in one session raises `UnsupportedHistoryError: history carries a dict; this adapter accepts only Pydantic AI ModelMessage values`. Every test injected its own history, so the round trip `append` → `load_history` → `run` was never driven end to end | `adapters/driven/persistence_pg/conversation_repository.py` | **DONE — the STORE was wrong, not the runner** |
 | <a id="t-f1-21"></a>t-f1-21 | `ToolProvider` adapter — build a profile's toolset from the registered tool packages, and wire it into the container. **`t-f1-07` froze the port; nothing implements it** | `adapters/driven/tools/provider.py` | **DONE** |
 | <a id="t-f1-23"></a>t-f1-23 | **Production applies no migrations at all.** `composition.py` calls neither `run_migrations` nor any `apply_*_migration`, so with the sibling-migration convention now in use there is no production applier for ANY of them — every integration test applies its own by hand | `Core/src/agent_core/composition.py` | **DONE — discovery-based, so the eighth sibling migration cannot be forgotten; `main.py` now starts through `start_container`** |
 | <a id="t-f1-14"></a>t-f1-14 | Postgres `AuditSink` on a **separate pool** | `adapters/driven/persistence_pg/audit_repository.py` | **DONE** |
@@ -748,7 +748,7 @@ and neither query can cross a tenant boundary.
 | <a id="t-f2-03"></a>t-f2-03 | Partitioned queue: `partition_concurrency=1`, key = session id | `adapters/driving/workflow/turn_workflow.py` | **DONE** |
 | <a id="t-f2-04"></a>t-f2-04 | Pending-input buffer table and its repository; migration `0011` lives here | `adapters/driven/persistence_pg/pending_input_repository.py` | **DONE** |
 | <a id="t-f2-05"></a>t-f2-05 | Coalescing enqueue: `delay_seconds` + `deduplication_id` / `return-existing` | `adapters/driving/http/routes.py` | **DONE — unblocked by `t-f2-11`** |
-| <a id="t-f2-06"></a>t-f2-06 | Typing-indicator extension of the window, where the channel supplies it | `adapters/driven/human/gateway.py` | TODO |
+| <a id="t-f2-06"></a>t-f2-06 | Typing-indicator extension of the window, where the channel supplies it | `adapters/driven/human/gateway.py` | **BLOCKED — no reachable subject in phase one; see the note** |
 | <a id="t-f2-07"></a>t-f2-07 | Test: three messages inside the window produce **one** turn and one model call | `Core/tests/integration/test_durability.py` | **DONE — proved against a REAL subprocess kill; teeth shown by three production mutations, each restored byte-exact** |
 | <a id="t-f2-08"></a>t-f2-08 | Test: two simultaneous sessions run in parallel; two messages on one session do not | `Core/tests/integration/test_durability.py` | **DONE — proved against a REAL subprocess kill; teeth shown by three production mutations, each restored byte-exact** |
 | <a id="t-f2-09"></a>t-f2-09 | Test: a message arriving mid-turn becomes a follow-up turn, not a lost message | `Core/tests/integration/test_durability.py` | **DONE — proved against a REAL subprocess kill; teeth shown by three production mutations, each restored byte-exact** |
@@ -756,6 +756,16 @@ and neither query can cross a tenant boundary.
 | <a id="t-f2-11"></a>t-f2-11 | **The coalescing window itself**: a separate NON-partitioned queue carrying a debounced workflow that, on expiry, enqueues the real turn onto the partitioned queue. `t-f2-05` is the `routes.py` half and cannot land without this | `adapters/driving/workflow/turn_workflow.py` | **DONE** |
 | <a id="t-f2-12"></a>t-f2-12 | **A worker killed mid-turn silences that session forever, and nothing raises.** `partition_concurrency=1` plus a PENDING row blocks the partition for every worker, while startup recovery is scoped to the CURRENT `application_version` — and the default version is a hash of registered source, so every deploy is a new one. **Nothing in `Core/src` ever constructs `DBOSConfig`** | `Core/src/agent_core/composition.py` | **DONE — `application_version` pinned; the price is in the docstring** |
 | <a id="t-f2-13"></a>t-f2-13 | **Nothing in `Core/src` launches DBOS at all**, so [`t-f2-12`](#t-f2-12)'s pinned config is owned and unconsumed. `main.py` cannot call it (`dbos` is banned there and its docstring says so) and the workflow package exposes no bootstrap — so a launcher will assemble a second config by hand and the deadlock returns | `adapters/driving/workflow/bootstrap.py` | **DONE — `launch_dbos` cannot be handed a version; `main.py` calls it** |
+
+> **`t-f2-06` is blocked by a dependency, not by effort, and it stays that way on purpose.**
+> It extends the coalescing window while a user is still typing, and that needs inbound typing
+> state from the channel. D22 established that only Chatwoot's web widget supplies it, and D23
+> put Chatwoot in phase two — so phase one has **no reachable subject at all**, not a hard one.
+>
+> It is marked BLOCKED rather than TODO because those mean different things to whoever plans the
+> next phase: TODO is work nobody has done, BLOCKED is work nobody can do. Leaving it TODO would
+> make a phase look unfinished forever and eventually get it "closed" by someone who did not read
+> this far.
 
 > **`t-f2-04` was split for the same reason `t-f1-04` was rewritten.** It read "Pending-input
 > buffer table **+ drain as the workflow's first step**" and named the persistence package,
@@ -862,11 +872,11 @@ writing a line of SQL**. See `docs/ROADMAP.md` for why each row below exists.
 
 | Anchor | Task | File | Status |
 |---|---|---|---|
-| <a id="t-f11-09"></a>t-f11-09 | `:new <id>` scaffolds a profile from a template and `:reload` re-reads the directory without restarting the process — an agent is EDITED far more often than it is invented | `adapters/driving/cli/console.py` | TODO |
-| <a id="t-f11-10"></a>t-f11-10 | The approval path from the terminal: `:pending`, `:approve <id>`, `:refuse <id>`. **D25's four-eyes rule applies here and will usually REFUSE**, because the operator asking is the operator approving — it must say so by name rather than appear broken | `adapters/driving/cli/console.py` | TODO |
-| <a id="t-f11-11"></a>t-f11-11 | Show a tool call's ARGUMENTS and its RESULT, not just its name — and render untrusted-content wrapping AS wrapping, so an operator can see the boundary that defends non-negotiables #4 and #10 rather than take it on faith | `adapters/driving/cli/console.py` | TODO |
-| <a id="t-f11-12"></a>t-f11-12 | `:sessions` and `:resume <id>`, so a conversation can be picked up. A console that can only start fresh cannot test compaction, which needs a long one | `adapters/driving/cli/console.py` | TODO |
-| <a id="t-f11-13"></a>t-f11-13 | `:trace [user\|admin]` — the last turn as the `TranscriptReader` projects it, in EITHER audience. An operator seeing exactly what a USER would have seen is the only practical check on non-negotiable #11 | `adapters/driving/cli/console.py` | TODO |
+| <a id="t-f11-09"></a>t-f11-09 | `:new <id>` scaffolds a profile from a template and `:reload` re-reads the directory without restarting the process — an agent is EDITED far more often than it is invented | `adapters/driving/cli/console.py` | **DONE — but see [`t-f11-33`](#t-f11-33): unreachable from the shipped process** |
+| <a id="t-f11-10"></a>t-f11-10 | The approval path from the terminal: `:pending`, `:approve <id>`, `:refuse <id>`. **D25's four-eyes rule applies here and will usually REFUSE**, because the operator asking is the operator approving — it must say so by name rather than appear broken | `adapters/driving/cli/console.py` | **DONE — but see [`t-f11-33`](#t-f11-33): unreachable from the shipped process** |
+| <a id="t-f11-11"></a>t-f11-11 | Show a tool call's ARGUMENTS and its RESULT, not just its name — and render untrusted-content wrapping AS wrapping, so an operator can see the boundary that defends non-negotiables #4 and #10 rather than take it on faith | `adapters/driving/cli/console.py` | **DONE — but see [`t-f11-33`](#t-f11-33): unreachable from the shipped process** |
+| <a id="t-f11-12"></a>t-f11-12 | `:sessions` and `:resume <id>`, so a conversation can be picked up. A console that can only start fresh cannot test compaction, which needs a long one | `adapters/driving/cli/console.py` | **DONE — but see [`t-f11-33`](#t-f11-33): unreachable from the shipped process** |
+| <a id="t-f11-13"></a>t-f11-13 | `:trace [user\|admin]` — the last turn as the `TranscriptReader` projects it, in EITHER audience. An operator seeing exactly what a USER would have seen is the only practical check on non-negotiable #11 | `adapters/driving/cli/console.py` | **DONE — but see [`t-f11-33`](#t-f11-33): unreachable from the shipped process** |
 
 > **Five anchors write `console.py`, so they are five waves — or one task.** They are one
 > task. `t-f11-09` through `t-f11-13` are a single surface being finished, they share its
@@ -881,7 +891,8 @@ writing a line of SQL**. See `docs/ROADMAP.md` for why each row below exists.
 | <a id="t-f11-14"></a>t-f11-14 | **A profile cannot name a peer.** `_build_peer_policy` excludes `peers` from the accepted keys — "no loader yet" — so `PeerPolicy.peers` is always empty, and empty means NOBODY. Every A2A mechanism in the tree is unreachable from configuration | `domain/profile.py` | **DONE** |
 | <a id="t-f11-15"></a>t-f11-15 | A shipped relationship, as configuration: two profiles that genuinely ask each other, with the **two-sided** allowlist and the hop limit in force. One agent orchestrating another must be a YAML change, not a code change — that is the claim, and this anchor is the proof | `Core/profiles/support_triage.yaml`, `Core/profiles/billing_specialist.yaml` | **DONE** |
 | <a id="t-f11-16"></a>t-f11-16 | An MCP server configured in a profile and reached end to end: its tools arrive `mcp_*`-prefixed, obey the same `ToolPolicy`, get the smaller result budget, and come back wrapped as untrusted content. `mcp_servers: []` in both shipped profiles today | `Core/profiles/delivery_optimizer.yaml` | **DONE — teeth proven by mutating `UNTRUSTED_PREFIXES`** |
-| <a id="t-f11-17"></a>t-f11-17 | **The acceptance run.** From an empty PostgreSQL instance: one command starts it, an operator creates an agent, gives it a tool, watches a second tool refused, approves that refusal, has one agent orchestrate another, and reads the whole exchange in the trail — scripted, so the claim is checked rather than remembered | `Core/tests/integration/test_cli_acceptance.py` | TODO |
+| <a id="t-f11-17"></a>t-f11-17 | **The acceptance run.** From an empty PostgreSQL instance: one command starts it, an operator creates an agent, gives it a tool, watches a second tool refused, approves that refusal, has one agent orchestrate another, and reads the whole exchange in the trail — scripted, so the claim is checked rather than remembered | `Core/tests/integration/test_cli_acceptance.py` | **DONE — 9 passed, 4 strict xfail, each naming a gap rather than weakening an assertion** |
+| <a id="t-f11-31"></a>t-f11-31 | **The operator runbook.** Starting this system from zero is currently reconstructable only from a conversation. Write it down: what to set, what each subcommand does, what the preflight will tell you, and what to do about each thing it names | `README.md` | **DONE** |
 
 ### What wave 1 surfaced
 
@@ -897,11 +908,102 @@ writing a line of SQL**. See `docs/ROADMAP.md` for why each row below exists.
 
 | Anchor | Task | File | Status |
 |---|---|---|---|
-| <a id="t-f11-23"></a>t-f11-23 | **A credential in `.env` is invisible to the model client.** `Settings.from_env` layers the file under the environment for ITS OWN fields and exports nothing, while litellm resolves `MINIMAX_API_KEY` from `os.environ` — and the file carries the value as `MINIMAX_API`. The preflight reports it; nothing maps it | `Core/src/agent_core/composition.py` | TODO |
-| <a id="t-f11-24"></a>t-f11-24 | The checked-in `.env` points `AGENT_CORE_DATABASE_URL` at the remote instance, where `agent_core_app` does not exist — so `python -m agent_core serve` cannot start from the credentials file as it stands. Decide what a checked-in default should point at, and make the failure say which | `.env.example` | TODO |
-| <a id="t-f11-25"></a>t-f11-25 | `MCPServerRef.result_budget_chars` is **inert configuration**: the runner budgets by name prefix (`budget_for`) and nothing calls `mcp_toolsets.result_budget_for`, so a per-server number in a profile changes nothing. A knob that does not turn is worse than no knob | `adapters/driven/agent_pydantic/runner.py` | TODO |
-| <a id="t-f11-26"></a>t-f11-26 | Tests pinning the schema truths `t-f11-20`/`t-f11-22` moved: `test_migrations.py` asserts the `_dbos` name nothing opens and asserts the applied set equals `APP_MIGRATIONS`; `test_audit_repository.py`'s fixture writes a `turns` row **production can never write** (no `profile_version`, NOT NULL since `0009`) and passed only because `run_migrations` skipped `0009`; `test_cold_start.py` asserts the old database names | `Core/tests/integration/test_migrations.py` | TODO |
-| <a id="t-f11-27"></a>t-f11-27 | `test_profile.py` asserts `model == "claude-sonnet-5"` against a profile now pointing at `minimax/MiniMax-M3`. A test pinning a value that is deployment configuration, not behaviour | `Core/tests/unit/test_profile.py` | TODO |
+| <a id="t-f11-23"></a>t-f11-23 | **A credential in `.env` is invisible to the model client.** `Settings.from_env` layers the file under the environment for ITS OWN fields and exports nothing, while litellm resolves `MINIMAX_API_KEY` from `os.environ` — and the file carries the value as `MINIMAX_API`. The preflight reports it; nothing maps it | `Core/src/agent_core/composition.py` | **DONE — code landed before the session limit; the 9 tests that pin it are green** |
+| <a id="t-f11-24"></a>t-f11-24 | The checked-in `.env` points `AGENT_CORE_DATABASE_URL` at the remote instance, where `agent_core_app` does not exist — so `python -m agent_core serve` cannot start from the credentials file as it stands. Decide what a checked-in default should point at, and make the failure say which | `.env.example` | **DONE** |
+| <a id="t-f11-25"></a>t-f11-25 | `MCPServerRef.result_budget_chars` is **inert configuration**: the runner budgets by name prefix (`budget_for`) and nothing calls `mcp_toolsets.result_budget_for`, so a per-server number in a profile changes nothing. A knob that does not turn is worse than no knob | `adapters/driven/agent_pydantic/runner.py` | **DONE — a profile may only ever LOWER the ceiling, never raise it** |
+| <a id="t-f11-32"></a>t-f11-32 | **`MCPServerRef.result_budget_chars` validates nothing.** It was harmless while the number was inert; now that `t-f11-25` consults it, a negative value makes the truncation NOTICE lie: `omitted = len(body) - budget` claims more characters were removed than the body ever held. **Corrected: `body[:-100]` keeps the HEAD, not the tail — this anchor said the opposite and was wrong** | `domain/profile.py` | **DONE** |
+| <a id="t-f11-26"></a>t-f11-26 | Tests pinning the schema truths `t-f11-20`/`t-f11-22` moved: `test_migrations.py` asserts the `_dbos` name nothing opens and asserts the applied set equals `APP_MIGRATIONS`; `test_audit_repository.py`'s fixture writes a `turns` row **production can never write** (no `profile_version`, NOT NULL since `0009`) and passed only because `run_migrations` skipped `0009`; `test_cold_start.py` asserts the old database names | `Core/tests/integration/test_migrations.py` | **DONE** |
+| <a id="t-f11-27"></a>t-f11-27 | `test_profile.py` asserts `model == "claude-sonnet-5"` against a profile now pointing at `minimax/MiniMax-M3`. A test pinning a value that is deployment configuration, not behaviour | `Core/tests/unit/test_profile.py` | **DONE — it was pinning deployment configuration, not behaviour** |
+
+### The two that block the goal
+
+| Anchor | Task | File | Status |
+|---|---|---|---|
+| <a id="t-f11-28"></a>t-f11-28 | **`LocalToolProvider` cannot compose an MCP server**, so a profile that declares one makes `preflight` refuse to start the whole process. `t-f11-16` put a real server in `delivery_optimizer.yaml` and the F6 machinery has no path from a profile to a running toolset | `adapters/driven/tools/provider.py` | **DONE** |
+| <a id="t-f11-29"></a>t-f11-29 | **Nothing in production ever writes a `ModelResponse`.** `TurnOutcome` carries no messages, so a stored history is the user's prompts and nothing else — the agent's own replies are never persisted. A conversation with no agent turns in it is not a conversation | `adapters/driven/agent_pydantic/runner.py` | **DONE** |
+
+
+### What the acceptance run found
+
+| Anchor | Task | File | Status |
+|---|---|---|---|
+| <a id="t-f11-33"></a>t-f11-33 | **The console surface is finished and unreachable from the shipped process.** `main.build_console` binds no `profiles_dir`, `load_profiles`, `approvals` or `transcripts`, and `Container` has no transcript-reader seat — so `:new`, `:reload`, `:approve`, `:refuse`, `:sessions` and `:trace` all answer "this console has no … wired" | `Core/src/agent_core/main.py` | TODO |
+| <a id="t-f11-34"></a>t-f11-34 | **Orchestration is unreachable too.** `support_triage` names `billing_specialist` and resolves to NO `ask_peer` tool: `TOOL_PACKAGES` is `{delivery, fraud}` and nothing wires an `AgentMailbox` into the container. Six F9 anchors plus `t-f11-15` are reachable only from unit tests | `Core/src/agent_core/composition.py` | TODO |
+| <a id="t-f11-35"></a>t-f11-35 | `audit_repository.ARGUMENT_ALLOWLIST` is `{}`, so every call in the trail renders "arguments: none recorded" — `t-f11-11`'s "show a call WHOLE" can never show two of its three parts | `adapters/driven/persistence_pg/audit_repository.py` | TODO |
+| <a id="t-f11-36"></a>t-f11-36 | `preflight.py` restates `_DBOS_DATABASE_SUFFIX = "_dbos"`, the name `t-f11-20` retired: a correctly bootstrapped instance is warned that `<app>_dbos` is missing and handed a remedy creating a database nothing opens, while `<app>_dbos_sys` is never checked | `adapters/driving/cli/preflight.py` | TODO |
+| <a id="t-f11-37"></a>t-f11-37 | **`max_cost_usd` accepts a non-finite `Decimal` and fails OPEN.** `Decimal("nan")` parses, every comparison against NaN is False, so `cost_exhausted` can never be True and the agent has NO SPEND LIMIT. This file already rejects non-finite literals in approval conditions and never applied the rule to its own money field | `domain/profile.py` | TODO |
+
+> **`t-f11-33` and `t-f11-34` are the seventh and eighth instances of one shape, and they are the
+> two that matter most.** Every command an operator would use to MAKE an agent — `:new`,
+> `:reload` — and every command to JUDGE one — `:approve`, `:trace`, `:sessions` — is written,
+> tested and green, and answers "not wired" in the shipped process. The same is true of every A2A
+> anchor: six of them, plus the two profiles that finally made a relationship expressible, and
+> nothing hands the container a mailbox.
+>
+> They were invisible for the same reason all six earlier instances were: **each unit test
+> supplied the collaborator itself.** `test_console.py` passes a `load_profiles`; the peer tests
+> pass a mailbox. The acceptance run is the first thing that drives the process the way an
+> operator will, which is exactly why it was written as a script — and it found both on its first
+> execution.
+>
+> Note how it reported them: **four strict xfails naming the gaps, not four weakened assertions.**
+> A strict xfail turns green the day the gap closes and fails if it is silently "fixed" by
+> deleting the test. That is the difference between a test that documents a gap and a test that
+> hides one.
+
+> **`t-f11-37` is worse than the budget bug that uncovered it, and worse in the way that matters.**
+> A profile writing `max_cost_usd: nan` loads cleanly and carries `Decimal('NaN')`. Every
+> comparison against NaN is False, so `cost_exhausted` is permanently False and the agent runs
+> with **no spend limit at all** — silently, unboundedly, surfacing only on the bill, which is
+> exactly the failure mode `CLAUDE.md`'s silent-bug table names.
+>
+> `domain/profile.py` already knows this rule. `_decimal`'s own docstring rejects non-finite
+> literals in approval conditions because *"a condition that silently never matches is precisely
+> the fail-open this module exists to prevent."* The rule was written down, and the file's own
+> money field was never held to it.
+
+> **`t-f11-32` is what closing `t-f11-25` bought, and it is worth seeing the shape.** An
+> unvalidated number sat in a profile for as long as nothing read it, and validating it would
+> have looked like ceremony. The moment a knob starts turning, every value it can hold becomes
+> reachable — and this one reaches somewhere bad: a negative budget keeps the TAIL of an
+> omission count lies about how much. **Inert configuration is unvalidated configuration
+> waiting for its first reader.**
+>
+> **And the anchor's own reasoning was wrong, which the implementing agent checked rather than
+> took.** It claimed a negative slice keeps the TAIL, where an injection puts its instructions.
+> `'0123456789'[:-3]` is `'0123456'`: it keeps the HEAD. The defect is real for a different
+> reason — `omitted = len(body) - budget` with `budget=-100` reports `len(body) + 100` removed,
+> and that notice sits OUTSIDE the delimiters precisely so a reader can trust our accounting
+> over the payload's imitation of it. Here our accounting is the part that lies. `budget=0`
+> empties every fence instead, which is `tool_exclude`'s job done invisibly. Both refuse at load
+> now. **An anchor is a claim, not an instruction — verify it before implementing it.**
+
+> **`t-f11-29` is the last and largest instance of the shape this whole build kept hitting**, and
+> it hid behind the one that came before it. `t-f1-24` found the store and the runner disagreeing
+> about how a history is encoded; fixing that made a second turn work, and made this visible
+> underneath — the history round-trips correctly and it is only ever half a conversation.
+>
+> Every test that needed an agent reply put one there itself. `test_history_round_trip.py` drives
+> two real turns and asserts the model was handed the earlier question back, which is true and is
+> the user's half. The agent's half has no writer at all, because `TurnOutcome` — the one thing
+> that crosses from the runner back to the use case — carries a result and a pending list and no
+> messages.
+>
+> Whoever closes it must also answer what a `ThinkingPart` does on the way out: reasoning is
+> admin-only (`t-f10-04`), `transcript_entries` now projects a serialised `ModelMessage`, and the
+> moment a `ModelResponse` is stored, a reasoning block is one unnamed projection away from a USER
+> read. The module docstring already records that; this is the anchor that makes it urgent.
+
+> **Two migrations took the id `0023`, and nothing said so.** `audit_tenant_migration.py` took it
+> outside the table at the same time the table allocated it, and `DuplicateMigrationIdError`
+> compares WHOLE ids — so `0023_audit_tenant` and `0023_something_else` coexist silently, which is
+> the exact failure the pre-allocation table exists to prevent, one character narrower than the
+> check that guards it. The table below is corrected and extended; the check comparing whole ids
+> rather than the numeric prefix is [`t-f11-30`](#t-f11-30).
+
+| Anchor | Task | File | Status |
+|---|---|---|---|
+| <a id="t-f11-30"></a>t-f11-30 | `DuplicateMigrationIdError` compares whole ids, so two migrations sharing a numeric prefix pass discovery. Compare the prefix — that number is the allocation, and the suffix is a comment | `adapters/driven/persistence_pg/migrations.py` | **DONE** |
 
 > **`t-f11-26` is the same trap twice, mirrored, and it is worth reading before writing the fix.**
 > `run_migrations` applied only F1's list, so a fixture built on it silently lacked `0009` and
@@ -986,6 +1088,10 @@ parallel pick the same one:
 | `0021` | [`t-d2-05`](#t-d2-05) | pgvector embedding column + index for `SEMANTIC` retrieval |
 | `0022` | [`t-f11-07`](#t-f11-07) | `reason` on `audit_tool_calls` — what the winning rule actually said |
 | `0023` | [`t-f11-21`](#t-f11-21) | `tenant_id` on `audit_tool_calls` — scoping a read without an evidence-erasing join |
+| `0024` | [`t-f1-24`](#t-f1-24) | `messages` re-encoded as `ModelMessage`; the unreadable legacy rows are deleted, not migrated |
+| `0025` | *unallocated* | held free |
+| `0026` | *unallocated* | held free |
+| `0027` | *unallocated* | held free |
 | `0024` | *unallocated* | held free |
 
 An id is spent when it is written here, not when the table ships. An anchor that turns out
