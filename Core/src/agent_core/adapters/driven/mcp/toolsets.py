@@ -56,6 +56,13 @@ FAILURE HANDLING - MCP IS THE FLAKIEST DEPENDENCY IN THE SYSTEM
     silence over noise, so it logs at WARNING: an operator has to be able to tell "this
     server offers no tools" from "this server is down".
 
+    That WARNING is one line and carries no traceback (t-f11-40). The failure it reports
+    is handled, documented and deliberate, and a traceback under it renders a degraded
+    start as a crash - which is the first thing an operator sees at startup. The cause is
+    not thrown away: it is summarised onto the warning as `Type: message` and logged whole
+    at DEBUG on this module's logger. `_report_degraded` owns both halves and explains the
+    choice.
+
 SCHEMA CACHE (t-f6-05) - WHAT INVALIDATES AN ENTRY
     Policy filtering (`ToolPolicy.filter_toolset`) runs on every turn via `tool_names_for`.
     Without a cache that means every turn pays a process launch - or an HTTP handshake -
@@ -116,6 +123,66 @@ class MCPConfigurationError(ValueError):
     mysteriously less capable with nothing in the logs - the same failure mode
     ports/tool_provider.py refuses for an unknown local toolset name.
     """
+
+
+def _cause_summary(error: BaseException) -> str:
+    """`Type: message`, for the exception an operator can actually act on.
+
+    The leaf, not the wrapper. Every transport here fails through `ExceptionGroup` - two
+    layers of it, and an `anyio` task group under that - and the group's own `str` is
+    " (1 sub-exception)", which names neither the server nor the failure. The sentence
+    worth printing is always at the bottom: `MCPError: Connection closed`,
+    `FileNotFoundError: ...`, `TimeoutError`.
+    """
+    leaf: BaseException = error
+    while isinstance(leaf, BaseExceptionGroup) and leaf.exceptions:
+        leaf = leaf.exceptions[0]
+    first_line = str(leaf).strip().splitlines()
+    if not first_line:
+        return type(leaf).__name__
+    return f"{type(leaf).__name__}: {first_line[0]}"
+
+
+def _report_degraded(server_name: str, error: BaseException) -> None:
+    """One line for the operator, the whole traceback for whoever is debugging. t-f11-40.
+
+    A HANDLED, DOCUMENTED, DELIBERATE DEGRADED START MUST NOT BE RENDERED AS A CRASH
+        Both callers swallow a discovery failure on purpose - see FAILURE HANDLING above -
+        and both used to log it with `exc_info=True`. There is no logging configuration in
+        this process, so `logging.lastResort` prints a WARNING to stderr WITH its traceback:
+        an operator starting the console met sixty lines of `ExceptionGroup` through
+        fastmcp's internals, above a one-line warning that was already correct and
+        sufficient. The first thing this system showed a human was a crash it had already
+        handled, and the line that said so was buried under the evidence.
+
+    WHAT SURVIVES THE SUPPRESSION, AND WHY THAT IS NOT "SWALLOWING THE CAUSE"
+        The WARNING keeps everything an operator needs to act: WHICH server, that the
+        start is degraded rather than refused, what the profile does instead, and the
+        cause as one sentence (`_cause_summary`) - which is the only line of that
+        traceback anybody read. A summary is not a suppression.
+
+    HOW A DEBUGGER GETS THE REST
+        A LOG LEVEL, not a flag. The full traceback is logged at DEBUG on this module's
+        own logger, so `logging.getLogger("agent_core.adapters.driven.mcp.toolsets")
+        .setLevel(logging.DEBUG)` - or any deployment that configures logging at DEBUG -
+        gets every frame back. A flag would have to be threaded from a command line
+        through the composition root into a driven adapter, which is a seam this module
+        should not have; a level is the one dial every operator already knows how to turn,
+        and it costs nothing on the path where nobody is debugging.
+    """
+    _log.warning(
+        "MCP server %r did not answer (%s); continuing without its tools. This is a "
+        "degraded start, not a refusal: the profile serves its local tools until the "
+        "server is reachable. Set the %s logger to DEBUG for the full traceback.",
+        server_name,
+        _cause_summary(error),
+        __name__,
+    )
+    _log.debug(
+        "MCP server %r: the full cause of the degraded start reported above.",
+        server_name,
+        exc_info=error,
+    )
 
 
 def server_prefix(server_name: str) -> str:
@@ -231,14 +298,10 @@ class _GuardedToolset(WrapperToolset[Any]):
         try:
             async with asyncio.timeout(self.discovery_timeout_seconds):
                 return await super().get_tools(ctx)
-        except Exception:
+        except Exception as unreachable:
             # Never let a dead server block turn start. The profile loses this server's
             # tools; every other toolset in the composition is untouched.
-            _log.warning(
-                "MCP server %r could not be listed; continuing without its tools.",
-                self.server_name,
-                exc_info=True,
-            )
+            _report_degraded(self.server_name, unreachable)
             return {}
 
     async def call_tool(
@@ -350,14 +413,10 @@ class MCPToolProvider:
         try:
             async with asyncio.timeout(self._discovery_timeout_seconds):
                 advertised = await self._mcp_toolset(server).list_tools()
-        except Exception:
+        except Exception as unreachable:
             # Same bargain as `_GuardedToolset.get_tools`: policy filtering must not fail
             # because a server is down, so an unreachable server contributes no names.
-            _log.warning(
-                "MCP server %r could not be listed; continuing without its tools.",
-                server.name,
-                exc_info=True,
-            )
+            _report_degraded(server.name, unreachable)
             return None
         return tuple(sorted(tool.name for tool in advertised))
 

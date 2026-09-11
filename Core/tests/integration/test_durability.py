@@ -75,6 +75,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Coroutine, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -83,6 +84,7 @@ import psycopg
 import pytest
 
 from agent_core.adapters.driven.human import gateway
+from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
 from agent_core.adapters.driving.channels.registry import ChannelRegistry, OutboundMessage
 from agent_core.adapters.driving.http import routes
 from agent_core.adapters.driving.workflow import turn_workflow
@@ -90,6 +92,7 @@ from agent_core.application.start_turn import StartTurn
 from agent_core.composition import Settings, dbos_config
 from agent_core.domain.compaction import CompactionPolicy, CompactionResult, ContextState
 from agent_core.domain.media import MediaId, MediaKind, MediaRef
+from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy
 from agent_core.domain.policy import Effect, PolicyRule, RuleSet
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
@@ -466,6 +469,119 @@ class _ReplaySafeChannel:
         self.sent.append((caller, message))
 
 
+class _RecordingMailbox:
+    """An `AgentMailbox` that records what left and answers like the real adapter.
+
+    Minted ids are sequential rather than random: this file compares two runs of the same
+    body, and a uuid here would differ between them for a reason that has nothing to do
+    with the workflow. The peer's bytes are stored VERBATIM and wrapped on read, which is
+    what `ports/agent_mailbox.py` requires of every implementation.
+    """
+
+    def __init__(self) -> None:
+        self.asks: list[tuple[AgentId, str, int]] = []
+        self._answers: dict[str, str] = {}
+
+    async def discover(self, policy: PeerPolicy) -> tuple[AgentRef, ...]:
+        return policy.peers
+
+    async def ask(
+        self,
+        policy: PeerPolicy,
+        target: AgentId,
+        question: str,
+        *,
+        from_session: SessionRef,
+        turn_id: TurnId,
+        hop: int,
+        # t-f11-50. The port's own default, restated rather than chosen: `None` means the
+        # asker is UNKNOWN, never "anyone may ask". A double that invented an identity
+        # here would let the answering side's `callee_policy.may_ask(caller)` pass in a
+        # test and refuse in production - a double arguing the opposite of the code.
+        asker: AgentId | None = None,
+    ) -> str:
+        del policy, from_session, turn_id, asker
+        self.asks.append((target, question, hop))
+        return f"corr-{len(self.asks)}"
+
+    async def answer(self, correlation_id: str, answer: str) -> None:
+        self._answers.setdefault(correlation_id, answer)
+
+    async def read_answer(self, correlation_id: str) -> str | None:
+        raw = self._answers.get(correlation_id)
+        return None if raw is None else wrap_peer_answer(raw)
+
+
+class _InBandResume:
+    """`ResumeTurn` as `_step_refuse_peers` reaches it, recording what it was handed.
+
+    `_step_resume` is swapped out by `_install`, so this is resolved on ONE path only: a
+    peer ask the gate refused, resolved in-band rather than waited on. It returns the same
+    outcome the caller's `resumes_to` produces, so the body reaches an answer down either
+    route and the decision sequence stays the thing under test.
+    """
+
+    def __init__(self, resumes_to: Callable[[TurnId], TurnOutcome]) -> None:
+        self._resumes_to = resumes_to
+        self.resolutions: list[ToolResolution] = []
+
+    async def execute(
+        self,
+        turn_id: TurnId,
+        session: SessionRef,
+        profile_id: str,
+        resolutions: tuple[ToolResolution, ...],
+        *,
+        caller: CallerIdentity,
+    ) -> TurnOutcome:
+        del session, profile_id, caller
+        self.resolutions.extend(resolutions)
+        return self._resumes_to(turn_id)
+
+
+# The asking profile is the one `_request()` runs under; the peer is the one
+# `_peer_pending` addresses. Both sides name each other, because `hop_limit.authorise_hop`
+# asks both - a one-sided allowlist is bypassable by whoever controls the other side.
+_PEER_TARGET = "personal-assistant-of-alice"
+
+
+def _peer_profiles() -> dict[str, AgentProfile]:
+    return {
+        _request().profile_id: AgentProfile(
+            id=_request().profile_id,
+            persona="asks",
+            model="m",
+            peers=PeerPolicy(
+                enabled=True,
+                peers=(AgentRef(agent_id=AgentId(_PEER_TARGET), display_name="Alice's PA"),),
+                max_hops=1,
+            ),
+        ),
+        _PEER_TARGET: AgentProfile(
+            id=_PEER_TARGET,
+            persona="answers",
+            model="m",
+            peers=PeerPolicy(
+                enabled=True,
+                peers=(
+                    AgentRef(
+                        agent_id=AgentId(_request().profile_id), display_name="The asker"
+                    ),
+                ),
+                max_hops=1,
+            ),
+        ),
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _Wiring:
+    """What `_install` bound that a test may want to read back."""
+
+    mailbox: _RecordingMailbox
+    resume: _InBandResume
+
+
 def _install(
     monkeypatch: pytest.MonkeyPatch,
     log: _StepLog,
@@ -473,12 +589,22 @@ def _install(
     mint: Callable[[], TurnId],
     resumes_to: Callable[[TurnId], TurnOutcome],
     suspends_to: Callable[[TurnId], TurnOutcome] = _suspended,
-) -> None:
+) -> _Wiring:
     """Replace every step and the durable receive with a recorder over `log`.
 
     The steps are module GLOBALS on purpose: the body resolves them at call time, so this
     swaps them without touching the body, and what is exercised is the body's own decision
     sequence rather than any step's work.
+
+    THE PEER SEAT AND THE RESUME SEAT ARE REAL, AND `_step_ask_peers` IS NOT SWAPPED
+        Unlike the steps above, the peer steps are left alone: which requests leave as
+        questions is a decision the BODY makes, and a stubbed step would prove it about the
+        stub. That makes the seats mandatory - `_require_peer_seat` raises
+        `TurnWorkflowNotWiredError` on the first turn that genuinely asks one, which is
+        correct and loud and is exactly what this file used to die of. So a mailbox and the
+        two profiles are bound here, and `resume_turn` with them: `_step_refuse_peers`
+        resolves a refused ask through the real `ResumeTurn` seat, and that seat has no
+        silent default either.
     """
 
     async def new_turn_id() -> Any:
@@ -535,14 +661,21 @@ def _install(
     #
     # `start_turn` is never resolved - `_step_start` is swapped above and it is the only
     # step that reaches for it - so there is no use case to build here and none is faked.
+    mailbox = _RecordingMailbox()
+    resume_turn = _InBandResume(resumes_to)
     monkeypatch.setattr(
         turn_workflow,
         "_dependencies",
         turn_workflow.TurnWorkflowDependencies(
             start_turn=cast("Any", None),
             channels=ChannelRegistry(((_request().caller.channel, _ReplaySafeChannel()),)),
+            resume_turn=cast("Any", resume_turn),
+            peers=turn_workflow.PeerSeat(
+                mailbox=cast("Any", mailbox), profiles=_peer_profiles()
+            ),
         ),
     )
+    return _Wiring(mailbox=mailbox, resume=resume_turn)
 
 
 def _minter() -> Callable[[], TurnId]:
@@ -649,14 +782,24 @@ def test_a_peer_ask_is_never_put_in_front_of_a_human(
         one specific tool name is blocklisted - which is the exact defect `t-f9-08`
         removed - rather than that the whole `PendingKind.DELEGATION` kind is.
 
-    The turn must still SUSPEND on it - that is what the recv is for - so this asserts
-    about the publish and not about the wait. The human half of the same outcome must still
-    be published, or a filter that fixed the leak would have lost the approval instead.
+    WHERE EACH DELEGATION ACTUALLY GOES, NOW THAT `_step_ask_peers` IS BOUND (t-f11-49)
+        The two delegations do NOT have the same fate, and the assertion below says so
+        rather than averaging them. `tc-peer` carries the model's own `target` and
+        `question`, so it leaves as a real `AgentMailbox.ask()`. `tc-other` carries
+        `arguments={}`, which `_step_ask_peers` refuses as malformed rather than coercing -
+        an empty question asked of "another agent" bills a peer turn for a question nobody
+        can answer - and a refused ask has no answer coming, so the body resolves it IN
+        BAND through `_step_refuse_peers` instead of entering the durable wait for it.
+
+        So this test no longer reaches `recv_async` at all, and asserting that it does
+        would be asserting the opposite of the behaviour that keeps a turn from spending
+        three days waiting on a question that was never asked. What survives unweakened is
+        the property this test exists for: neither delegation was put in front of a person.
     """
     body = _workflow_body()
 
     log = _StepLog()
-    _install(
+    wiring = _install(
         monkeypatch,
         log,
         mint=_minter(),
@@ -673,10 +816,17 @@ def test_a_peer_ask_is_never_put_in_front_of_a_human(
         "on, decided by kind, never by tool name."
     )
 
-    waits = [name for name, _ in log.decisions if name == "recv_async"]
-    assert waits, (
-        "the turn did not wait at all. Dropping a peer ask from the PUBLISH must not drop "
-        "the suspension: the peer's answer arrives on the same durable topic."
+    assert [target for target, _, _ in wiring.mailbox.asks] == [AgentId(_PEER_TARGET)], (
+        f"the mailbox was asked {wiring.mailbox.asks}. Dropping a peer ask from the PUBLISH "
+        "must not drop the ask itself: 'tc-peer' names a target and a question, and the "
+        "turn it belongs to suspends until another agent answers it."
+    )
+    resolved = [str(resolution.tool_call_id) for resolution in wiring.resume.resolutions]
+    assert resolved == ["tc-other"], (
+        f"the refused ask resolved {resolved}. 'tc-other' is a DELEGATION with no target "
+        "and no question, so nothing will ever answer it - a turn that entered the durable "
+        "wait for it would sit there for THREE_DAYS and then report that nobody replied, "
+        "to a question that was never asked."
     )
     assert outcome.result is not None
 

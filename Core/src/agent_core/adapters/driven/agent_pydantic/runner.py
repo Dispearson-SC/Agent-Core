@@ -4,7 +4,8 @@ Phase:   F1 (hooks, policy, audit) / F3 (deferred) / F5 (compaction) / F6 (MCP, 
          F8 (knowledge)
 Tasks:   docs/TASKS.md#t-f1-12, docs/TASKS.md#t-f3-10, docs/TASKS.md#t-f3-16,
          docs/TASKS.md#t-f5-07, docs/TASKS.md#t-f6-04, docs/TASKS.md#t-f7-07,
-         docs/TASKS.md#t-f8-05, docs/TASKS.md#t-f11-25, docs/TASKS.md#t-f11-29
+         docs/TASKS.md#t-f8-05, docs/TASKS.md#t-f11-25, docs/TASKS.md#t-f11-29,
+         docs/TASKS.md#t-f11-45
 Status:  ENFORCEMENT HOOK AND F1 RUNNER BODY IMPLEMENTED (t-f1-12)
          RESUME IMPLEMENTED (t-f3-10)
          RESUME NOW POLICED, AUDITED AND COMPACTED LIKE A FIRST TURN (t-f3-16)
@@ -14,7 +15,8 @@ Status:  ENFORCEMENT HOOK AND F1 RUNNER BODY IMPLEMENTED (t-f1-12)
          knowledge_search AND ITS enabled GATE IMPLEMENTED (t-f8-05)
          THE PER-SERVER MCP RESULT BUDGET NOW ACTUALLY BOUNDS A RESULT (t-f11-25)
          THE AGENT'S OWN MESSAGES NOW LEAVE THE RUN ON THE OUTCOME (t-f11-29)
-         Suspension side of F3 / skills index F6 / peers F9
+         A NEEDS_APPROVAL VERDICT NOW SUSPENDS INSTEAD OF REFUSING (t-f11-45)
+         Skills index F6 / peers F9
 Implements: ports/agent_runner.py
 
 WHY THIS ADAPTER IMPORTS ONE NAME FROM application/
@@ -50,9 +52,15 @@ THE HOOK SKETCH - now `PolicyEnforcement` below (verified against pydantic-ai 2.
     async def before_tool_execute(ctx, *, call, tool_def, args):
         decision = policy.decide(rules, call.tool_name, args)          # snapshot, not caller
         await audit.record_tool_call(turn_id, caller, name, args, decision)   # BEFORE
-        if decision.blocks_execution:
-            raise SkipToolExecution(refusal_result(decision))
+        if decision.effect is NEEDS_APPROVAL:
+            if not ctx.tool_call_approved:
+                raise ApprovalRequired(...)          # SUSPEND: the call stays answerable
+        elif decision.blocks_execution:
+            raise SkipToolExecution(refusal_result(decision))          # REFUSE: answered
         return args
+
+    The NEEDS_APPROVAL branch is t-f11-45 and it is the one place those two outcomes are
+    told apart. See `PolicyEnforcement` for why collapsing them loses F3's whole criterion.
 
     THE CALLER IS NOT AN ARGUMENT TO `decide`. An older sketch in this file read
     `policy.decide(caller, call.tool_name, args)`; it predates the port freeze and matches
@@ -83,7 +91,7 @@ from urllib.parse import urlsplit
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability, ProcessHistory, ValidatedToolArgs
-from pydantic_ai.exceptions import SkipToolExecution, UsageLimitExceeded
+from pydantic_ai.exceptions import ApprovalRequired, SkipToolExecution, UsageLimitExceeded
 from pydantic_ai.messages import (
     AudioUrl,
     BinaryContent,
@@ -98,8 +106,10 @@ from pydantic_ai.messages import (
     VideoUrl,
 )
 from pydantic_ai.models import Model
+from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import (
     DeferredToolApprovalResult,
+    DeferredToolRequests,
     DeferredToolResults,
     ToolApproved,
     ToolDefinition,
@@ -117,7 +127,10 @@ from agent_core.domain.policy import Effect, PolicyDecision, RuleSet
 from agent_core.domain.profile import AgentProfile, profile_content_hash
 from agent_core.domain.turn import (
     CallerIdentity,
+    PendingKind,
+    PendingRequest,
     SessionRef,
+    ToolCallId,
     TurnId,
     TurnOutcome,
     TurnRequest,
@@ -441,7 +454,7 @@ def build_knowledge_toolset(
 
 
 def refusal_result(decision: PolicyDecision) -> str:
-    """The text the MODEL receives in place of the tool result when policy blocks a call.
+    """The text the MODEL receives in place of the tool result when policy REFUSES a call.
 
     `PolicyDecision.reason` is carried verbatim and is the whole payload that matters: the
     port docstring says the reason exists so the agent can adapt instead of retrying
@@ -451,9 +464,16 @@ def refusal_result(decision: PolicyDecision) -> str:
     `rule_id` is deliberately NOT included. It is an internal identifier with no meaning to
     the model, and putting it in the conversation only invites the model to reason about
     the shape of the rule store in front of whoever it is talking to.
+
+    IT NO LONGER HAS A NEEDS_APPROVAL BRANCH, AND THAT IS THE WHOLE OF t-f11-45
+        There used to be one, saying the call was "awaiting human approval" - a sentence
+        handed to the model as a FINISHED tool result on a turn that then ended, so the
+        approval it named could never arrive. A refusal and a suspension are different
+        outcomes: this function serves the first, and `PolicyEnforcement` now answers the
+        second by deferring the call instead of resolving it. Leaving the branch here
+        would keep a sentence in the file that nothing can reach and that describes a
+        wait this adapter no longer performs.
     """
-    if decision.effect is Effect.NEEDS_APPROVAL:
-        return f"Tool call is awaiting human approval and did not run. Reason: {decision.reason}"
     return f"Tool call refused by policy and did not run. Reason: {decision.reason}"
 
 
@@ -477,6 +497,28 @@ class PolicyEnforcement(AbstractCapability[Any]):
 
         Recorded is the INTENT and the VERDICT, never the outcome - see the port
         docstring. A tool about to run that then crashes the process must still appear.
+
+        t-f11-45 changed WHICH exception NEEDS_APPROVAL raises and changed nothing about
+        this ordering: the row is written before both of them, and the new one leaves the
+        turn open for a day, which makes the row the only thing that can answer "why is
+        this waiting?" in the meantime.
+
+    NEEDS_APPROVAL SUSPENDS, DENY REFUSES, AND THE TWO MUST NOT BE COLLAPSED (t-f11-45)
+        Both stop the tool body. What differs is whether the call can still be answered:
+
+        - DENY is an ANSWER. `SkipToolExecution` resolves the call with the refusal, the
+          model reads it and adapts, and the turn finishes. Nobody may overturn it.
+        - NEEDS_APPROVAL is a QUESTION. `ApprovalRequired` DEFERS the call instead of
+          resolving it: the run comes back carrying a `DeferredToolRequests`, the turn
+          suspends with the call's validated arguments intact, and `resume` continues it
+          once a person has answered - which is F3's acceptance criterion, an approval
+          surviving a redeploy and resolving twenty-four hours later.
+
+        It used to answer NEEDS_APPROVAL with `SkipToolExecution` too, because
+        `DeferredToolRequests` was not among the agent's output types and there was no way
+        to end a run with an unanswered call (docs/TASKS.md#t-f3-02). That made a turn
+        claim it was awaiting an approval which could then never arrive - a wait nobody
+        was keeping. t-f11-41 added the output type; this is the hook catching up to it.
     """
 
     def __init__(
@@ -502,16 +544,20 @@ class PolicyEnforcement(AbstractCapability[Any]):
         tool_def: ToolDefinition,
         args: ValidatedToolArgs,
     ) -> ValidatedToolArgs:
-        """Consult policy, record the verdict, and block the call when it is not ALLOW.
+        """Consult policy, record the verdict, then suspend, refuse or let the call run.
 
-        `ctx` is unused on purpose. Every input to the verdict is already settled: the
-        snapshot knows whose rules these are, and reaching into the run context for a
-        second identity is the hole `RuleSet` exists to close.
+        NO IDENTITY IS READ OFF `ctx`, AND THAT PART HAS NOT MOVED. Every input to the
+        VERDICT is already settled: the snapshot knows whose rules these are, and reaching
+        into the run context for a second identity is the hole `RuleSet` exists to close.
+
+        `ctx.tool_call_approved` is a different kind of fact and is read for a different
+        question - see below. It is the library's own statement about THIS call on THIS
+        continuation, not an identity, and there is nothing else that knows it.
         """
         arguments: dict[str, object] = dict(args)
         decision = self._policy.decide(self._rules, call.tool_name, arguments)
 
-        # BEFORE the raise. See the class docstring; this line and the next must not swap.
+        # BEFORE either raise. See the class docstring; this must stay ahead of both.
         await self._audit.record_tool_call(
             self._turn_id,
             self._caller,
@@ -520,15 +566,33 @@ class PolicyEnforcement(AbstractCapability[Any]):
             decision,
         )
 
-        # `blocks_execution` is "not ALLOW", so an effect added to the enum later fails
-        # closed here instead of falling through to execution unnoticed.
-        #
-        # TODO(F3): NEEDS_APPROVAL must SUSPEND rather than refuse - raise Pydantic AI's
-        # `ApprovalRequired` from this same hook so the call is deferred with its
-        # validated arguments and a human can resolve it. Until that lands it blocks,
-        # which is the wrong answer in the safe direction rather than the right answer in
-        # the dangerous one.
-        if decision.blocks_execution:
+        if decision.effect is Effect.NEEDS_APPROVAL:
+            # THE RE-ASK LOOP THIS CHECK EXISTS TO CLOSE (CLAUDE.md's silent-bug table)
+            #     `resume` loads a FRESH snapshot for the continuation and this hook runs
+            #     again over the very call the human just approved - and the rule still
+            #     says NEEDS_APPROVAL, because approving one call does not edit the rule.
+            #     Asking the rules alone would therefore defer it a second time, suspend
+            #     again, and put the identical question back in front of the same person
+            #     forever. Nothing raises; the turn simply looks like a slow approver.
+            #
+            #     Pydantic AI states the fact that settles it: `tool_call_approved` is
+            #     True exactly when this call is being executed because a
+            #     `ToolApproved` resolution was supplied for it. Re-deriving that from our
+            #     own history would be a second, drifting answer to a question the library
+            #     already answers.
+            #
+            # The reason travels as metadata so the person being asked is told WHY, in the
+            # words the rule was written in - domain/policy.py says that sentence is
+            # written for exactly this reader. Without it the ask would reach the human as
+            # a bare tool name and the rule's sentence would live only in the audit table.
+            if not ctx.tool_call_approved:
+                raise ApprovalRequired(metadata={"reason": decision.reason})
+        elif decision.blocks_execution:
+            # `blocks_execution` is "not ALLOW", so an effect added to the enum later
+            # fails closed here instead of falling through to execution unnoticed. The
+            # branch above takes NEEDS_APPROVAL out of its way first, which is why this is
+            # an `elif` and not a second `if`: an APPROVED call is still a NEEDS_APPROVAL
+            # verdict, and a bare `if` would refuse it here after deferring it there.
             raise SkipToolExecution(refusal_result(decision))
 
         return args
@@ -1011,6 +1075,149 @@ def _deferred_results(
     return DeferredToolResults(approvals=approvals, calls=calls)
 
 
+# The shared peer-ask mechanism's tool name, exactly as `adapters/driven/tools/peers.py`
+# declares it. Spelled here rather than imported so this adapter does not depend on a tool
+# package it must keep working without: a deployment that never composes `peers.py` into a
+# profile still runs this translation on every turn.
+#
+# It is the ONE tool name this file matches on, and `PendingKind` says why that is allowed
+# exactly here: the runner is the single PRODUCER of a kind, so the name collapses from N
+# readers to one writer. A second agent-executed mechanism adds a row to
+# `_DELEGATED_TOOL_NAMES` and every consumer downstream keeps asking `kind`.
+ASK_PEER_TOOL_NAME: Final[str] = "ask_peer"
+_DELEGATED_TOOL_NAMES: Final[frozenset[str]] = frozenset({ASK_PEER_TOOL_NAME})
+
+# What a person is told about an approval that arrived with no metadata of its own - a
+# tool body raising a bare `ApprovalRequired`, which is the one shape that carries no
+# sentence. A policy-raised approval carries the RULE's reason instead (t-f11-45), so this
+# is the fallback rather than the usual case: a human asked to approve something must at
+# least be told what, even when nobody wrote a sentence for them.
+_APPROVAL_REASON: Final[str] = (
+    "This tool call needs a human decision before it runs."
+)
+
+
+def _pending_kind_for(tool_name: str, *, approval: bool) -> PendingKind:
+    """WHICH kind of wait one deferred call is, decided once, here - t-f9-08.
+
+    THE APPROVAL AXIS IS STRUCTURAL, THE OTHER ONE IS A NAME
+        Pydantic AI already separates the two halves of D9 for us: a call raising
+        `ApprovalRequired` lands in `DeferredToolRequests.approvals` and a call raising
+        `CallDeferred` lands in `.calls`. That split is read from the LIST, never from a
+        name, because it is the library's own fact and a tool could be renamed tomorrow.
+
+        Inside `.calls` there is no structural difference left. `request_evidence` (t-f7-05)
+        and `ask_peer` (t-f9-04) raise the identical exception; what differs is WHO
+        executes - a person, or another agent - and that is exactly the axis
+        `PendingKind.DELEGATION` exists to carry. The tool name is the only thing that
+        knows it, and `domain/turn.py` names this function as the one place it may decide.
+
+    GETTING IT WRONG IS NOT A COSMETIC ERROR. `answerable_by_a_human` is False for
+    DELEGATION alone, so a peer ask mislabelled EVIDENCE is PUBLISHED to a person who
+    cannot answer it while the turn holds open for days - CLAUDE.md non-negotiable #11.
+    """
+    if approval:
+        return PendingKind.APPROVAL
+    if tool_name in _DELEGATED_TOOL_NAMES:
+        return PendingKind.DELEGATION
+    return PendingKind.EVIDENCE
+
+
+def _pending_reason(
+    kind: PendingKind, call: ToolCallPart, metadata: dict[str, Any]
+) -> str:
+    """The one sentence a reader of a suspended turn gets, per kind.
+
+    It comes from the tool's OWN `CallDeferred.metadata` wherever the tool put one there,
+    because that is the sentence the model wrote for the person - `request_evidence(kind,
+    reason)` exists to carry exactly this - and paraphrasing it here would tell a customer
+    to send something other than what the agent asked for.
+
+    A DELEGATION's sentence is rebuilt from `target` and `question` rather than read from a
+    `reason` key, because `ask_peer` has no reason to give: its metadata is the ask itself.
+
+    IT IS THEN REPLACED, AND IT IS STILL WORTH WRITING HONESTLY
+        `application/start_turn.py::_notice_for` overwrites a DELEGATION's reason with the
+        communicability notice (D17) on the way out, for EVERY audience - so today nobody
+        reads this string. Returning an empty one would make that rewrite load-bearing:
+        the day an admin projection wants the raw ask, or a second agent-executed
+        mechanism keeps its own reason, the sentence has to already exist. The peer and
+        the question are in `arguments` either way, which is what the console renders.
+
+    AN APPROVAL NOW HAS A SENTENCE OF ITS OWN TO CARRY, AND IT IS THE RULE'S (t-f11-45)
+        This used to say `ApprovalRequired` had nowhere to put a reason. It has one -
+        `metadata` - and `PolicyEnforcement` puts `PolicyDecision.reason` there, which
+        domain/policy.py says is written for the human who is being asked. The generic
+        sentence stays as the fallback, because an approval raised by a TOOL body rather
+        than by policy still arrives with no metadata at all.
+    """
+    match kind:
+        case PendingKind.APPROVAL:
+            reason = metadata.get("reason")
+            if isinstance(reason, str) and reason:
+                return reason
+            return f"{_APPROVAL_REASON} Tool: {call.tool_name}."
+        case PendingKind.DELEGATION:
+            target = metadata.get("target", "another agent")
+            question = metadata.get("question", "")
+            return f"Asked {target}: {question}".rstrip(": ").rstrip()
+        case PendingKind.EVIDENCE:
+            reason = metadata.get("reason")
+            if isinstance(reason, str) and reason:
+                return reason
+            return f"The tool {call.tool_name} is waiting on something a person supplies."
+
+
+def _pending_requests(requests: DeferredToolRequests) -> tuple[PendingRequest, ...]:
+    """`DeferredToolRequests` -> the domain's `PendingRequest`s. The F3 suspension half.
+
+    THIS TRANSLATION IS WHAT `ports/agent_runner.py` SAYS THIS ADAPTER OWNS, and until
+    t-f11-41 it did not exist at all: the agent had no `DeferredToolRequests` among its
+    output types, so the first deferred call a model ever made - `ask_peer`, the moment a
+    YAML rule finally allowed it - died inside Pydantic AI with a `UserError` and took the
+    whole turn with it. Nothing in the suite could see it, because every test that
+    exercised a deferred call BUILT the deferred result itself.
+
+    THE `tool_call_id` IS COPIED, NEVER MINTED (CLAUDE.md's silent-bug table)
+        It is the PROVIDER's string and the only link back to the pending call. `resume`
+        matches supplied results against it byte for byte and drops a mismatch without an
+        exception - the turn then stays suspended forever and looks like a slow human. So
+        it is carried across verbatim: no strip, no case fold, no uuid anywhere on this
+        path. `ToolCallId` is a `NewType` over `str`, so this is a relabelling and not a
+        conversion.
+
+    ORDER IS THE LIBRARY'S, AND THAT IS DELIBERATE
+        Approvals then calls, each in the order Pydantic AI listed them, which is the order
+        the model emitted the parts in. A set or a dict-keyed pass here would reorder the
+        list differently between runs, and `adapters/driving/workflow/turn_workflow.py`
+        dispatches these concurrently - CLAUDE.md non-negotiable #7. That module sorts
+        before dispatching rather than trusting this order, but producing a
+        non-deterministic one would make its sort the only thing standing between a replay
+        and a different path.
+
+    ARGUMENTS TRAVEL AS A PLAIN DICT because `PendingRequest` lives in `domain/`, which
+    imports nothing external (I4). `args_as_dict()` is the library's own normalisation of
+    a call whose arguments may have arrived as a JSON string.
+    """
+    pending: list[PendingRequest] = []
+    for call, approval in (
+        *((call, True) for call in requests.approvals),
+        *((call, False) for call in requests.calls),
+    ):
+        kind = _pending_kind_for(call.tool_name, approval=approval)
+        metadata = requests.metadata.get(call.tool_call_id, {})
+        pending.append(
+            PendingRequest(
+                kind=kind,
+                tool_call_id=ToolCallId(call.tool_call_id),
+                tool_name=call.tool_name,
+                arguments=dict(call.args_as_dict()),
+                reason=_pending_reason(kind, call, metadata),
+            )
+        )
+    return tuple(pending)
+
+
 def _refuse_if_compaction_broke_pairing(
     before: Sequence[ModelMessage], after: Sequence[ModelMessage]
 ) -> None:
@@ -1052,6 +1259,32 @@ def _domain_usage(usage: RunUsage) -> Usage:
     )
 
 
+# What one run may hand back: the model's text, or the deferred calls it stopped on.
+#
+# WHY `DeferredToolRequests` IS AN OUTPUT TYPE AND NOT A `HandleDeferredToolCalls`
+# CAPABILITY - t-f11-41, and the whole of docs/DECISIONS.md#d9
+#     Pydantic AI's own error names both routes, and only one of them is compatible with
+#     this system. `HandleDeferredToolCalls` resolves a deferred call INSIDE the run: the
+#     handler is awaited, its answer becomes the tool result, and `agent.run` returns once,
+#     finished. That is a blocking call wearing a suspension's clothes.
+#
+#     D9 makes these tools externally executed on purpose. The turn SUSPENDS; the answer
+#     arrives later from a human, from another agent or from an upload; `ResumeTurn` feeds
+#     it back under the provider's `tool_call_id`. F3's acceptance criterion is that an
+#     approval SURVIVES A REDEPLOY and resumes twenty-four hours later - which is only
+#     expressible if the process that asked is allowed to end. An inline handler would have
+#     to hold a coroutine open across that day, inside a DBOS step, holding a model
+#     connection, and there is no handler that can wait for a person at all.
+#
+#     The output type is therefore the only route: the run RETURNS the pending calls, the
+#     workflow durably waits, and a later `resume` continues from the frozen history.
+#
+# ADDING IT COSTS THE TEXT PATH NOTHING. `_output.py` strips `DeferredToolRequests` out of
+# the output list before it builds a schema, so no output tool is registered, the mode
+# stays plain text and a turn that defers nothing is byte-for-byte the turn it was.
+RunOutput = str | DeferredToolRequests
+
+
 class PydanticAgentRunner:
     """`AgentRunner` over Pydantic AI. The F1 half is implemented; later phases are named.
 
@@ -1087,11 +1320,25 @@ class PydanticAgentRunner:
         root binds to its own pool. This adapter never opens a transaction of its own, so
         there is none for an audit row to be trapped inside.
 
+    SUSPENSION IS NO LONGER LEFT FOR LATER (t-f11-41)
+        `output_type` is `[str, DeferredToolRequests]`, so a deferred call comes back as
+        the run's OUTPUT and `_pending_requests` turns it into the domain's `pending`.
+        Both `run` and `resume` are therefore two-shaped, exactly as
+        `ports/agent_runner.py` describes, and a resume that suspends again is an ordinary
+        outcome rather than a third shape.
+
+        It was left for later once too often: `ask_peer` and `request_evidence` had both
+        shipped, both were reachable, and the first one a model actually called raised
+        `UserError` and lost the turn. See `RunOutput` above for why the inline-handler
+        route Pydantic AI also offers would have broken D9 instead.
+
+        AND A POLICY VERDICT NOW REACHES THE SAME PATH (t-f11-45). A NEEDS_APPROVAL rule
+        makes `PolicyEnforcement` raise `ApprovalRequired` from `before_tool_execute`, so
+        an approval suspends exactly the way a peer ask does and resumes through exactly
+        the same `resume`. That was `t-f3-02`'s open decision, and it stayed open only
+        because a run had no way to END with an unanswered call. It has one now.
+
     LEFT FOR LATER PHASES, DELIBERATELY
-        - SUSPENSION / `HumanGateway` (F3): `output_type` is plain text, so no
-          `DeferredToolRequests` can come back and `pending` is always empty. Until then a
-          NEEDS_APPROVAL verdict blocks in `before_tool_execute` - the wrong answer in the
-          safe direction. `resume` raises rather than pretending. docs/TASKS.md#t-f3-02.
         - MEDIA, PEERS and the rest below. COMPACTION (F5) is no longer among them: the
           `ContextEngine` attaches as a `ProcessHistory` capability in
           `_history_capability`, alongside the enforcement capability. The engine owns
@@ -1144,7 +1391,7 @@ class PydanticAgentRunner:
         self._token_estimator = token_estimator
         self._model_factory = model_factory
         self._clock = clock
-        self._agents: dict[tuple[str, str, str], Agent[Any, str]] = {}
+        self._agents: dict[tuple[str, str, str], Agent[Any, RunOutput]] = {}
 
     def usage_limits_for(self, profile: AgentProfile) -> UsageLimits:
         """The profile's ceilings, as Pydantic AI enforces them.
@@ -1227,21 +1474,10 @@ class PydanticAgentRunner:
                 ),
             )
 
-        # F1 has no deferred tools, so the run can only have FINISHED - see LEFT FOR LATER
-        # PHASES above. The two-shaped translation arrives with F3, not a third shape here.
-        #
         # `messages` is the agent's half of the conversation and this is the only thing in
         # production that produces it (t-f11-29). The store writes it in `append_outcome`;
         # see `_messages_the_turn_added` for the one message that is NOT in it.
-        return TurnOutcome(
-            turn_id=turn_id,
-            messages=_messages_the_turn_added(result.new_messages()),
-            result=TurnResult(
-                text=str(result.output),
-                usage=_domain_usage(result.usage),
-                finished_at=self._clock(),
-            ),
-        )
+        return self._outcome(turn_id, result)
 
     async def resume(
         self,
@@ -1377,11 +1613,53 @@ class PydanticAgentRunner:
         # drop because a resume supplies none. `ResumeTurn` awaits the same
         # `append_outcome`, so the answer a human waited three days for is persisted by the
         # turn that consumed it rather than only by the one that asked.
+        #
+        # And the SAME two-shaped translation `run` uses, because a resumed turn may
+        # suspend AGAIN - an approval that unlocks a tool whose result asks for evidence.
+        # `ports/agent_runner.py` calls that an ordinary outcome the workflow loop handles.
+        return self._outcome(turn_id, result)
+
+    def _outcome(self, turn_id: TurnId, result: AgentRunResult[RunOutput]) -> TurnOutcome:
+        """One finished `agent.run`, as the domain's two-shaped `TurnOutcome` - t-f11-41.
+
+        SUSPENDED or FINISHED is read off the OUTPUT TYPE, which is the library's own
+        answer rather than an inference. A run that stopped on deferred calls outputs a
+        `DeferredToolRequests`; anything else is text the model wrote. Guessing from an
+        empty output, or from the last message's shape, would be a second opinion about a
+        fact Pydantic AI already states.
+
+        `messages` IS CARRIED ON BOTH SHAPES, AND THE SUSPENDED ONE NEEDS IT MOST
+            The unanswered `ToolCallPart` lives in those messages, and `resume` finds the
+            ids it may answer by reading the LAST `ModelResponse` back out of the stored
+            history (`_pending_tool_calls`). A suspended outcome that returned no messages
+            would leave `ConversationStore.append_outcome` nothing to write, and the human's
+            answer three days later would be refused by `UnknownToolCallIdError` against an
+            empty pending set - a turn that can never be resumed, failing at the far end of
+            a three-day wait.
+
+            This is also the unpaired history CLAUDE.md non-negotiable #5 explicitly
+            tolerates: a deferred call is SUPPOSED to sit there without a return until it is
+            answered, which is why `_refuse_if_compaction_broke_pairing` compares before
+            against after instead of judging a history on its own.
+
+        THE USAGE OF A SUSPENDED TURN IS NOT LOST HERE, IT HAS NOWHERE TO GO. `TurnOutcome`
+        carries `usage` inside `TurnResult`, and I2 forbids a result on a suspended outcome
+        - the turn has not finished, so it has no finished-at and no final text. The tokens
+        the first half spent are the audit sink's record, not the outcome's.
+        """
+        output = result.output
+        messages = _messages_the_turn_added(result.new_messages())
+        if isinstance(output, DeferredToolRequests):
+            return TurnOutcome(
+                turn_id=turn_id,
+                pending=_pending_requests(output),
+                messages=messages,
+            )
         return TurnOutcome(
             turn_id=turn_id,
-            messages=_messages_the_turn_added(result.new_messages()),
+            messages=messages,
             result=TurnResult(
-                text=str(result.output),
+                text=str(output),
                 usage=_domain_usage(result.usage),
                 finished_at=self._clock(),
             ),
@@ -1472,7 +1750,7 @@ class PydanticAgentRunner:
 
         return ProcessHistory[Any](process)
 
-    async def _agent_for(self, profile: AgentProfile) -> Agent[Any, str]:
+    async def _agent_for(self, profile: AgentProfile) -> Agent[Any, RunOutput]:
         """The cached agent for this profile, built on first use. See the class docstring."""
         key = (
             profile.id,
@@ -1486,12 +1764,18 @@ class PydanticAgentRunner:
         model = self._model_factory(
             self._model.model_id_for(profile.model), self._model.base_url()
         )
-        agent: Agent[Any, str] = Agent(
+        agent: Agent[Any, RunOutput] = Agent(
             model,
             # The persona only. The assembled system prompt - persona plus the skill INDEX -
             # is F6, step 4 of application/start_turn.py. `instructions` rather than
             # `system_prompt` so it is not replayed as part of the stored history.
             instructions=profile.persona,
+            # BOTH shapes, for every profile, whether or not it has a deferred tool today.
+            # Deciding this from the toolset would make the suspension path depend on
+            # composition order and on whoever remembered to look - and the failure of
+            # getting it wrong is a lost turn at the provider, not a test (t-f11-41). See
+            # `RunOutput` for why this and not `HandleDeferredToolCalls`.
+            output_type=[str, DeferredToolRequests],
             toolsets=await self._toolsets_for(profile),
         )
         self._agents[key] = agent

@@ -625,14 +625,40 @@ def test_a_real_model_calls_a_mutating_tool_and_the_engine_refuses_it(
         "The criterion is an operator seeing a tool REFUSED, and nothing was attempted:\n"
         f"{turn}"
     )
+    # THE THREE FACTS STILL TRAVEL TOGETHER; THE THIRD ONE CHANGED SHAPE ON PURPOSE.
+    # This asserted `- NOT EXECUTED`, which was true while `PolicyEnforcement` refused a
+    # NEEDS_APPROVAL verdict synchronously. `t-f11-45` made it raise `ApprovalRequired`
+    # instead, so the call now SUSPENDS through the same deferred path a peer ask does -
+    # which is the only way F3's criterion is reachable at all: a turn waits for approval,
+    # the service is redeployed, and approving 24h later resumes it. A blocking hook
+    # cannot survive that, and no hook can wait for a person.
+    #
+    # So the property to pin is not the word. It is that the tool DID NOT RUN, and that
+    # which tool and which rule are both still on the line. `DEFERRED` and `NOT EXECUTED`
+    # are the two ways a call can fail to execute; asserting either alone would let the
+    # other become an unnoticed regression.
     assert re.search(
         r"tool pricing_apply -> needs_approval \[delivery-pricing-apply-needs-a-human\]"
-        r" - NOT EXECUTED",
+        r" - (?:NOT EXECUTED|DEFERRED)",
         turn,
     ), (
-        "a `pricing_apply` call did not land in the trail as refused by the rule that "
+        "a `pricing_apply` call did not land in the trail as withheld by the rule that "
         "governs it. The three facts have to travel together - which tool, which rule, "
         f"and whether it ran - or a refusal becomes folklore (t-f11-11):\n{turn}"
+    )
+    # SCOPED TO THIS TOOL'S OWN LINE, and the first version of this assertion was not.
+    # It scanned the whole turn for " - executed", which is true of every ALLOWED tool the
+    # model calls - `orders_lookup` among them - so it passed when the model went straight
+    # to `pricing_apply` and failed when it looked the order up first. A real model's
+    # choice of which tools to call is not deterministic, and an assertion that depends on
+    # it is the flakiness this file exists to refuse: a gate that fails one run in several
+    # is a gate people learn to re-run rather than read.
+    withheld = next(
+        line for line in turn.splitlines() if "tool pricing_apply ->" in line
+    )
+    assert " - executed" not in withheld.lower().replace("not executed", ""), (
+        "the tool the policy withheld appears to have RUN. That is the one outcome "
+        f"neither NOT EXECUTED nor DEFERRED may quietly become:\n{withheld}"
     )
     assert "Applying a price change moves real money" in turn, (
         "the refusal was rendered without the sentence the rule gave. That sentence is "

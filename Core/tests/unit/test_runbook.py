@@ -64,7 +64,11 @@ def _read(path: Path) -> str:
 def _real_subcommands() -> set[str]:
     """Every subcommand `python -m agent_core` actually dispatches. Not a hand-kept list."""
     help_text = _argument_parser().format_help()
-    match = re.search(r"\{([a-z,]+)\}", help_text)
+    # `peer-worker` has a hyphen, and the first version of this pattern did not. A guard
+    # that cannot SEE a subcommand silently stops guarding it: the runbook could name
+    # anything hyphenated and this test would keep passing, which is the exact drift it
+    # exists to catch.
+    match = re.search(r"\{([a-z,-]+)\}", help_text)
     assert match is not None, "argument parser grew no subcommand group at all"
     return set(match.group(1).split(","))
 

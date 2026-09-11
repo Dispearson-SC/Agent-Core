@@ -46,6 +46,22 @@ NON-NEGOTIABLE #10, SHARPENED BY THE WIRE
     for exporting it: two implementations of one boundary is how a boundary stops being
     one, and that is doubly true across a process boundary this adapter did not write.
 
+WHO ASKED TRAVELS AS METADATA, BECAUSE THERE IS NO ROW TO READ IT OFF (t-f11-48)
+    `PgAgentMailbox` persists the asking agent's id in a column and hands it back on the
+    claimed `PeerAsk`. Over the wire there is no claimed row at all, so the identity
+    travels in the same place `hop` does: the A2A message metadata, as `from_agent_id`.
+    That is what lets a compliant peer - or a future receiving-side adapter for this same
+    protocol - re-run `callee_policy.may_ask(caller)` instead of accepting a question
+    because the far end said it was allowed.
+
+    One adapter carrying the caller identity and the other dropping it would make the
+    check depend on which transport a deployment chose, which is the port cut leaking
+    (docs/WAVES.md rule 4). As with `hop`, this adapter CARRIES and does not enforce.
+
+    A receiving side must trust this metadata exactly as far as it trusts the socket it
+    arrived on - `hop_limit.py` says the same about the hop count, and whoever terminates
+    the wire owns authenticating both.
+
 WHAT `hop`, `turn_id` AND `from_session` DO HERE
     `PgAgentMailbox` persists them because a claimed row must find its way back to the
     asking turn later, on a completely separate connection. A2A's task lives inside one
@@ -59,6 +75,7 @@ WHAT `hop`, `turn_id` AND `from_session` DO HERE
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any, Final
 
@@ -69,6 +86,8 @@ from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy
 from agent_core.domain.turn import SessionRef, TurnId
 
 _AGENT_CARD_PATH: Final[str] = "/.well-known/agent-card.json"
+
+_LOG = logging.getLogger(__name__)
 
 
 class A2AAgentMailbox:
@@ -122,6 +141,7 @@ class A2AAgentMailbox:
         from_session: SessionRef,
         turn_id: TurnId,
         hop: int,
+        asker: AgentId | None = None,
     ) -> str:
         """Send one A2A `message/send` request and return the task id as correlation id.
 
@@ -129,8 +149,31 @@ class A2AAgentMailbox:
         valid A2A shape for a fast peer) has its answer recorded immediately, so
         `read_answer` can return it with no further wire traffic. A task reported
         `submitted` records nothing yet; `answer()` is how a later delivery arrives.
+
+        `asker` is the asking agent's own id, sent as message metadata so the receiving
+        side can enforce its half of the allowlist - WHO ASKED TRAVELS AS METADATA, above.
+        It is an argument BEYOND `ports.agent_mailbox.AgentMailbox.ask` and therefore
+        defaulted, exactly as on `PgAgentMailbox.ask`: a caller typed on the port cannot
+        pass it yet. Omitting it sends no `from_agent_id` key at all rather than a null
+        one, and says so at WARNING - an absent claim is not the same message as a claim
+        of nobody, and a peer must be able to tell the two apart.
         """
         endpoint = _endpoint_for(policy, target)
+        if asker is None:
+            _LOG.warning(
+                "an A2A peer ask is being sent to %r with no asking agent id, so the "
+                "receiving side cannot re-run callee_policy.may_ask(caller) and accepts "
+                "the question on this side's word alone. docs/TASKS.md#t-f11-48",
+                target,
+            )
+        metadata: dict[str, Any] = {
+            "from_session_id": str(from_session.session_id),
+            "from_tenant_id": str(from_session.tenant_id),
+            "turn_id": str(turn_id),
+            "hop": hop,
+        }
+        if asker is not None:
+            metadata["from_agent_id"] = str(asker)
         payload = {
             "jsonrpc": "2.0",
             "id": str(uuid.uuid4()),
@@ -142,12 +185,7 @@ class A2AAgentMailbox:
                     # Not enforced here (see module docstring) - carried so a compliant
                     # peer, or a future receiving-side A2A adapter, can enforce its own
                     # side of the allowlist and the hop limit.
-                    "metadata": {
-                        "from_session_id": str(from_session.session_id),
-                        "from_tenant_id": str(from_session.tenant_id),
-                        "turn_id": str(turn_id),
-                        "hop": hop,
-                    },
+                    "metadata": metadata,
                 }
             },
         }

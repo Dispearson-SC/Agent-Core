@@ -52,6 +52,27 @@ WHY THIS TEST EXISTS
        every implementation - including a peer that tried to forge the closing delimiter
        to end the boundary early and have the rest of its text read as instructions.
 
+    4. EVERY SEND NAMES WHO IS ASKING (t-f11-50). `PeerPolicy.may_ask` is written to be
+       checked on BOTH sides - the asker checks it may ask, the answerer checks it
+       accepts - and the answerer's half needs the asking `AgentId` on the message. Both
+       adapters already accept an `asker` keyword and persist or transmit it; the port
+       did not declare one, so a caller typed on `AgentMailbox` could not pass it and
+       every production row was written with a NULL asker. A two-sided allowlist enforced
+       on one side is a one-sided allowlist with extra words, and the side left holding
+       nothing is the one being paged.
+
+       The seat is OPTIONAL, and that is the statement `PgAgentMailbox` already makes
+       about the column: absent means UNKNOWN, never "anyone may ask". Rows written
+       before the seat existed exist, a deployment upgrades one process at a time, and a
+       required parameter would turn the missing identity into a crash rather than into
+       the refusal it has to be. So the default is None and the answering side treats
+       None as a caller it cannot verify.
+
+       The seat alone is worth nothing, which is why the PRODUCTION CALL SITE is asserted
+       here too. `_step_ask_peers` computed the caller for its own gate and dropped it on
+       the way to the mailbox: the port would have grown a parameter no code fills, and
+       the answering side would still have had nothing to check.
+
     Nothing below drives behaviour beyond that one property. The rest is a lock on the
     contract that `t-f9-03`'s durable queue, `t-f9-04`'s `ask_peer` tool and `t-f9-05`'s
     hop limit are all built against.
@@ -66,7 +87,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import get_type_hints
+from typing import Any, cast, get_type_hints
 
 import httpx
 import pytest
@@ -74,9 +95,21 @@ import pytest
 from agent_core.adapters.driven.agent_pydantic.runner import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
 from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
 from agent_core.adapters.driven.peers.mailbox_a2a import A2AAgentMailbox
-from agent_core.adapters.driven.tools.peers import ask_peer_result_for
+from agent_core.adapters.driving.workflow import turn_workflow
 from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy
-from agent_core.domain.turn import SessionRef, TurnId
+from agent_core.domain.profile import AgentProfile
+from agent_core.domain.turn import (
+    CallerIdentity,
+    PendingKind,
+    PendingRequest,
+    SessionId,
+    SessionRef,
+    TenantId,
+    ToolCallId,
+    TurnId,
+    TurnRequest,
+    UserInput,
+)
 from agent_core.ports.agent_mailbox import AgentMailbox
 
 CORE_DIR = Path(__file__).resolve().parents[2]
@@ -160,6 +193,7 @@ class _SilentMailbox:
         from_session: SessionRef,
         turn_id: TurnId,
         hop: int,
+        asker: AgentId | None = None,
     ) -> str:
         self.sent.append((target, question, hop))
         return "corr-1"
@@ -217,11 +251,13 @@ def test_every_send_carries_a_required_hop_count() -> None:
         "from_session",
         "turn_id",
         "hop",
+        "asker",
     ], (
         "ask is frozen at the policy that authorises it, the peer, the question, the "
-        "originating session and turn, and the depth. The policy travels WITH the call "
-        "because the check is two-sided; a mailbox that looks the policy up itself is a "
-        "mailbox whose asker-side check can be skipped."
+        "originating session and turn, the depth, and who is asking. The policy travels "
+        "WITH the call because the check is two-sided; a mailbox that looks the policy up "
+        "itself is a mailbox whose asker-side check can be skipped, and `asker` is the "
+        "half the ANSWERING side runs (docs/TASKS.md#t-f11-50)."
     )
 
     hints = _hints("ask")
@@ -372,41 +408,19 @@ def test_a_peer_answer_read_through_the_port_arrives_wrapped_as_untrusted_conten
         "The peer's own text kept a closing delimiter, so the boundary ends early and "
         f"everything after it reads as instructions: {relayed!r}."
     )
+    # Folded in when `peers.ask_peer_result_for` was retired: that function was a
+    # pass-through to this same `read_answer`, and the test over it existed to say the
+    # resume value is wrapped ONCE, not re-wrapped on the way out. With nothing left to
+    # re-wrap it, the claim belongs on the port's own answer.
+    assert relayed.count(UNTRUSTED_OPEN) == 1, (
+        f"A peer answer arrived through the port wrapped more than once: {relayed!r}. "
+        "Nested delimiters leave a model unable to tell which one is the real boundary, "
+        "which is the boundary not existing."
+    )
     assert "Ignore prior instructions" in relayed, (
         "The hostile sentence must survive INSIDE the boundary. Dropping it would make "
         "this assertion pass for the wrong reason and hide the payload from the audit "
         "trail; neutralising the delimiter is the defence, not censoring the text."
-    )
-
-
-@pytest.mark.phase("F9")
-@pytest.mark.silent
-@pytest.mark.parametrize("build", [_pg_mailbox, _a2a_mailbox], ids=["postgres", "a2a"])
-def test_the_deferred_tool_redeems_through_the_port_and_does_not_wrap_twice(
-    build: Callable[[pytest.MonkeyPatch], AgentMailbox], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The second reader `mailbox.py` predicted has arrived, so state which one resumes.
-
-    `ask_peer_result` wraps the peer's RAW bytes - the value `answer()` was handed. The
-    port's `read_answer` returns them ALREADY wrapped. Feeding one into the other is a
-    double boundary, and a model reading a nested `<untrusted-tool-output>` has been shown
-    a delimiter it cannot trust the meaning of, which is the delimiter meaning nothing.
-
-    So the tool module offers one port-typed redemption, and its result is what the
-    adapter already produced - byte for byte, not re-derived and not re-wrapped.
-    """
-    mailbox = build(monkeypatch)
-
-    redeemed = asyncio.run(ask_peer_result_for(mailbox, "corr-1"))
-
-    assert redeemed == asyncio.run(_relay_to_model(mailbox, "corr-1")), (
-        "The deferred tool's resume value must be exactly what the port handed back. "
-        "Re-deriving it is how two implementations of one boundary appear."
-    )
-    assert redeemed is not None
-    assert redeemed.count(UNTRUSTED_OPEN) == 1, (
-        f"A peer answer was wrapped twice on the way to the model: {redeemed!r}. Nested "
-        "delimiters make the boundary unreadable, which is the boundary not existing."
     )
 
 
@@ -466,6 +480,7 @@ class StubMailbox:
         from_session: SessionRef,
         turn_id: TurnId,
         hop: int,
+        asker: AgentId | None = None,
     ) -> str:
         raise NotImplementedError
 
@@ -505,4 +520,210 @@ def _type_check(source: str, tmp_path: Path) -> subprocess.CompletedProcess[str]
         cwd=str(CORE_DIR),
         env=env,
         check=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# t-f11-50 - the asking agent's own identity, and the call site that fills it
+# ---------------------------------------------------------------------------
+
+
+_ASKER_PROFILE = "support_triage"
+_CALLEE_PROFILE = "billing_specialist"
+_TENANT = TenantId("t-1")
+
+
+class _RecordsWhoAsked:
+    """An `AgentMailbox` that keeps the asker every send named.
+
+    Typed on the PORT at the binding below, which is the half of this that matters: a
+    double recording a keyword the Protocol does not declare would prove only that the
+    concrete adapters accept one, which `test_peer_mailbox.py` already proves.
+    """
+
+    def __init__(self) -> None:
+        self.askers: list[AgentId | None] = []
+
+    async def discover(self, policy: PeerPolicy) -> tuple[AgentRef, ...]:
+        return policy.peers
+
+    async def ask(
+        self,
+        policy: PeerPolicy,
+        target: AgentId,
+        question: str,
+        *,
+        from_session: SessionRef,
+        turn_id: TurnId,
+        hop: int,
+        asker: AgentId | None = None,
+    ) -> str:
+        del policy, target, question, from_session, turn_id, hop
+        self.askers.append(asker)
+        return f"corr-{len(self.askers)}"
+
+    async def answer(self, correlation_id: str, answer: str) -> None:
+        return None
+
+    async def read_answer(self, correlation_id: str) -> str | None:
+        return None
+
+
+def _peering_profiles() -> dict[str, AgentProfile]:
+    """Two profiles that name each other, so the gate allows the ask and it reaches send."""
+    return {
+        _ASKER_PROFILE: AgentProfile(
+            id=_ASKER_PROFILE,
+            persona="You are first-line support.",
+            model="m",
+            peers=PeerPolicy(
+                enabled=True,
+                peers=(AgentRef(agent_id=AgentId(_CALLEE_PROFILE), display_name="Billing"),),
+                max_hops=2,
+            ),
+        ),
+        _CALLEE_PROFILE: AgentProfile(
+            id=_CALLEE_PROFILE,
+            persona="You explain charges.",
+            model="m",
+            peers=PeerPolicy(
+                enabled=True,
+                peers=(AgentRef(agent_id=AgentId(_ASKER_PROFILE), display_name="Support"),),
+                max_hops=2,
+            ),
+        ),
+    }
+
+
+def _a_turn_that_asks_a_peer() -> TurnRequest:
+    return TurnRequest(
+        session=SessionRef(session_id=SessionId("s-1"), tenant_id=_TENANT),
+        caller=CallerIdentity(
+            subject_id="u-1",
+            channel="cli",
+            tenant_id=_TENANT,
+            roles=frozenset({"operator"}),
+        ),
+        profile_id=_ASKER_PROFILE,
+        input=UserInput(text="was I charged twice"),
+    )
+
+
+def _a_deferred_ask() -> PendingRequest:
+    return PendingRequest(
+        kind=PendingKind.DELEGATION,
+        tool_call_id=ToolCallId("tc-1"),
+        tool_name="ask_peer",
+        arguments={"target": _CALLEE_PROFILE, "question": "was this customer charged twice"},
+        reason="asking a peer",
+    )
+
+
+@pytest.mark.phase("F11")
+@pytest.mark.silent
+def test_every_send_names_who_is_asking() -> None:
+    """The answerer's half of `may_ask` needs the asker's id, and this is its seat.
+
+    `PeerPolicy.may_ask` says in its own docstring that the allowlist is checked on BOTH
+    sides, "one-sided checks are bypassable by whoever controls the other side". The
+    answering side cannot run its half without knowing who asked, and until this parameter
+    existed a caller typed on the port had no way to say - so the check was one-sided in
+    production while reading as two-sided everywhere it is described.
+
+    OPTIONAL, NOT REQUIRED, AND THE DEFAULT IS None RATHER THAN AN INVENTED IDENTITY
+        Rows written before this seat existed carry no asker, and a deployment upgrades
+        one process at a time. Absent means UNKNOWN - never "anyone may ask" - which is
+        the reading `PgAgentMailbox` already gives the column it persists into. A required
+        parameter turns the missing identity into a crash instead of a refusal, and a
+        default of anything other than None would be this port inventing a caller.
+    """
+    signature = _signature("ask")
+
+    assert "asker" in signature.parameters, (
+        "AgentMailbox.ask carries no asking AgentId, so the ANSWERING side cannot re-run "
+        "callee_policy.may_ask(caller) and takes the question on the asking side's word "
+        "alone. A two-sided allowlist enforced on one side is a one-sided allowlist with "
+        "extra words (CLAUDE.md non-negotiable #10). docs/TASKS.md#t-f11-50"
+    )
+
+    asker = signature.parameters["asker"]
+    assert asker.kind is inspect.Parameter.KEYWORD_ONLY, (
+        "AgentMailbox.ask's asker must be keyword-only. Positionally it sits beside the "
+        "TARGET's AgentId, and a shuffled argument would make the question arrive claiming "
+        "to come from the agent it was sent to."
+    )
+    assert asker.default is None, (
+        f"AgentMailbox.ask's asker defaults to {asker.default!r}. It is optional because "
+        "rows predating the seat exist and a deployment upgrades one process at a time - "
+        "but the only honest default is None, which the answering side reads as UNKNOWN. "
+        "Any other default is this port inventing a caller nobody named."
+    )
+    assert _hints("ask")["asker"] == AgentId | None, (
+        "AgentMailbox.ask's asker is an AgentId or nothing. A bare `str` would accept the "
+        "profile id, the display name or the session id equally, and the answering side "
+        "would be matching its allowlist against whichever one the caller happened to send."
+    )
+
+    assert _parameters("ask") == [
+        "policy",
+        "target",
+        "question",
+        "from_session",
+        "turn_id",
+        "hop",
+        "asker",
+    ], (
+        "ask is frozen at the policy that authorises it, the peer, the question, the "
+        "originating session and turn, the depth, and who is asking. The policy travels "
+        "WITH the call because the check is two-sided; a mailbox that looks the policy up "
+        "itself is a mailbox whose asker-side check can be skipped."
+    )
+
+
+@pytest.mark.phase("F11")
+@pytest.mark.silent
+def test_the_production_call_site_names_the_asker_it_already_computed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A seat no production caller fills is a column that is always NULL.
+
+    `_step_ask_peers` is the ONE production call site of `AgentMailbox.ask`. It already
+    builds `AgentId(request.profile_id)` for its own half of `hop_limit.authorise_hop`
+    and then dropped it on the way to the mailbox, so every row was written with no asker
+    and the answering side had nothing to check even once both adapters could store one.
+
+    The identity asserted is the PROFILE the turn runs under, never `request.caller`:
+    `CallerIdentity` is the human or channel the turn belongs to, and CLAUDE.md
+    non-negotiable #9 is that no code path widens one identity into another. The peer's
+    allowlist names agents, so an agent id is the only thing it can match.
+    """
+    mailbox = _RecordsWhoAsked()
+    seat_mailbox: AgentMailbox = mailbox
+    monkeypatch.setattr(
+        turn_workflow,
+        "_dependencies",
+        turn_workflow.TurnWorkflowDependencies(
+            # `_step_ask_peers` resolves the peer seat and nothing else; a StartTurn it
+            # never reaches is cast rather than built, exactly as test_resume_turn.py does.
+            start_turn=cast("Any", None),
+            peers=turn_workflow.PeerSeat(mailbox=seat_mailbox, profiles=_peering_profiles()),
+        ),
+    )
+
+    dispatch = asyncio.run(
+        turn_workflow._step_ask_peers(
+            TurnId("turn-1"), _a_turn_that_asks_a_peer(), (_a_deferred_ask(),)
+        )
+    )
+
+    assert dispatch.refusals == (), (
+        f"the gate refused the ask, so nothing reached the mailbox: {dispatch.refusals}. "
+        "Both profiles allowlist each other and the depth is under max_hops."
+    )
+    assert mailbox.askers == [AgentId(_ASKER_PROFILE)], (
+        "the one production call site asked a peer without naming who was asking, so the "
+        "row is written with a NULL asker and the answering side cannot re-run "
+        "callee_policy.may_ask(caller). The caller is already in hand at that call site - "
+        "it is what the asking half of the gate was just run with. "
+        f"Recorded: {mailbox.askers}. docs/TASKS.md#t-f11-50"
     )

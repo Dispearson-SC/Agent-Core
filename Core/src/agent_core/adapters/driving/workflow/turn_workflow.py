@@ -149,14 +149,17 @@ from uuid import uuid4
 
 from dbos import DBOS, Queue, SetEnqueueOptions, SetWorkflowID, WorkflowHandleAsync
 
+from agent_core.adapters.driven.peers.hop_limit import HopRefusal, authorise_hop
 from agent_core.adapters.driving.channels.registry import ChannelRegistry, OutboundMessage
 from agent_core.application.compact_context import CompactContext
 from agent_core.application.resume_turn import ResolvedTool, ResumeTurn
 from agent_core.application.start_turn import StartTurn
 from agent_core.domain.compaction import ContextState
 from agent_core.domain.media import MediaRef
+from agent_core.domain.peers import AgentId, PeerPolicy
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
+    PendingKind,
     PendingRequest,
     SessionRef,
     ToolCallId,
@@ -167,6 +170,7 @@ from agent_core.domain.turn import (
     Usage,
     UserInput,
 )
+from agent_core.ports.agent_mailbox import AgentMailbox
 from agent_core.ports.human_gateway import HumanGateway
 
 __all__ = [
@@ -180,6 +184,9 @@ __all__ = [
     "HumanAnswer",
     "HumanPayload",
     "NotInsideAWorkflowError",
+    "PeerAnswer",
+    "PeerDispatch",
+    "PeerSeat",
     "PendingInputs",
     "TurnWorkflowDependencies",
     "TurnWorkflowNotWiredError",
@@ -194,6 +201,7 @@ __all__ = [
     "session_window_key",
     "signal_decision",
     "signal_evidence",
+    "signal_peer_answer",
     "turn_id_of_window",
     "turn_queue",
     "window_id_for_turn",
@@ -259,6 +267,29 @@ _TOO_MANY_ROUNDS: Final[str] = (
 )
 _NO_ANSWER: Final[str] = (
     "Abandoned: nobody answered the request this turn was waiting on before it expired."
+)
+
+# The two keys `ask_peer` puts on its own call. They are the MODEL's arguments, carried
+# into `PendingRequest.arguments` verbatim by the runner (`_pending_requests`), which is
+# what lets this module rebuild the ask instead of parsing the model's message back apart
+# - adapters/driven/tools/peers.py, WHAT TRAVELS IN THE METADATA.
+_ASK_TARGET: Final[str] = "target"
+_ASK_QUESTION: Final[str] = "question"
+
+# What the model is told when the gate refused, per reason. OUR text and not a peer's, so
+# it is deliberately NOT wrapped in the untrusted delimiters: nothing outside this process
+# wrote it, and wrapping trusted text teaches a model that the boundary means nothing.
+_REFUSED: Final[str] = (
+    "The peer ask was refused before it was sent, so {target!r} never received it and no "
+    "answer is coming. Reason: {reason}."
+)
+_UNKNOWN_PEER: Final[str] = (
+    "The peer ask was refused before it was sent: no profile named {target!r} is loaded, "
+    "so the callee half of the two-sided allowlist cannot be checked. Nothing was sent."
+)
+_MALFORMED_ASK: Final[str] = (
+    "The peer ask was refused before it was sent: the call carried no usable target and "
+    "question, so there was nothing to ask and nobody to ask it of."
 )
 
 
@@ -380,6 +411,69 @@ class CompactionSeat:
     context_window: int
 
 
+@dataclass(frozen=True, slots=True)
+class PeerSeat:
+    """Everything the peer loop needs, bound as ONE value. docs/TASKS.md#t-f11-42.
+
+    Two fields, neither with a default, for the reason `CompactionSeat` above has three:
+    a mailbox without the profiles is a mailbox this workflow can ask through and cannot
+    GATE, and a gate that cannot see both sides is not the two-sided check
+    `adapters/driven/peers/hop_limit.py` exists to be.
+
+    WHY THE ASK IS MINTED HERE AND NOT IN THE TOOL OR IN THE RUNNER
+        `adapters/driven/tools/peers.py` names the choice and leaves it open: the
+        correlation id must be minted AND persisted together, by the same INSERT that
+        makes the ask idempotent per `(turn_id, target, question)`, so the call site is
+        "the runner or the workflow". It is the WORKFLOW, and the deciding reason is
+        replay:
+
+          - `AgentMailbox.ask` is a durable write and the id it returns is the only handle
+            the answer ever arrives with. Inside a `@DBOS.step()` that pair is recorded
+            once and replay reads the same id back; in the runner it would run again on
+            every recovery of the turn, and the mailbox's own idempotency would be the
+            only thing standing between one question and two paid-for peer turns.
+          - The gate needs BOTH profiles and the turn's hop count in one hand. The runner
+            holds one profile - the one it is running - and no turn-level hop at all.
+          - The wait is `DBOS.recv_async`, which exists only here. Asking in the runner
+            would put the mint one process boundary away from the only thing that can be
+            woken by its answer.
+
+    `mailbox` IS TYPED ON THE PORT, never on `PgAgentMailbox`, so docs/TASKS.md#t-d2-04's
+    A2A adapter stays an adapter swap: `A2AAgentMailbox` implements the same protocol over
+    HTTP and this seat cannot tell the difference.
+
+    `profiles` IS THE SAME MAPPING `StartTurn` HOLDS, for the reason `CompactionSeat` says
+    in full: two readers of one profile registry is how one of them comes to be looking at
+    a stale copy, and here the stale copy would be an allowlist.
+    """
+
+    mailbox: AgentMailbox
+    profiles: Mapping[str, AgentProfile]
+
+
+@dataclass(frozen=True, slots=True)
+class PeerDispatch:
+    """What one round of peer asks produced: the handles, and the asks that never left.
+
+    TWO LISTS AND NOT AN EXCEPTION, because a refusal is an ORDINARY outcome. The gate
+    saying no is a policy answer the model has to be told about so it can adapt - exactly
+    as a denied tool call is - and a workflow that raised would turn "this agent may not
+    ask that one" into a failed turn with no reply for the person waiting.
+
+    A REFUSED ASK MUST STILL RESOLVE ITS DEFERRED CALL. Nothing will ever answer it, so a
+    turn that entered the durable wait for it would sit there for `THREE_DAYS` and expire
+    reporting that nobody replied - to a question that was never asked.
+
+    `handles` is `(correlation_id, tool_call_id)` and NOT a dict, because a step's result
+    is pickled into the durable log and a tuple of pairs says what it is at the type level.
+    The direction matters: the correlation id is what comes back on the wire, and the
+    `tool_call_id` is what the turn has to resume under.
+    """
+
+    handles: tuple[tuple[str, ToolCallId], ...] = ()
+    refusals: tuple[tuple[ToolCallId, str], ...] = ()
+
+
 @dataclass(frozen=True)
 class TurnWorkflowDependencies:
     """What the steps resolve their work through.
@@ -437,6 +531,14 @@ class TurnWorkflowDependencies:
     # the one no-op default here and `human_gateway` above is not. The seat is atomic, so
     # "bound but missing its window" is not a state that exists.
     compaction: CompactionSeat | None = None
+
+    # t-f11-42. `None` rather than a no-op, and on the `human_gateway` side of that choice
+    # rather than the `compaction` side. A deployment with no peers never reaches
+    # `_step_ask_peers` at all - the filter hands it an empty tuple and it returns - so the
+    # raise below lands only on a turn that genuinely asked one, which is the moment the
+    # missing wiring is the reason the question went nowhere. A silent seat there would
+    # suspend the turn on an ask no mailbox ever received, and it would wait three days.
+    peers: PeerSeat | None = None
 
 
 _dependencies: TurnWorkflowDependencies | None = None
@@ -508,6 +610,34 @@ def _for_a_human(pending: tuple[PendingRequest, ...]) -> tuple[PendingRequest, .
     `_in_deterministic_order` established rather than establishing a second one.
     """
     return tuple(request for request in pending if _answerable_by_a_human(request))
+
+
+def _for_a_peer(pending: tuple[PendingRequest, ...]) -> tuple[PendingRequest, ...]:
+    """The subset of a suspension ANOTHER AGENT executes, order preserved.
+
+    The mirror of `_for_a_human` above and deliberately not its complement: it matches
+    `PendingKind.DELEGATION` by name rather than taking "everything a person cannot
+    answer". A fourth kind added tomorrow would fall into a complement silently and be
+    enqueued at some agent as a question; matching the kind leaves it in neither list,
+    which is a turn that visibly waits rather than one that quietly misroutes.
+
+    Deterministic by construction (CLAUDE.md non-negotiable #7): a pure predicate applied
+    in the order it was handed, so it preserves the order `_in_deterministic_order`
+    established rather than establishing a second one.
+    """
+    return tuple(
+        request for request in pending if request.kind is PendingKind.DELEGATION
+    )
+
+
+def _refused(target: str, reason: HopRefusal | None) -> str:
+    """The sentence the model reads as a refused ask's tool result.
+
+    The reason is rendered by NAME - `HopRefusal` is distinct per side on purpose, because
+    "the gate said no" is unactionable and the two allowlist refusals are fixed by editing
+    two different profiles owned by two different people.
+    """
+    return _REFUSED.format(target=target, reason=reason.value if reason else "refused")
 
 
 def _closed_without_an_answer(turn_id: TurnId, reason: str, at: datetime) -> TurnOutcome:
@@ -641,6 +771,292 @@ async def _step_publish(
     await gateway.publish(turn_id, request.session, pending)
 
 
+def _require_peer_seat() -> PeerSeat:
+    """The bound `PeerSeat`, or the loud failure. Resolved only when an ask is present.
+
+    Late, and that is the same choice `_step_publish` makes about `HumanGateway`: a
+    deployment whose agents never ask a peer is not misconfigured for having no mailbox,
+    so the failure lands on the first turn that genuinely asked one - which is exactly when
+    the message is worth reading.
+    """
+    seat = _require_dependencies().peers
+    if seat is None:
+        raise TurnWorkflowNotWiredError(
+            "the turn suspended on a peer ask and no PeerSeat is bound, so the question "
+            "would reach no mailbox and the turn would wait three days for an answer "
+            "nobody was asked for. composition.py's bind_turn_workflow must pass "
+            "peers=PeerSeat(mailbox=container.mailbox, profiles=container.profiles); "
+            "docs/TASKS.md#t-f11-42."
+        )
+    return seat
+
+
+def _asking_policy(seat: PeerSeat, profile_id: str) -> PeerPolicy:
+    """The asking agent's own `PeerPolicy`, read off the profile the turn runs under.
+
+    A MISS RAISES, for the reason `_step_compact` raises on the same miss: `StartTurn`
+    resolved this exact id to start the turn, so reaching here without it means two
+    profile registries have drifted apart. Falling back to a default `PeerPolicy` would be
+    worse than the raise looks - the default is disabled with nobody allowlisted, so every
+    ask would be refused and the audit trail would blame the operator's allowlist for a
+    wiring fault.
+    """
+    profile = seat.profiles.get(profile_id)
+    if profile is None:
+        raise TurnWorkflowNotWiredError(
+            f"the turn ran under profile {profile_id!r} and the peer seat has no profile "
+            "under that id, so there is no PeerPolicy to ask under. StartTurn resolved "
+            "this same id to start the turn: the two profile mappings have drifted, and "
+            "composition.py must hand both seats one registry. docs/TASKS.md#t-f11-42"
+        )
+    return profile.peers
+
+
+@DBOS.step()
+async def _step_ask_peers(
+    turn_id: TurnId, request: TurnRequest, pending: tuple[PendingRequest, ...]
+) -> PeerDispatch:
+    """Turn every deferred `ask_peer` call into an `AgentMailbox.ask()`. t-f11-42.
+
+    `pending` is ALREADY filtered by `_for_a_peer` and sorted by `_in_deterministic_order`
+    in the body, where the decision is replayable. This step asks; it does not choose whom.
+
+    A STEP, AND THAT IS THE WHOLE REASON THE CALL SITE IS HERE AND NOT IN THE RUNNER
+        `ask` mints the correlation id and persists it in one INSERT (mailbox.py, EXACTLY
+        ONCE), and the id is the only handle the answer ever arrives with. Inside a step
+        that pair is recorded once and a replay reads the same id back out of the operation
+        log, so a recovered turn waits on the handle it already gave out. In the workflow
+        BODY it would be re-minted on every replay - CLAUDE.md non-negotiable #2 - and the
+        mailbox's own idempotency would be the only thing between one question and two
+        peer turns, each of which is a full turn with model calls that somebody pays for.
+
+    THE GATE RUNS HERE, BEFORE THE ASK LEAVES, AND IT IS BOTH-SIDED
+        `mailbox.ask` says in its own docstring that it is NOT the gate, and
+        `adapters/driven/tools/peers.py` says the gate belongs at "the same call site that
+        eventually calls `AgentMailbox.ask()`" because it needs both profiles and the hop
+        count in one hand. This is that call site. Until it existed
+        `hop_limit.authorise_hop` was called by nothing in production, and an unenforced
+        two-sided allowlist is indistinguishable from an enforced one right up until
+        somebody's personal-assistant agent is paged by a stranger.
+
+    THE DEPTH COMES OFF THE REQUEST, AND THAT IS THE HALF THAT USED TO BE UNENFORCED
+        `request.hop` is 0 for a turn a human started and `PeerAsk.hop` for a turn a
+        worker started in order to ANSWER another agent (`domain/turn.py`,
+        `adapters/driving/peers/worker.py::peer_turn_request`). This call site used to
+        pass a constant zero because `TurnRequest` had no seat for it - so `max_hops`
+        was the one half of this gate that could never trip, and a cycle A -> B -> A
+        reset the count at every hop. Both `enabled` switches and both allowlists were
+        enforced throughout, because none of them depends on a number; this one does, and
+        a number invented here would look like enforcement without being one.
+        docs/TASKS.md#t-f11-47
+
+    SEQUENTIAL, NOT `asyncio.gather`, over an already-sorted tuple. CLAUDE.md
+    non-negotiable #7 permits concurrency only from a fixed order, and there is nothing to
+    win here: each `ask` is one INSERT, and the answers arrive on a durable topic hours
+    later whatever order the rows were written in. A `gather` would buy microseconds and
+    owe a determinism argument forever.
+
+    A REFUSAL IS RETURNED, NEVER RAISED - see `PeerDispatch`. The model is told, in the
+    deferred call's own result, so it can say something useful to the person instead of
+    the turn failing.
+    """
+    if not pending:
+        return PeerDispatch()
+
+    seat = _require_peer_seat()
+    caller = AgentId(request.profile_id)
+    caller_policy = _asking_policy(seat, request.profile_id)
+
+    handles: list[tuple[str, ToolCallId]] = []
+    refusals: list[tuple[ToolCallId, str]] = []
+
+    for ask in pending:
+        target = ask.arguments.get(_ASK_TARGET)
+        question = ask.arguments.get(_ASK_QUESTION)
+        if not isinstance(target, str) or not target or not isinstance(question, str):
+            # The model's own arguments, and a model can write anything. Refused rather
+            # than coerced: an empty question asked of "another agent" bills a peer turn
+            # for a question nobody can answer.
+            refusals.append((ask.tool_call_id, _MALFORMED_ASK))
+            continue
+
+        callee_profile = seat.profiles.get(target)
+        if callee_profile is None:
+            # Fail CLOSED on an unknown callee, and say which half is missing. The
+            # alternative - gate it against a default `PeerPolicy` - refuses with
+            # `callee_peers_disabled`, which sends whoever reads the audit row to edit a
+            # profile that does not exist.
+            refusals.append((ask.tool_call_id, _UNKNOWN_PEER.format(target=target)))
+            continue
+
+        decision = authorise_hop(
+            caller=caller,
+            caller_policy=caller_policy,
+            callee=AgentId(target),
+            callee_policy=callee_profile.peers,
+            hop=request.hop,
+        )
+        if not decision.allowed:
+            refusals.append((ask.tool_call_id, _refused(target, decision.reason)))
+            continue
+
+        next_hop = decision.next_hop
+        if next_hop is None:  # pragma: no cover - an allowed HopDecision always carries it
+            raise TurnWorkflowNotWiredError(
+                "the peer gate allowed a hop and handed back no count for it to travel "
+                "with. The count has to travel or A -> B -> A cannot be caught at all; "
+                "see THE COUNT HAS TO TRAVEL in adapters/driven/peers/hop_limit.py."
+            )
+
+        correlation_id = await seat.mailbox.ask(
+            caller_policy,
+            AgentId(target),
+            question,
+            from_session=request.session,
+            turn_id=turn_id,
+            hop=next_hop,
+            # The same identity the asking half of the gate was just run with, sent so
+            # the ANSWERING side can re-run `callee_policy.may_ask(caller)` on arrival
+            # instead of accepting the question on this side's word (t-f11-50). It was
+            # already in hand here and dropped, so every row was written with a NULL
+            # asker while both adapters were ready to carry one.
+            #
+            # `caller` is the PROFILE the turn runs under, never `request.caller`: a peer
+            # allowlist names agents, and CLAUDE.md non-negotiable #9 forbids widening one
+            # identity into another on any code path.
+            asker=caller,
+        )
+        handles.append((correlation_id, ask.tool_call_id))
+
+    return PeerDispatch(handles=tuple(handles), refusals=tuple(refusals))
+
+
+def _require_resume_turn() -> ResumeTurn:
+    """The bound `ResumeTurn`, or the loud failure. Shared by every resuming step.
+
+    One raise rather than one per step: `_step_resume` and `_step_answer_peer` are
+    answering the same question - "an answer arrived and there is nothing to apply it
+    with" - and two spellings of it would mean two things to recognise in an incident.
+    """
+    resume = _require_dependencies().resume_turn
+    if resume is None:
+        raise TurnWorkflowNotWiredError(
+            "an answer arrived and no ResumeTurn is bound, so the decision would be "
+            "dropped and the turn would expire as though nobody had replied. "
+            "composition.py's bind_turn_workflow must pass resume_turn=container.resume_turn."
+        )
+    return resume
+
+
+async def _answer_the_deferred_calls(
+    turn_id: TurnId, request: TurnRequest, answered: tuple[tuple[ToolCallId, str], ...]
+) -> TurnOutcome:
+    """Feed externally-executed results back in. NOT a step - called from inside one.
+
+    `approved=True` WITH A PAYLOAD, which is the externally-executed shape rather than a
+    decision anybody made: the peer already ran the work and its reply IS the tool's
+    result, so the call must not be executed locally as well
+    (`adapters/driven/agent_pydantic/runner.py::_deferred_results`, the three shapes).
+    `approved=False` would arrive as a `ToolDenied` and re-run nothing, which reads to the
+    model as "your ask was rejected" even when a peer answered it in full.
+
+    A REFUSAL TAKES THE SAME SHAPE, and that is not a fudge: a refused ask WAS executed
+    externally, by the gate, and its result is the sentence saying so. Routing it through
+    the denial branch instead would tell the model the tool was blocked pending approval,
+    which is a different fact and a different thing for it to try next.
+
+    The identity is `request.caller` - the identity the TURN belongs to - for the reason
+    `_step_resume` spells out in full: CLAUDE.md non-negotiable #9, no code path widens one
+    identity into another, and a peer is not an identity this system acts as at all.
+    """
+    return await _require_resume_turn().execute(
+        turn_id,
+        request.session,
+        request.profile_id,
+        tuple(
+            ResolvedTool(tool_call_id=tool_call_id, approved=True, payload=payload)
+            for tool_call_id, payload in answered
+        ),
+        caller=request.caller,
+    )
+
+
+@DBOS.step()
+async def _step_refuse_peers(
+    turn_id: TurnId, request: TurnRequest, refusals: tuple[tuple[ToolCallId, str], ...]
+) -> TurnOutcome:
+    """Resolve the asks the gate stopped, so the turn does not wait on a question nobody was
+    asked. t-f11-42.
+
+    NOT WRAPPED IN THE UNTRUSTED DELIMITERS, deliberately. CLAUDE.md non-negotiable #10 is
+    about what a PEER wrote; these sentences were written in this file and never left the
+    process, and wrapping trusted text is how a boundary stops meaning anything.
+    """
+    return await _answer_the_deferred_calls(turn_id, request, refusals)
+
+
+@DBOS.step()
+async def _step_answer_peer(
+    turn_id: TurnId,
+    request: TurnRequest,
+    answer: PeerAnswer,
+    tool_call_id: ToolCallId | None,
+) -> TurnOutcome:
+    """Redeem a peer's handle and resume the turn with what it said. t-f11-44.
+
+    THE ANSWER IS ALREADY WRAPPED AND IS NOT WRAPPED AGAIN
+        `AgentMailbox.read_answer` returns the peer's bytes inside the same delimiters an
+        `mcp_*` result gets - the PORT requires it, so no caller typed on the port can be
+        handed raw peer bytes. The mistake available here is wrapping it a second time:
+        a model shown a nested `<untrusted-tool-output>` cannot tell which delimiter is
+        the real one, and non-negotiable #10's protection comes from exactly one boundary
+        being exactly one boundary.
+
+        There is deliberately no "is it already wrapped?" sniff, because a hostile peer
+        controls its own bytes and would pass the sniff on purpose. That is also why the
+        two re-wrapping helpers this paragraph used to name were DELETED rather than
+        documented: while a second way to wrap exists, the only defence is remembering not
+        to use it, and a delimiter count cannot catch the error because the outer wrap
+        neutralises the inner one. Only an equality against `wrap_peer_answer` can, which
+        is what `test_runner_deferred.py` asserts.
+
+    THE `tool_call_id` IS THE BODY'S, NOT THE WIRE'S, AND THAT IS THE POINT
+        `PeerAnswer` carries only the correlation id, and the body looks the provider's
+        `tool_call_id` up in the handles `_step_ask_peers` recorded. So the id never leaves
+        this workflow: it is not serialised through a queue, not re-read from a row, not
+        re-cased by anything. CLAUDE.md non-negotiable #5 says a mismatch is dropped
+        without an exception and surfaces as a provider 400 much later; the cheapest way to
+        round-trip a string verbatim is never to round-trip it at all.
+
+    THREE WAYS THIS REFUSES RATHER THAN GUESSING, and each is a turn resumed on something
+    nobody sent: an answer addressed to another turn, a handle this turn never asked
+    under, and a wake with no answer recorded behind it. A plausible outcome invented here
+    would resume the conversation with content nobody gave it.
+    """
+    if answer.turn_id != turn_id:
+        raise UnusableResumeAnswerError(
+            f"a peer answer for turn {answer.turn_id!r} was delivered to turn {turn_id!r}. "
+            "Applying it would resume this turn on an answer given to another one."
+        )
+    if tool_call_id is None:
+        raise UnusableResumeAnswerError(
+            f"the durable wait woke on peer handle {answer.correlation_id!r} and this turn "
+            "never asked under it. Resolving it would name a tool_call_id the model never "
+            "issued, which Pydantic AI drops in silence while the agent asks forever."
+        )
+
+    seat = _require_peer_seat()
+    wrapped = await seat.mailbox.read_answer(answer.correlation_id)
+    if wrapped is None:
+        raise UnusableResumeAnswerError(
+            f"the turn was woken for peer handle {answer.correlation_id!r} and the mailbox "
+            "holds no answer under it. The wake and the record disagree; resuming on an "
+            "empty result would hand the model an answer the peer never gave."
+        )
+
+    return await _answer_the_deferred_calls(turn_id, request, ((tool_call_id, wrapped),))
+
+
 @DBOS.step()
 async def _step_resume(turn_id: TurnId, request: TurnRequest, answer: object) -> TurnOutcome:
     """Feed the human's answer back into the suspended turn. docs/TASKS.md#t-f3-16.
@@ -684,9 +1100,11 @@ async def _step_resume(turn_id: TurnId, request: TurnRequest, answer: object) ->
     if not isinstance(answer, HumanAnswer):
         raise UnusableResumeAnswerError(
             f"the durable wait woke with a {type(answer).__name__} on {RESUME_TOPIC!r} and "
-            "only a HumanAnswer (docs/TASKS.md#t-f3-11) can be turned into a resolution. A "
-            "peer's reply arrives on this topic too (docs/TASKS.md#t-f9-04) and has no "
-            "reader yet; guessing at the payload resumes the turn on something nobody sent."
+            "only a HumanAnswer (docs/TASKS.md#t-f3-11) can be turned into a resolution "
+            "here. A peer's reply arrives on this topic too and is a `PeerAnswer`, which "
+            "the body routes to `_step_answer_peer` (docs/TASKS.md#t-f11-44) before this "
+            "step is reached; guessing at anything else resumes the turn on something "
+            "nobody sent."
         )
     if answer.turn_id != turn_id:
         raise UnusableResumeAnswerError(
@@ -694,15 +1112,7 @@ async def _step_resume(turn_id: TurnId, request: TurnRequest, answer: object) ->
             "Applying it would resume this turn on a decision given about another one."
         )
 
-    resume = _require_dependencies().resume_turn
-    if resume is None:
-        raise TurnWorkflowNotWiredError(
-            "the turn was answered but no ResumeTurn is bound, so the human's decision "
-            "would be dropped and the turn would expire as though nobody had replied. "
-            "composition.py's bind_turn_workflow must pass resume_turn=container.resume_turn."
-        )
-
-    return await resume.execute(
+    return await _require_resume_turn().execute(
         turn_id,
         request.session,
         request.profile_id,
@@ -932,6 +1342,12 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
     outcome = await _step_start(turn_id, request)
 
     rounds = 0
+    # correlation_id -> the PROVIDER's tool_call_id, accumulated across rounds. Built only
+    # from step RESULTS, so a replay rebuilds exactly the same mapping (R1): this is the
+    # one place the provider's id is held while the question is away, and holding it here
+    # rather than putting it on the wire is what makes CLAUDE.md non-negotiable #5
+    # unbreakable on this path - a string that is never serialised cannot come back changed.
+    peer_calls: dict[str, ToolCallId] = {}
     while outcome.is_suspended:
         rounds += 1
         if rounds > MAX_HUMAN_ROUNDS:
@@ -952,18 +1368,45 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
         # The publish is UNCONDITIONAL even when nothing survives the filter, so the body
         # takes one path whatever the outcome carries. `_step_publish` returns on an empty
         # tuple; a branch here would be a second decision to keep deterministic for no gain.
-        await _step_publish(
-            turn_id, request, _for_a_human(_in_deterministic_order(outcome.pending))
-        )
+        ordered = _in_deterministic_order(outcome.pending)
+        await _step_publish(turn_id, request, _for_a_human(ordered))
+
+        # t-f11-42. The other half of the same suspension: the asks ANOTHER AGENT
+        # executes. Filtered in the body for the reason the publish is - which requests
+        # leave as questions is a decision that has to replay identically - and asked in a
+        # step, which is where the correlation id is minted and persisted as one act.
+        dispatch = await _step_ask_peers(turn_id, request, _for_a_peer(ordered))
+        peer_calls.update(dispatch.handles)
+
+        # A refused ask has no answer coming, so it is resolved NOW rather than waited on.
+        # Entering the wait for it would spend THREE_DAYS on a question that was never
+        # asked and then report that nobody replied. The loop then re-reads the outcome:
+        # an ask that WAS allowed in the same round is still pending, and `ask` is
+        # idempotent per (turn_id, target, question), so the next round hands back the
+        # handle this one already minted rather than asking a second time.
+        if dispatch.refusals:
+            outcome = await _step_refuse_peers(turn_id, request, dispatch.refusals)
+            continue
 
         # The durable wait, entered whether or not anybody was asked: a peer ask suspends
         # the turn exactly as an approval does and its answer arrives on this same topic.
-        # Explicitly THREE_DAYS - the 60-second default is the trap.
+        # Explicitly THREE_DAYS - the 60-second default is the trap, and a peer may itself
+        # suspend on a human, so this wait is measured in hours rather than seconds.
         answer = await DBOS.recv_async(RESUME_TOPIC, timeout_seconds=THREE_DAYS)
         if answer is None:
             return await _step_expire(turn_id)
 
-        outcome = await _step_resume(turn_id, request, answer)
+        # ONE topic, two payload types, and the branch is on the TYPE rather than on
+        # anything this body remembers. `DBOS.recv_async` returns whatever was sent to this
+        # workflow and the type is part of the durable payload, so the branch replays
+        # identically; deciding from "was a peer asked?" instead would take a different
+        # path the day both a human and a peer answer the same turn.
+        if isinstance(answer, PeerAnswer):
+            outcome = await _step_answer_peer(
+                turn_id, request, answer, peer_calls.get(answer.correlation_id)
+            )
+        else:
+            outcome = await _step_resume(turn_id, request, answer)
 
     # t-f3-07. The loop above exits only on a FINISHED outcome, and I2 makes `result`
     # non-None for exactly that shape - `TurnOutcome.__post_init__` refuses any other. The
@@ -1047,6 +1490,34 @@ class HumanAnswer:
     tool_call_id: ToolCallId
     approved: bool
     note: HumanPayload = None
+
+
+@dataclass(frozen=True, slots=True)
+class PeerAnswer:
+    """What a PEER's reply looks like on the durable wire. docs/TASKS.md#t-f11-44.
+
+    TWO FIELDS, AND THE ABSENT THIRD ONE IS THE DESIGN
+        There is no `tool_call_id` here and there must not be. The answering side holds a
+        `PeerAsk` (adapters/driven/peers/mailbox.py), which carries the correlation id, the
+        turn and the hop - and has never seen the provider's `tool_call_id`, because that
+        id belongs to the ASKING agent's own model call. The workflow looks it up in the
+        handles `_step_ask_peers` recorded, so it stays inside one process for the whole
+        round trip. CLAUDE.md non-negotiable #5 asks for a byte-for-byte round trip; the
+        cheapest way to achieve one is not to make the trip.
+
+    AND NO ANSWER TEXT EITHER. The peer's bytes are already in the mailbox, and
+    `read_answer` is what applies the untrusted-content wrapping the port requires. Putting
+    the text on the wire would pickle the peer's answer into the DBOS system database as
+    well, give a second reader a shape to wrap for itself, and make the wire the place a
+    hostile peer's text has to be neutralised - three copies of one boundary.
+
+    IT CARRIES ITS OWN `turn_id` for the reason `HumanAnswer` does: `DBOS.recv_async`
+    returns whatever was sent to this workflow, and a reader that cannot tell a misrouted
+    answer from its own is a reader that will apply it.
+    """
+
+    turn_id: TurnId
+    correlation_id: str
 
 
 async def signal_decision(
@@ -1142,6 +1613,43 @@ async def signal_evidence(
         ),
         RESUME_TOPIC,
         idempotency_key=f"{turn_id}:{tool_call_id}",
+    )
+
+
+async def signal_peer_answer(turn_id: TurnId, correlation_id: str) -> None:
+    """Wake the turn waiting on a peer. docs/TASKS.md#t-f11-44.
+
+    The peer twin of `signal_decision`, and it lives here for the identical reason: `dbos`
+    is banned outside this package (pyproject.toml's TID251, the mechanical form of
+    CLAUDE.md non-negotiable #1), so the worker that runs the answering agent's turn
+    (docs/TASKS.md#t-f11-43) calls this rather than importing DBOS to build the send.
+
+    THE TWO CALLS ARE ORDERED AND THE ORDER IS NOT COSMETIC
+        `AgentMailbox.answer(correlation_id, ...)` first, THEN this. `_step_answer_peer`
+        redeems the handle through `read_answer` the moment it wakes, so a signal sent
+        before the answer is recorded wakes a turn onto a row that is still unanswered -
+        which that step refuses, loudly, rather than resuming on an empty result. Recording
+        first and waking second makes that ordering the mailbox's fact rather than a race.
+
+    IDEMPOTENCE IS DBOS'S, AND THE KEY IS THE HANDLE
+        A delivery is retried by the network, by a worker that crashed after answering, and
+        by DBOS itself, and resolving one ask twice must not resume the turn twice. The key
+        is `(turn_id, correlation_id)` rather than `(turn_id, tool_call_id)` - the key
+        `signal_decision` uses - and the difference is which identifier is stable on THIS
+        path. A human handle is re-issued when `_step_publish` is retried, so keying on it
+        would let one call be resolved twice under two handles; a peer's correlation id is
+        the opposite, minted once per `(turn_id, target, question)` by the mailbox's own
+        UNIQUE constraint, and it is the only identifier the answering side has ever seen.
+
+    It never waits for the turn: the worker has its own turn to finish, and a worker that
+    blocked until the asking agent completed would serialise the two conversations that
+    the durable queue exists to keep apart.
+    """
+    await DBOS.send_async(
+        str(turn_id),
+        PeerAnswer(turn_id=turn_id, correlation_id=correlation_id),
+        RESUME_TOPIC,
+        idempotency_key=f"{turn_id}:peer:{correlation_id}",
     )
 
 

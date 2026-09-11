@@ -1,7 +1,7 @@
 """Driving adapter: what is not ready, answered ONCE.
 
 Phase:   F11 - A clone, an empty Postgres, and one command
-Tasks:   docs/TASKS.md#t-f11-04
+Tasks:   docs/TASKS.md#t-f11-04, docs/TASKS.md#t-f11-38
 Tests:   Core/tests/integration/test_preflight.py
 Used by: agent_core/main.py - the `preflight` subcommand, and the gate `serve` and
          `console` run before they start
@@ -16,6 +16,34 @@ WHY THIS EXISTS, AND WHY IT IS WORTH MORE THAN ANY ONE OF THE FIXES IT REPORTS
     process that raises on the first thing it finds teaches the operator nothing about the
     second. So this module answers the whole question in one pass and prints a LIST, and it
     is the only thing in the tree that deliberately keeps going after it finds a failure.
+
+THE EXIT CODE IS THE VERDICT, AND IT IS DECLARED HERE RATHER THAN INFERRED (t-f11-38)
+    The first thing anyone does with a readiness check is put it in front of a deploy, and
+    a deploy script reads ONE thing: the exit status. A report whose exit code does not
+    carry its own verdict is a readiness check nothing can gate on, however good the eight
+    lines above it are. The contract, in full:
+
+        any `fail`        -> non-zero. `PreflightReport.ready` is False, `main.py`'s
+                             `refuse_unless_ready` raises `SystemExit`, and neither
+                             `serve` nor `console` opens a socket or a prompt.
+        `warn` only, or   -> zero. The deployment starts.
+        all `ok`
+
+    THE SECOND LINE IS A JUDGEMENT AND NOT AN OVERSIGHT. A `warn` is a deployment CHOICE
+    this report has an opinion about, not a defect: policy managed outside this repository,
+    the durable engine's database left to its own best-effort creation at launch, an MCP
+    server that did not answer. That last one settles it - an unreachable MCP server is
+    documented as "a degraded start, not a refusal" (adapters/driven/mcp/toolsets.py) and a
+    turn under that profile genuinely proceeds on its local tools. Exiting non-zero for it
+    would refuse a deployment this process is willing to run, and an exit code that fires
+    on something the operator deliberately chose is an exit code every deploy script
+    learns to ignore - which is how the `fail` stops being read as well.
+
+    `ready` is the single expression of that verdict. Nothing else in the tree may decide
+    it a second time; `main.py` asks this object and exits, and the process exit code is
+    asserted end to end in `tests/integration/test_preflight.py` - the suite never ran the
+    PROCESS before t-f11-38, so nothing could have caught a status that disagreed with the
+    list printed above it.
 
 A REPORT WITHOUT A REMEDY IS THE SAME AFTERNOON IN ONE LINE
     Every failing check carries what to do about it - the command to run, the variable to
@@ -148,7 +176,15 @@ class PreflightReport:
 
     @property
     def ready(self) -> bool:
-        """No hard failure. A warning is a deployment choice, not a refusal to start."""
+        """No hard failure. A warning is a deployment choice, not a refusal to start.
+
+        THE ONE EXPRESSION OF THE VERDICT, AND THEREFORE OF THE EXIT CODE. False here is a
+        non-zero exit from `python -m agent_core preflight` and a refusal to start from
+        `serve` and `console`; True is a zero exit and a process. See THE EXIT CODE IS THE
+        VERDICT in the module docstring for why a `warn` is on the True side of that line.
+        A second opinion about this anywhere else would be a readiness check with two
+        answers, and the machine-readable one is the one nobody reads until it matters.
+        """
         return not self.failures
 
     def render(self) -> str:

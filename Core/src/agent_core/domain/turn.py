@@ -215,14 +215,49 @@ class TurnResult:
 
 @dataclass(frozen=True, slots=True)
 class TurnRequest:
-    """Everything needed to start a turn. Deliberately has no defaults: a caller that
-    forgets the profile or the identity should fail at construction, not at the policy
-    check three layers down."""
+    """Everything needed to start a turn. The three identifying fields deliberately have
+    no defaults: a caller that forgets the profile or the identity should fail at
+    construction, not at the policy check three layers down.
+
+    `hop` IS THE DELEGATION DEPTH, AND ITS DEFAULT IS A STATEMENT (t-f11-47)
+        How many agent-to-agent hops have already been made by the time this turn starts.
+        Zero for a turn a HUMAN started; `PeerAsk.hop` for a turn a worker starts in order
+        to ANSWER another agent's question.
+
+        The count is turn-level state and it has to travel, because A -> B -> A cannot be
+        caught by anything either side holds locally: to B, an ask arriving from A is the
+        first ask B has seen. Only a number carried from the queue row into the turn tells
+        "A started a conversation" apart from "A is being asked back by the agent it just
+        asked" - `adapters/driven/peers/hop_limit.py`, THE COUNT HAS TO TRAVEL. Before
+        this seat existed the gate was handed a 0 at every hop, so `max_hops` could never
+        trip and a cycle between two agents that legitimately allow each other ran until
+        somebody read the bill. Every other half of that gate - both `enabled` switches
+        and both allowlists - was enforced, because none of them depends on a number.
+
+        WHY IT DEFAULTS RATHER THAN BEING REQUIRED, AND WHAT THE DEFAULT MEANS
+            `TurnRequest` is the shape every driving adapter builds - HTTP, the channels,
+            the console, the scheduler and the peer worker - and four of those five start
+            turns nobody delegated. `hop=0` is not a convenience for them: it is the true
+            statement that a turn with no peer behind it is at depth zero, which is
+            exactly what `authorise_hop` needs in order to allow the FIRST hop and count
+            from there.
+
+            The cost of a default is that the one adapter which must NOT take it could
+            forget to pass the count, so the count is set where the row is in hand -
+            `adapters/driving/peers/worker.py::peer_turn_request` builds the request from
+            the `PeerAsk` - rather than being threaded through call sites that would each
+            have to remember.
+
+        It is a plain `int` and not a `NewType` because it is a count, not an identity:
+        arithmetic on it is meaningful, and `hop + 1` is what an allowed decision hands
+        back for the next ask to travel with.
+    """
 
     session: SessionRef
     caller: CallerIdentity
     profile_id: str
     input: UserInput
+    hop: int = 0
 
 
 @dataclass(frozen=True, slots=True)

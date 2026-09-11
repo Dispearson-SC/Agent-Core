@@ -61,12 +61,38 @@ THE ANSWER IS UNTRUSTED CONTENT - CLAUDE.md non-negotiable 10
     the boundary early, and everything it wrote afterwards would reach the model as
     trusted instructions - which is the entire attack.
 
+WHO ASKED TRAVELS TOO, AND THAT IS THE SECOND LOCK (t-f11-48)
+    A claimed row used to carry the asking SESSION, the turn and the hop - and no asking
+    `AgentId`. So `hop_limit.authorise_hop`'s callee-side check,
+    `callee_policy.may_ask(caller)`, could not be re-run on arrival: the answering agent
+    took the question on trust because the asking side said it was allowed. The asking
+    side's gate is real and still applies, so that was never an open door; it is defence
+    in depth, and a two-sided check enforced on one side is a one-sided check with extra
+    words. CLAUDE.md non-negotiable #10 is the reason to want the second lock: a peer that
+    was itself misled is a confused deputy, and what it sends arrives with friendly
+    provenance.
+
+    So `ask` accepts `asker` and persists it in `peer_messages.from_agent_id` (migration
+    `0025`, adapters/driven/persistence_pg/peer_asker_migration.py), and `claim_next`
+    hands it back as `PeerAsk.asker`.
+
+    `from_session` is not that identity under another name. A session names a
+    conversation, not the profile the asking turn ran under, and deriving one from the
+    other would assert an identity nobody recorded.
+
+    `asker` IS OPTIONAL AT THE SIGNATURE AND REQUIRED IN MEANING. `ports/agent_mailbox.py`
+    cannot carry it yet, so a caller typed on the port omits it and the row records NULL -
+    which is honest about what is known, and logged at WARNING because a peer ask whose
+    caller is unknown is a security check that cannot run. NULL is an ABSENCE: it never
+    means "anyone may ask", and nothing anywhere backfills it.
+
 SCOPE - THIS ADAPTER IS NOT THE GATE
     `PeerPolicy.may_ask` and `policy.max_hops` are NOT enforced here. They are
     docs/TASKS.md#t-f9-05, which owns adapters/driven/peers/hop_limit.py and applies both
     checks on both sides before a question ever becomes a hop. What this module owes that
-    anchor is the evidence to decide on, so `hop` is persisted with the row rather than
-    being dropped as an unused argument.
+    anchor is the evidence to decide on, so `hop` and `asker` are persisted with the row
+    rather than being dropped as unused arguments. Recording who asked is not checking it:
+    the answering side runs `authorise_hop` with what this row carries.
 
     `policy.visibility` needs no redaction at this layer for the same structural reason:
     `ask` is handed a question and nothing else, so there is no conversation context here
@@ -76,6 +102,7 @@ SCOPE - THIS ADAPTER IS NOT THE GATE
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import secrets
 from dataclasses import dataclass
@@ -93,6 +120,8 @@ from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId
 # never `random`, never a uuid4 rendered to look unguessable.
 _CORRELATION_ID_BYTES: Final[int] = 32
 
+_LOG = logging.getLogger(__name__)
+
 # Both delimiters, matched case insensitively so a differently-cased tag cannot forge the
 # boundary. The runner's own constants say the comparison has to be case insensitive; a
 # peer that has read a hostile page will try exactly that.
@@ -108,8 +137,8 @@ _FORGED_DELIMITER: Final[str] = "[delimiter removed]"
 _ENQUEUE_SQL = """
     INSERT INTO peer_messages
         (correlation_id, target_agent_id, from_session_id, from_tenant_id,
-         turn_id, hop, question)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+         turn_id, hop, question, from_agent_id)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT ON CONSTRAINT uq_peer_messages_turn_target_question DO UPDATE
         SET target_agent_id = peer_messages.target_agent_id
     RETURNING correlation_id
@@ -132,7 +161,7 @@ _CLAIM_SQL = """
         LIMIT 1
     )
     RETURNING correlation_id, target_agent_id, from_session_id, from_tenant_id,
-              turn_id, hop, question
+              turn_id, hop, question, from_agent_id
 """
 
 # `answered_at IS NULL` is the idempotency guard and it lives in the WHERE clause rather
@@ -160,6 +189,18 @@ class PeerAsk:
     the turn that suspended; an ask that loses them is undeliverable however durable the
     row was. `hop` travels with it so t-f9-05's gate can refuse A -> B -> A on the far
     side too - a one-sided check is bypassable by whoever controls the other side.
+
+    `asker` is the same argument, for the other half of that gate (t-f11-48): without the
+    caller's `AgentId` the answering side cannot re-run `callee_policy.may_ask(caller)`
+    and accepts the question because the asking side said it was allowed.
+
+    `asker is None` MEANS UNKNOWN, NEVER "ANYONE". The column is nullable because rows
+    enqueued before migration `0025` never recorded one, and nothing backfills them - a
+    manufactured identity in an audit-adjacent table is a claim nobody made. An answering
+    side holding None has no caller to check and therefore no basis to admit the question:
+    fail closed, exactly as `PeerPolicy.may_ask` does on an empty allowlist. It may not
+    substitute `from_session`, which names a conversation and not the profile the asking
+    turn ran under.
     """
 
     correlation_id: str
@@ -168,6 +209,7 @@ class PeerAsk:
     from_session: SessionRef
     turn_id: TurnId
     hop: int
+    asker: AgentId | None = None
 
 
 def wrap_peer_answer(answer: str) -> str:
@@ -215,16 +257,33 @@ class PgAgentMailbox:
         from_session: SessionRef,
         turn_id: TurnId,
         hop: int,
+        asker: AgentId | None = None,
     ) -> str:
         """Enqueue durably and return the correlation id the answer will arrive with.
 
         Idempotent per (turn_id, target, question), so a re-executed DBOS step returns the
-        handle it already minted instead of asking the peer a second time. See the module
-        docstring for why `policy` is carried but not enforced here (docs/TASKS.md#t-f9-05
-        is the gate) and why nothing needs redacting at this layer.
+        handle it already minted instead of asking the peer a second time. The conflicting
+        insert leaves every column of the surviving row alone, `from_agent_id` included: a
+        retry cannot rewrite who asked after the fact. See the module docstring for why
+        `policy` is carried but not enforced here (docs/TASKS.md#t-f9-05 is the gate) and
+        why nothing needs redacting at this layer.
+
+        `asker` is the asking agent's own id, persisted so the answering side can re-run
+        its half of the allowlist - WHO ASKED TRAVELS TOO, above. It is an argument BEYOND
+        `ports.agent_mailbox.AgentMailbox.ask`, which is why it has a default: a caller
+        typed on the port cannot pass it yet. Omitting it stores NULL, records that at
+        WARNING, and leaves the answering side with no caller to check - which is the
+        truth about that row, and the reason the line is loud.
         """
+        if asker is None:
+            _LOG.warning(
+                "a peer ask is being enqueued for %r with no asking agent id, so the "
+                "answering side cannot re-run callee_policy.may_ask(caller) and accepts "
+                "the question on the asking side's word alone. docs/TASKS.md#t-f11-48",
+                target,
+            )
         return await asyncio.to_thread(
-            self._enqueue_sync, target, question, from_session, turn_id, hop
+            self._enqueue_sync, target, question, from_session, turn_id, hop, asker
         )
 
     def _enqueue_sync(
@@ -234,6 +293,7 @@ class PgAgentMailbox:
         from_session: SessionRef,
         turn_id: TurnId,
         hop: int,
+        asker: AgentId | None,
     ) -> str:
         with psycopg.connect(self._conninfo, autocommit=True) as conn:
             row = conn.execute(
@@ -246,6 +306,7 @@ class PgAgentMailbox:
                     turn_id,
                     hop,
                     question,
+                    asker,
                 ),
             ).fetchone()
         if row is None:  # pragma: no cover - DO UPDATE always returns the surviving row
@@ -275,6 +336,11 @@ class PgAgentMailbox:
             return None
         # `turn_id` comes back as uuid.UUID from a UUID column; the domain type is the
         # string form every other table and every use case keys on.
+        #
+        # `from_agent_id` is read as None-or-a-value and NEVER coerced through `str()`:
+        # `str(None)` is the string "None", an AgentId no profile has, and an allowlist
+        # check against it would refuse for the wrong reason - reporting a stranger where
+        # the truth is that nobody recorded a caller at all (t-f11-48).
         return PeerAsk(
             correlation_id=str(row[0]),
             target=AgentId(str(row[1])),
@@ -284,6 +350,7 @@ class PgAgentMailbox:
             turn_id=TurnId(str(row[4])),
             hop=int(row[5]),
             question=str(row[6]),
+            asker=None if row[7] is None else AgentId(str(row[7])),
         )
 
     async def answer(self, correlation_id: str, answer: str) -> None:

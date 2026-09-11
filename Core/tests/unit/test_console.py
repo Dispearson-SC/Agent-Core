@@ -777,6 +777,110 @@ def test_a_suspended_turn_says_so_and_says_what_it_is_waiting_for(
     assert "Freezing an account always needs a human." in output
 
 
+def test_a_deferred_tool_call_is_not_rendered_as_executed(
+    cli_caller: CallerIdentity, cli_session: SessionRef
+) -> None:
+    """t-f11-46 (1). The audit sink records intent and verdict BEFORE execution
+    (CLAUDE.md non-negotiable #6): policy ALLOWED `ask_peer` to proceed, so the trail
+    row is effect=ALLOW. But the call then DEFERRED to a peer instead of completing, and
+    "executed" is the word an operator reads when deciding whether something happened -
+    printing it for a call that never finished is exactly the lie t-f11-46 exists to fix.
+    """
+    reader = FakeAuditReader(
+        {
+            TurnId("turn-1"): (
+                _recorded(
+                    "ask_peer",
+                    effect=Effect.ALLOW,
+                    rule_id="peers-allowed",
+                    reason="This profile may consult its peers.",
+                    arguments={"target": "billing_specialist", "question": "balance?"},
+                ),
+            )
+        }
+    )
+    printed: list[str] = []
+    console, *_ = _console(
+        caller=cli_caller,
+        session=cli_session,
+        script=_script("what's my balance", ":quit"),
+        printed=printed,
+        audit_reader=reader,
+        outcome=TurnOutcome(
+            turn_id=TurnId("t-console"),
+            pending=(
+                PendingRequest(
+                    kind=PendingKind.DELEGATION,
+                    tool_call_id=ToolCallId("call-9"),
+                    tool_name="ask_peer",
+                    arguments={"target": "billing_specialist", "question": "balance?"},
+                    reason=(
+                        "I am checking on that now and will come back to you as soon "
+                        "as I have an answer."
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    asyncio.run(console.run())
+
+    rows = [line for line in printed if "tool ask_peer ->" in line]
+    assert rows, "the tool call row for ask_peer must be rendered"
+    row = rows[0]
+    assert "deferred" in row.lower(), f"a suspended call must say so, not: {row!r}"
+    assert "executed" not in row.lower(), (
+        f"a call that DEFERRED never ran; claiming it did is the defect: {row!r}"
+    )
+
+
+def test_suspension_shows_the_admin_the_raw_ask_not_only_the_user_notice(
+    cli_caller: CallerIdentity, cli_session: SessionRef
+) -> None:
+    """t-f11-46 (2). `start_turn._notice_for` replaces a DELEGATION's `reason` with the
+    user-facing notice for EVERY reader (D17, CLAUDE.md non-negotiable #11) - correctly,
+    because `application/` has no audience to tell apart. But the console IS an admin
+    surface, and t-f11-13's whole point is that an operator reads what a user would have
+    seen AND what actually happened. The peer and the question survive in `arguments`
+    untouched, so the console must reconstruct and show the raw ask as a sentence, not
+    leave the operator to piece it together from a raw key/value dump.
+    """
+    printed: list[str] = []
+    console, *_ = _console(
+        caller=cli_caller,
+        session=cli_session,
+        script=_script("what's my balance", ":quit"),
+        printed=printed,
+        outcome=TurnOutcome(
+            turn_id=TurnId("t-console"),
+            pending=(
+                PendingRequest(
+                    kind=PendingKind.DELEGATION,
+                    tool_call_id=ToolCallId("call-9"),
+                    tool_name="ask_peer",
+                    arguments={
+                        "target": "billing_specialist",
+                        "question": "What is the balance on account A-1?",
+                    },
+                    reason=(
+                        "I am checking on that now and will come back to you as soon "
+                        "as I have an answer."
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    asyncio.run(console.run())
+
+    output = "\n".join(printed)
+    assert "I am checking on that now" in output, "what the user would have seen"
+    assert (
+        "asked billing_specialist: what is the balance on account a-1?"
+        in output.lower()
+    ), "the raw ask, reconstructed as a readable sentence - not only in an arguments dump"
+
+
 # --------------------------------------------------------------------------------------
 # The loop itself
 # --------------------------------------------------------------------------------------

@@ -186,6 +186,7 @@ from agent_core.adapters.driven.persistence_pg.conversation_repository import (
 )
 from agent_core.adapters.driven.persistence_pg.migrations import (
     apply_all_migrations,
+    dbos_system_database,
     ensure_databases,
 )
 from agent_core.adapters.driven.persistence_pg.policy_repository import PgToolPolicy
@@ -218,6 +219,7 @@ from agent_core.adapters.driving.http.routes import (
     TurnView,
 )
 from agent_core.adapters.driving.workflow.turn_workflow import (
+    PeerSeat,
     TurnWorkflowDependencies,
     bind_dependencies,
 )
@@ -276,6 +278,13 @@ _WHATSAPP_CHANNEL_ID = "whatsapp"
 # the two. `tests/unit/test_composition.py` reads the id FROM routes.py and asserts it is
 # registered here, so the restatement cannot drift without a red test.
 _HTTP_CHANNEL_ID = "http"
+
+# t-f11-51. The channel `main.py` stamps on every console turn - its `_CONSOLE_CHANNEL_ID`,
+# restated here for the same reason `_HTTP_CHANNEL_ID` is: the name is private to that
+# module and reaching into it from the wiring would couple the two. `tests/integration/
+# test_console_durable.py` asserts a console turn has somewhere to leave on, so the
+# restatement cannot drift without a red test.
+_CLI_CHANNEL_ID = "cli"
 
 # The repository layout is `Core/src/agent_core/composition.py`, so `Core/` is three
 # parents up and `Core/profiles/` is the directory the profile files live in. Overridable
@@ -954,14 +963,18 @@ class Container:
     # same protocol over HTTP - and a container field naming `PgAgentMailbox` would put
     # that swap out of reach of the one file that is supposed to make it.
     #
-    # WHAT THIS SEAT DOES NOT YET REACH, NAMED RATHER THAN IMPLIED. The `ask_peer` tool is
-    # now on the asking agent's surface and always defers (adapters/driven/tools/peers.py),
-    # and `StartTurn` reports the suspension to the user without naming the peer (t-f9-06).
-    # Nothing in production yet turns that deferred call INTO `AgentMailbox.ask()`, nor
-    # claims the far side's queue: `TurnWorkflowDependencies` has no mailbox field to bind,
-    # and that file is not this anchor's to write. So a peer ask suspends and waits. That
-    # is one wiring away and it is visible from here, which is the difference between this
-    # and the six waves where it was not.
+    # t-f11-42 CONSUMED IT. `bind_turn_workflow` now hands this same instance to the
+    # workflow inside a `PeerSeat`, so a deferred `ask_peer` call becomes an
+    # `AgentMailbox.ask()` in `_step_ask_peers` and the correlation id is minted and
+    # persisted as one act. This comment used to read "nothing in production turns that
+    # deferred call into an ask", which was the eighth instance of the shape docs/STATE.md
+    # counts; it is kept as history because the seat that closed it is the only thing
+    # standing between the mechanism and the ninth.
+    #
+    # WHAT THIS SEAT STILL DOES NOT REACH, NAMED RATHER THAN IMPLIED. Nothing CLAIMS the
+    # far side's queue: `claim_next` runs the answering agent's turn and that is
+    # docs/TASKS.md#t-f11-43's driving adapter, not this file's. Until it exists the ask
+    # leaves, lands durably in `peer_messages`, and waits there for a worker.
     mailbox: AgentMailbox
 
 
@@ -1034,6 +1047,30 @@ def _http_channel() -> tuple[str, Channel]:
     return (_HTTP_CHANNEL_ID, PullModeChannel())
 
 
+def _cli_channel() -> tuple[str, Channel]:
+    """Always registered, and pull-mode for exactly the reason `http` is. t-f11-51.
+
+    THE CONSOLE'S DURABLE MODE IS A POLLING CLIENT, NOT A PLATFORM
+        `main.py` stamps `cli` on every console turn, and until t-f11-51 the console only
+        ever called `StartTurn` directly - no workflow, so `_step_deliver` never ran and no
+        entry was needed. A durable console turn goes through the workflow, so delivery is
+        its LAST step: with nothing registered under this id the turn dies with
+        `UnknownChannelError` after the model has already been paid for.
+
+    IT REUSES `PullModeChannel` RATHER THAN GETTING A SECOND NO-OP
+        The console enqueues the turn and then polls the same `turns` row
+        `GET /turns/{turn_id}` reads (`_pg_turn_lookup`), which is `PullModeChannel`'s
+        situation word for word: the answer is already where its reader will look for it,
+        and there is no socket to push it down. A second do-nothing class written for this
+        occasion would be the generic "null channel" that class's own docstring refuses -
+        reusable for the one case that must stay loud.
+
+    Unconditional, like `http` and unlike the two push channels: pull mode has nothing to
+    configure, so there is no credential whose absence could make it dishonest.
+    """
+    return (_CLI_CHANNEL_ID, PullModeChannel())
+
+
 def _telegram_channel(settings: Settings) -> tuple[str, Channel] | None:
     """`None` when no bot token or no bound profile is configured.
 
@@ -1083,14 +1120,16 @@ def build_channel_registry(settings: Settings) -> ChannelRegistry:
     was configured for still raises `UnknownChannelError` on `get` - loudly, at the
     lookup, never a silent `None` for a caller three layers up to mistake for delivered.
 
-    `http` is always here and the two push channels are conditional. That asymmetry is the
-    difference between a channel that needs a credential to reach a platform and one whose
-    delivery is the caller coming back for the stored result - see `PullModeChannel`.
+    `http` and `cli` are always here and the two push channels are conditional. That
+    asymmetry is the difference between a channel that needs a credential to reach a
+    platform and one whose delivery is the caller coming back for the stored result - see
+    `PullModeChannel`, and `_cli_channel` for why the console is the second of those.
     """
     pairs = (
         pair
         for pair in (
             _http_channel(),
+            _cli_channel(),
             _telegram_channel(settings),
             _whatsapp_channel(settings),
         )
@@ -1174,10 +1213,36 @@ _TURN_LOOKUP_SQL = """
 
 def _turn_lookup_sync(
     conninfo: str, turn_id: TurnId, tenant_id: TenantId
-) -> tuple[str, str | None] | None:
+) -> tuple[str, object | None] | None:
     with psycopg.connect(conninfo) as conn:
         row = conn.execute(_TURN_LOOKUP_SQL, (str(turn_id), str(tenant_id))).fetchone()
     return None if row is None else (row[0], row[1])
+
+
+def _turn_result_text(result: object | None) -> str | None:
+    """The answer out of a `turns.result` value, whatever psycopg handed back.
+
+    t-f11-51, and this is a DEFECT FIX rather than a new shape. `turns.result` is JSONB
+    (migration 0016), and psycopg3 decodes a JSONB column to a Python object on the way
+    out - so the value here is already a `dict`, and the `json.loads` that used to stand
+    where this call does raised `TypeError: the JSON object must be str, bytes or
+    bytearray, not dict` for EVERY finished turn. That is `GET /turns/{turn_id}` answering
+    500 to the one status it exists to report, and nothing caught it: the polling test
+    injects its own `TurnLookup`, so this function had never been run against a finished
+    row - the same "a collaborator every test supplied" shape docs/STATE.md now lists nine
+    times. The console's durable mode reads this seat, which is how it surfaced.
+
+    A STRING IS STILL ACCEPTED, because a column read through another driver, or a row
+    written as `text` by an older deployment, is a decoding difference and not a missing
+    answer. What is NOT accepted is inventing text for a shape nobody recognises: `None`
+    says the row carries no readable answer, and the caller renders that as itself.
+    """
+    if isinstance(result, str):
+        result = json.loads(result)
+    if not isinstance(result, Mapping):
+        return None
+    text = result.get("text")
+    return None if text is None else str(text)
 
 
 def _pg_turn_lookup(conninfo: str) -> TurnLookup:
@@ -1212,7 +1277,7 @@ def _pg_turn_lookup(conninfo: str) -> TurnLookup:
             # loudly instead of reporting a plausible but wrong status.
             raise ValueError(f"turns.state {state!r} has no known TurnStatus mapping")
         text = (
-            json.loads(result_json)["text"]
+            _turn_result_text(result_json)
             if status == "finished" and result_json is not None
             else None
         )
@@ -1421,6 +1486,18 @@ def bind_turn_workflow(container: Container) -> None:
     `TurnWorkflowNotWiredError` naming this call. Every test of the step passed throughout,
     because each one bound the use case itself: a collaborator a test supplies and
     production never binds is the shape docs/STATE.md has now recorded five times.
+
+    `peers` IS THE SAME OMISSION AGAIN, AND IT IS THE ONE docs/STATE.md COUNTED EIGHT TIMES
+    (t-f11-42). `Container.mailbox` has existed since t-f11-34 and nothing consumed it:
+    `TurnWorkflowDependencies` had no seat, so a deferred `ask_peer` call suspended the
+    turn and the question reached no queue at all. The seat is ATOMIC (`PeerSeat`) because
+    a mailbox without the profiles can ask and cannot GATE - `hop_limit.authorise_hop`
+    needs both sides' `PeerPolicy` in one hand, and a one-sided allowlist is bypassable by
+    whoever controls the other side.
+
+    It is the container's OWN `mailbox` and its OWN `profiles`, never a second pair. The
+    profiles are the same mapping `start_turn` resolved this turn's profile from, so the
+    allowlist the gate reads cannot be a stale copy of the one the turn was started under.
     """
     bind_dependencies(
         TurnWorkflowDependencies(
@@ -1428,6 +1505,7 @@ def bind_turn_workflow(container: Container) -> None:
             channels=container.channels,
             human_gateway=container.human_gateway,
             resume_turn=container.resume_turn,
+            peers=PeerSeat(mailbox=container.mailbox, profiles=container.profiles),
         )
     )
 
@@ -1592,11 +1670,19 @@ def build_container(
     return container
 
 
-# The second logical database (migrations.py: `app` and `dbos`), named by the convention
-# every integration test in this repository already uses: the app database plus this
-# suffix. DBOS itself appends `_dbos_sys` to whatever `dbos_config` hands it, so it creates
-# its own system database; this is the one the deployment owns and backs up.
-_DBOS_DATABASE_SUFFIX = "_dbos"
+# THE SECOND DATABASE IS THE ONE DBOS DERIVES, AND THERE IS ONLY ONE.
+#
+# This module used to carry `_DBOS_DATABASE_SUFFIX = "_dbos"` and describe it as "the one
+# the deployment owns and backs up", beside DBOS's own `_dbos_sys`. That was a ghost:
+# `ensure_databases` now accepts `dbos_database` AND IGNORES IT (its docstring says so),
+# `dbos_config` hands DBOS the app conninfo and DBOS derives `<app>_dbos_sys` itself, and
+# nothing in this tree ever opened `<app>_dbos`. So the name survived in exactly one place
+# that mattered - the remedy printed to an operator whose database is missing - telling
+# them to create a database nothing would ever connect to, while `preflight` named the
+# real one. Two remedies for one problem, disagreeing.
+#
+# `migrations.dbos_system_database` is the single owner of the derivation. A suffix
+# restated here, even a correct one today, is how the first disagreement happened.
 
 
 def _database_name(conninfo: str) -> str:
@@ -1695,7 +1781,7 @@ def _refused_to_start(settings: Settings, error: psycopg.OperationalError) -> Ex
         "\n"
         f"Create it once at {target}, with a role that may:\n"
         f'    CREATE DATABASE "{database}";\n'
-        f'    CREATE DATABASE "{database}{_DBOS_DATABASE_SUFFIX}";\n'
+        f'    CREATE DATABASE "{dbos_system_database(database)}";\n'
         "\n"
         "Or set AGENT_CORE_ADMIN_DATABASE_URL to an administrative connection string and "
         "start again: startup will create both databases and migrate them, idempotently. "
@@ -1776,7 +1862,6 @@ async def start_container(
         await ensure_databases(
             resolved.admin_conninfo,
             app_database=app_database,
-            dbos_database=f"{app_database}{_DBOS_DATABASE_SUFFIX}",
         )
 
     try:

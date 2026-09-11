@@ -41,6 +41,8 @@ import importlib
 import inspect
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
@@ -85,6 +87,15 @@ _SYNTHETIC_SECRET = "s3cret-value-that-must-never-be-rendered"  # noqa: S105
 # How long the woken workflow is given to report what it received. Generous because it
 # crosses a real durable queue; the test never waits on it when the wake works.
 _WAKE_TIMEOUT_SECONDS = 30.0
+
+# The repository root: `Core/tests/integration/test_preflight.py` is three parents below
+# `Core/`, and `Core/src` is where `python -m agent_core` resolves the package from.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# How long the preflight PROCESS gets. Everything it is asked about in that test refuses
+# immediately - a closed port, an unregistered toolset, a provider litellm does not know -
+# so this bounds a hang rather than a wait.
+_PREFLIGHT_PROCESS_TIMEOUT_SECONDS = 120.0
 
 
 def _conninfo_for(database: str) -> str:
@@ -656,3 +667,112 @@ def _published_handle(settings: Settings, turn_id: TurnId) -> str:
         ).fetchone()
     assert row is not None, "the gateway published no correlation row to answer on"
     return str(row[0])
+
+
+# --------------------------------------------------------------------------------------
+# t-f11-38 - the exit code IS the verdict
+
+
+def _isolated_deployment(tmp_path: Path) -> dict[str, str]:
+    """A deployment broken only in ways that answer instantly, from a clean environment.
+
+    No `.env`, no reachable server, no MCP server to spawn: the subprocess below is asked
+    a question about its EXIT CODE, so everything that could make it slow or make it
+    depend on this machine is removed rather than waited for.
+    """
+    _broken_profile(tmp_path / "profiles")
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("AGENT_CORE_") and not name.endswith("_API_KEY")
+    }
+    environment.update(
+        {
+            # Port 1 on loopback: refused, not filtered, so neither this connection nor
+            # the maintenance one that tells "server down" from "database missing" waits
+            # for a timeout.
+            "AGENT_CORE_DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:1/nope",
+            "AGENT_CORE_PROFILES_DIR": str(tmp_path / "profiles"),
+            "AGENT_CORE_POLICY_DIR": str(tmp_path / "policy"),
+            "PYTHONIOENCODING": "utf-8",
+        }
+    )
+    return environment
+
+
+@pytest.mark.phase("F11")
+def test_the_preflight_process_exits_non_zero_when_a_check_fails(tmp_path: Path) -> None:
+    """The one machine-readable part of the report has to carry the report's verdict.
+
+    docs/TASKS.md#t-f11-38. The first thing anyone does with a readiness check is put it
+    in front of a deploy, and a deploy script reads the exit code - not the eight lines
+    above it. Nothing in this suite ran the PROCESS, so nothing could have caught an exit
+    code that disagreed with the list printed above it.
+
+    Run from `Core/src`, deliberately: that is where `python -m agent_core` resolves from,
+    and it is not the repository root - see docs/TASKS.md#t-f11-39 for what a
+    working-directory-relative path in a shipped profile does from here.
+    """
+    completed = subprocess.run(  # noqa: S603 - this module's own interpreter, fixed argv
+        [sys.executable, "-m", "agent_core", "preflight"],
+        cwd=REPO_ROOT / "Core" / "src",
+        env=_isolated_deployment(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=_PREFLIGHT_PROCESS_TIMEOUT_SECONDS,
+        check=False,
+    )
+    printed = completed.stdout + completed.stderr
+
+    assert "[FAIL]" in printed, (
+        "this deployment has no database and no credential and the report named neither, "
+        f"so the exit code below is not the question this test meant to ask:\n{printed}"
+    )
+    assert completed.returncode != 0, (
+        "the preflight printed a FAIL and exited 0, so a deploy script that gates on it "
+        f"gets a green light on a deployment that cannot serve a turn:\n{printed}"
+    )
+
+
+@pytest.mark.phase("F11")
+def test_a_warning_alone_is_not_a_refusal() -> None:
+    """The other half of the contract, and it is a judgement rather than an omission.
+
+    A `warn` is a deployment CHOICE the report has an opinion about: policy managed
+    outside this repository, the durable engine's database left for its own best-effort
+    creation, an MCP server that did not answer. The last one is the argument: an
+    unreachable MCP server is documented as "a degraded start, not a refusal"
+    (adapters/driven/mcp/toolsets.py) and a turn under that profile proceeds on its local
+    tools. Exiting non-zero for it would refuse a deployment the process itself is willing
+    to run - and an exit code that fires on something the operator chose is an exit code
+    every deploy script learns to ignore, which is how the FAIL stops being read too.
+    """
+    module = _preflight_module()
+    assert module is not None
+    warned = module.PreflightReport(
+        checks=(
+            module.Check(category="database", name="db", severity="ok", detail="reachable"),
+            module.Check(
+                category="profile",
+                name="mcp server routing",
+                severity="warn",
+                detail="did not answer at startup",
+                remedy="confirm the process behind it is up",
+            ),
+        )
+    )
+    assert warned.ready, (
+        "a warning refuses the deployment, so `serve` will not start on a profile whose "
+        "MCP server is merely degraded - which this system explicitly supports."
+    )
+    assert not module.PreflightReport(
+        checks=(
+            module.Check(
+                category="database",
+                name="db",
+                severity="fail",
+                detail="missing",
+                remedy="create it",
+            ),
+        )
+    ).ready

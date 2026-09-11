@@ -63,12 +63,33 @@ class AgentMailbox(Protocol):
         from_session: SessionRef,
         turn_id: TurnId,
         hop: int,
+        asker: AgentId | None = None,
     ) -> str:
         """PSEUDO-CODE - F9. Returns a correlation id; the ANSWER arrives via DBOS.recv().
 
         1. `policy.may_ask(target)` - empty peers means nobody. Checked on BOTH sides: the
            asker checks it may ask, the answerer checks it accepts. A one-sided check is
            bypassable by whoever controls the other side.
+
+           `asker` IS THE ANSWERER'S HALF, AND IT IS WHY IT IS ON THIS SIGNATURE (t-f11-50)
+           The answering side re-runs `callee_policy.may_ask(caller)` on arrival, and it
+           cannot do that without being told who asked. Both adapters grew the keyword
+           first (t-f11-48) - `PgAgentMailbox` persists it in
+           `peer_messages.from_agent_id` and hands it back on the claimed `PeerAsk`,
+           `A2AAgentMailbox` sends it as message metadata beside `hop` - but a caller
+           typed on this port could not pass it, so every production row was written with
+           no asker and the far side took the question on the asking side's word. A
+           two-sided allowlist enforced on one side is a one-sided allowlist with extra
+           words, and CLAUDE.md non-negotiable #10 is why the second lock is wanted: a
+           peer that was itself misled is a confused deputy, and what it sends arrives
+           with friendly provenance.
+
+           OPTIONAL, AND None MEANS UNKNOWN - NEVER "ANYONE MAY ASK". Rows enqueued
+           before the column existed carry no asker, and a deployment upgrades one
+           process at a time, so a required parameter would turn a missing identity into
+           a crash mid-upgrade instead of into the refusal it has to be. Nothing is
+           invented to fill the gap and nothing is backfilled: the answering side that
+           receives None has a caller it cannot verify, and that is the fact.
         2. `hop >= policy.max_hops` -> refuse. A asks B, B asks A, forever - and every hop
            is a full turn with model calls on both sides, so it is far more expensive than
            an ordinary loop.

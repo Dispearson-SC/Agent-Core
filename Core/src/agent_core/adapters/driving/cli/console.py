@@ -26,22 +26,35 @@ IT IS A DRIVING ADAPTER, NOT A SECOND COMPOSITION ROOT
     drift" rule in CLAUDE.md. Drawing the wrong fence in a silent-bug area is worse than
     an adapter-to-adapter import for three module constants.
 
-IT CALLS `StartTurn` DIRECTLY, NOT THE DBOS WORKFLOW - AND IT SAYS SO OUT LOUD
-    A REPL wants an answer now. The 202-plus-poll and the durable per-session partitioned
-    queue exist for channels, and going through them here would mean typing a sentence and
-    then polling for it. So this path skips them, which means two guarantees are NOT on:
+TWO MODES, AND WHICH ONE IS ON IS VISIBLE ON EVERY LINE (t-f11-51)
+    DIRECT is the default and it calls `StartTurn` in-process. A REPL wants an answer now;
+    the 202-plus-poll and the durable per-session partitioned queue exist for channels, and
+    going through them would mean typing a sentence and then polling for it. So that path
+    skips them, which means two guarantees are NOT on:
 
       - durability: a crash mid-turn is not recovered and not replayed (t-f2-02)
       - coalescing: the per-session partition and its window are never exercised
 
-    It also means `HumanGateway.publish` never runs for a turn started here, so a console
-    suspension has NO correlation handle: `:pending` says that rather than printing a
-    queue an operator cannot act on.
+    It also means `HumanGateway.publish` never runs for a turn started that way, so such a
+    suspension has NO correlation handle: `:pending` says that rather than printing a queue
+    an operator cannot act on.
 
-    `_BANNER` prints all of it at startup. A tool that silently exercises less than the
-    real path is how somebody concludes the system works when they have not tested the
-    part that breaks - and an operator judging this system from a console deserves to know
-    which half of it they are judging.
+    DURABLE enqueues the turn onto the DBOS queue and polls the stored row exactly as
+    `GET /turns/{turn_id}` does. It exists because an entire mechanism was unreachable
+    without it: `_step_ask_peers` lives in the workflow body, so an `ask_peer` typed in
+    direct mode suspends the turn and NO MAILBOX IS EVER ASKED. Ten times in this build a
+    mechanism worked and nothing a human could type reached it; this is the door for that
+    one. Coalescing is STILL not exercised - the per-session window belongs to
+    `enqueue_turn_window`, which `POST /turns` opens and this does not.
+
+    DELETING THE DIRECT PATH TO GAIN THE DURABLE ONE WOULD BE A BAD TRADE. Answering
+    immediately is why a REPL is worth sitting at, and the operator can have both.
+
+    `:mode` switches and, with no argument, answers which one is active. The banner prints
+    the active mode's notice at startup and every switch reprints it, and the PROMPT
+    carries the mode on every line - because a mode that is legible once is a mode an
+    operator forgets. A tool that silently exercises less than the real path is how
+    somebody concludes the system works when they have not tested the part that breaks.
 
 WHAT IT DOES NOT SKIP, WHICH IS EVERYTHING THAT DECIDES A REFUSAL
     The turn runs through the real `StartTurn`: the real `AgentRunner` with its
@@ -79,9 +92,10 @@ CREDENTIALS ARE NEVER PRINTED
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -101,6 +115,7 @@ from agent_core.domain.transcript import (
 )
 from agent_core.domain.turn import (
     CallerIdentity,
+    PendingKind,
     PendingRequest,
     SessionId,
     SessionRef,
@@ -117,13 +132,23 @@ from agent_core.ports.tool_provider import ToolProvider
 from agent_core.ports.transcript_reader import TranscriptReader
 
 __all__ = [
+    "DURABLE",
+    "DIRECT",
     "PROFILE_SCAFFOLD",
     "ApprovalDecider",
     "Console",
+    "DurableEnqueue",
+    "DurablePoll",
+    "DurableUnwiredError",
     "ProfileLoader",
     "TurnRunner",
+    "TurnSnapshot",
     "new_turn_id",
 ]
+
+# The two modes, by the name an operator types and the name the prompt carries.
+DIRECT: Final[str] = "direct"
+DURABLE: Final[str] = "durable"
 
 
 class TurnRunner(Protocol):
@@ -158,6 +183,63 @@ class ApprovalDecider(Protocol):
         approved: bool,
         note: str | None = None,
     ) -> tuple[TurnId, ToolCallId]: ...
+
+
+class TurnSnapshot(Protocol):
+    """One turn as a POLL may see it, and nothing else. t-f11-51.
+
+    NARROWED THE WAY `TurnRunner` AND `ApprovalDecider` ARE, AND FOR A SECOND REASON
+        The shape the composition root binds here is `http/routes.py`'s `TurnView`, read
+        back by `composition._pg_turn_lookup` from the same `turns` row `StartTurn` wrote.
+        Declaring the two members this console reads - rather than importing that dataclass
+        - keeps a CLI adapter from depending on an HTTP adapter's vocabulary, which is a
+        coupling neither of them needs and neither of them could notice breaking.
+
+    READ-ONLY MEMBERS ON PURPOSE. Spelt as properties so a FROZEN dataclass satisfies it;
+    a plain attribute in a Protocol demands a mutable one, and nothing should be able to
+    write a status back through this seam.
+    """
+
+    @property
+    def status(self) -> str:
+        """`running`, `waiting` or `finished` - the three states a poll can observe."""
+        ...
+
+    @property
+    def text(self) -> str | None:
+        """The answer, or `None` for anything that has not finished."""
+        ...
+
+
+# Putting one turn on the durable queue and getting back the id it will be filed under.
+# t-f11-51.
+#
+# A CALLABLE RATHER THAN THE WORKFLOW HANDLE, WHICH IS THE WHOLE NARROWING. `enqueue_turn`
+# answers with a `WorkflowHandleAsync`, and a console holding one could `get_result()` on it
+# - which is a blocking wait on a durable workflow dressed up as a REPL, and it would make
+# the poll below decorative. `routes.py` narrows the same handle to `TurnHandle` for the
+# same reason. What comes back is the `TurnId`: the workflow's durable id IS the domain
+# turn id (`turn_workflow._step_new_turn_id`), so it is also the key `:audit` and `:trace`
+# read the turn back under.
+DurableEnqueue = Callable[[TurnRequest], Awaitable[TurnId]]
+
+# Reading that turn back, the way `GET /turns/{turn_id}` reads it.
+#
+# IT TAKES THE CALLER, and that is not decoration: the tenant predicate belongs INSIDE the
+# query the adapter runs, so a turn id alone can never read another tenant's answer. The
+# console passes its own caller, never one typed at a prompt - the same rule `:resume`
+# follows for `SessionRef.tenant_id`.
+DurablePoll = Callable[[TurnId, CallerIdentity], Awaitable[TurnSnapshot | None]]
+
+
+class DurableUnwiredError(ValueError):
+    """`durable=True` with no durable seats behind it.
+
+    Raised at CONSTRUCTION rather than on the first turn, for the reason
+    `ChannelRegistry` raises on a duplicate id at `__init__`: a console that started in a
+    mode it cannot serve would print a banner promising durability and then fail at the
+    enqueue, from the prompt, with the operator holding nothing.
+    """
 
 
 # Re-reading the profiles directory, as a callable rather than as a path. t-f11-09.
@@ -199,6 +281,7 @@ _COMMANDS: Final[tuple[tuple[str, str], ...]] = (
     (":sessions", "conversations in this tenant, the ones stuck on a human marked"),
     (":resume <id>", "file the next turns under that session instead of this run's"),
     (":trace [user|admin]", "the last turn as TranscriptReader projects it, either side"),
+    (":mode [direct|durable]", "which path a turn takes - and what that path does not run"),
     (":help", "this list"),
     (":quit", "leave"),
 )
@@ -206,12 +289,6 @@ _COMMANDS: Final[tuple[tuple[str, str], ...]] = (
 _BANNER: Final[tuple[str, ...]] = (
     "agent-core console - an ADMIN-audience operator surface.",
     "",
-    "This mode calls StartTurn DIRECTLY, not the DBOS workflow. Three guarantees are",
-    "therefore NOT exercised here, and a turn that works here proves nothing about them:",
-    "  - durability: a crash mid-turn is not recovered and not replayed",
-    "  - coalescing: the per-session partitioned queue and its window never run",
-    "  - publication: HumanGateway.publish never runs, so a suspension raised here has",
-    "    no correlation handle and :approve has nothing to answer (see :pending)",
     "Everything that decides a refusal IS real: the profile, the tool provider, the policy",
     "engine and the audit sink are the ones this deployment was built with.",
     "",
@@ -221,6 +298,41 @@ _BANNER: Final[tuple[str, ...]] = (
     "",
     "Type :help for commands. Plain text is a turn.",
 )
+
+# WHAT EACH MODE DOES NOT EXERCISE, PRINTED AT STARTUP AND AGAIN AT EVERY SWITCH.
+#
+# Both notices are written to be read by somebody deciding whether a green turn here means
+# anything. The direct one is the sentence this console shipped with; the durable one is
+# NOT a victory lap - it names coalescing, which is still never run, and it names the
+# second process without which a delegated turn parks until its reply timeout.
+_MODE_NOTICE: Final[dict[str, tuple[str, ...]]] = {
+    DIRECT: (
+        "MODE direct - a turn calls StartTurn DIRECTLY, in this process, and answers now.",
+        "Three guarantees are therefore NOT exercised, and a turn that works here proves",
+        "nothing about them:",
+        "  - durability: a crash mid-turn is not recovered and not replayed",
+        "  - coalescing: the per-session partitioned queue and its window never run",
+        "  - publication: HumanGateway.publish never runs, so a suspension raised here has",
+        "    no correlation handle and :approve has nothing to answer (see :pending)",
+        "It also never reaches _step_ask_peers, which lives in the workflow body: an",
+        "ask_peer call SUSPENDS the turn here and no peer is ever actually asked.",
+    ),
+    DURABLE: (
+        "MODE durable - a turn is enqueued onto the DBOS queue and this console polls the",
+        "stored row, exactly as GET /turns/{turn_id} does. It answers when the turn does.",
+        "What that DOES exercise, and direct mode does not:",
+        "  - durability: the turn is a durable workflow, recovered and replayed on a crash",
+        "  - publication: HumanGateway.publish runs, so a suspension has a correlation",
+        "    handle a human can be given and :approve can answer",
+        "  - delegation: _step_ask_peers runs, so an ask_peer call becomes a real mailbox",
+        "    ask instead of a suspension nobody receives",
+        "STILL NOT EXERCISED: coalescing. The per-session window belongs to",
+        "enqueue_turn_window, which POST /turns opens; this enqueues the turn itself.",
+        "A delegated turn only comes back if something drains the peer queue. That is a",
+        "SECOND process: python -m agent_core peer-worker --agent <the peer>. Without it",
+        "the turn parks until its reply timeout and reports that nobody replied.",
+    ),
+}
 
 # A profile id becomes a FILE NAME, so it is validated as one rather than trusted as one.
 # `../../etc/agent` is a perfectly ordinary-looking agent id and a perfectly effective
@@ -327,6 +439,11 @@ class Console:
         load_profiles: ProfileLoader | None = None,
         approvals: ApprovalDecider | None = None,
         transcripts: TranscriptReader | None = None,
+        durable_enqueue: DurableEnqueue | None = None,
+        durable_poll: DurablePoll | None = None,
+        durable: bool = False,
+        poll_seconds: float = 0.5,
+        poll_timeout_seconds: float = 900.0,
     ) -> None:
         if not profiles:
             raise UnknownConsoleProfileError(
@@ -354,6 +471,20 @@ class Console:
         self._load_profiles = load_profiles
         self._approvals = approvals
         self._transcripts = transcripts
+        self._enqueue = durable_enqueue
+        self._poll = durable_poll
+        self._poll_seconds = poll_seconds
+        self._poll_timeout_seconds = poll_timeout_seconds
+
+        if durable and (durable_enqueue is None or durable_poll is None):
+            raise DurableUnwiredError(
+                "the console was asked to start in durable mode and holds no durable "
+                "path: enqueueing a turn and polling for it are two seats and it has "
+                f"{'no enqueue' if durable_enqueue is None else 'no poll'}. Refusing to "
+                "start in a mode this console cannot serve - see the class docstring."
+            )
+        # PUBLIC, because the prompt carries it and a caller has to be able to read it.
+        self.mode: str = DURABLE if durable else DIRECT
 
         self.profile_id: str = resolved
         # PUBLIC because `:resume` moves it and a caller has to be able to read where the
@@ -370,17 +501,30 @@ class Console:
 
         `read_line` is called directly rather than through `asyncio.to_thread`. Blocking
         the loop while a person types is correct HERE and nowhere else in this codebase:
-        console mode starts no DBOS worker and serves no HTTP, so there is no other turn in
-        flight for the wait to starve. The moment this process grows a background task, the
-        read has to move off the loop.
+        the console serves no HTTP, and the only work this event loop ever has is the turn
+        the operator just typed - so there is nothing in flight for the wait to starve.
+
+        THAT SURVIVES DURABLE MODE, BUT ONLY JUST, SO IT IS WRITTEN DOWN (t-f11-51). A
+        console started with `--durable` does launch the DBOS engine, and that engine runs
+        its queue manager and its recovery on its OWN threads rather than on this loop. The
+        only durable work this loop performs is the poll inside `_durable_turn`, which runs
+        between reads and never while one is blocked. The moment this process grows a
+        background TASK on this loop, the read has to move off it.
         """
         for line in _BANNER:
             self._write(line)
+        self._write("")
+        # The active mode's notice, printed with the banner and reprinted at every switch.
+        # A mode an operator reads once at startup is a mode they are wrong about an hour
+        # later, which is the whole failure this console exists not to be.
+        for line in _MODE_NOTICE[self.mode]:
+            self._write(line)
+        self._write("")
         self._write(self._identity_line())
         self._write("")
 
         while True:
-            entered = self._read(f"{self.profile_id}> ")
+            entered = self._read(self._prompt())
             if entered is None:
                 self._write("")
                 self._write("end of input - leaving.")
@@ -438,6 +582,8 @@ class Console:
                     self._resume(argument)
                 case ":trace":
                     await self._trace(argument)
+                case ":mode":
+                    self._mode_command(argument)
                 case ":help":
                     self._help()
                 case _:
@@ -767,6 +913,53 @@ class Console:
         self._write(f"tool calls of turn {self._last_turn_id}:")
         self._render_tool_calls(self._last_calls)
 
+    # -- the mode (t-f11-51) ------------------------------------------------------------
+
+    def _mode_command(self, argument: str) -> None:
+        """Report the active mode, or switch. Both print what that mode does NOT run.
+
+        WITH NO ARGUMENT IT IS A QUESTION, NOT A TOGGLE. `:mode` alone answering "durable,
+        and here is what durable skips" is the command an operator reaches for when they
+        are about to trust a green turn. A bare `:mode` that flipped the switch would be a
+        question that changed the answer.
+
+        A REFUSAL NAMES WHAT IS MISSING AND WHAT FIXES IT. The durable path needs the DBOS
+        engine running in THIS process, and that is a decision `main.run_console` makes
+        from `--durable` - so a console started without it holds no durable seats and says
+        which command it would have to be started with.
+        """
+        requested = argument.lower()
+        if not requested:
+            other = DIRECT if self.mode == DURABLE else DURABLE
+            self._write(f"mode: {self.mode}  (the other one is {other}; :mode {other} switches)")
+            for line in _MODE_NOTICE[self.mode]:
+                self._write(f"  {line}")
+            return
+        if requested not in _MODE_NOTICE:
+            self._write(
+                f"usage: :mode [{DIRECT}|{DURABLE}]. {argument!r} is neither, and there is "
+                "no third path a turn can take from here."
+            )
+            return
+        if requested == DURABLE and (self._enqueue is None or self._poll is None):
+            self._write(
+                "cannot switch: this console has no durable path wired. Enqueueing a turn "
+                "puts it on the DBOS queue, and that queue does not exist until the "
+                "durable engine is launched in THIS process - which is what `python -m "
+                "agent_core console --durable` does. Staying on direct rather than "
+                "promising a mode that would fail at the enqueue."
+            )
+            return
+
+        previous = self.mode
+        self.mode = requested
+        if previous == requested:
+            self._write(f"already on {self.mode}. Nothing changed.")
+        else:
+            self._write(f"mode: {previous} -> {self.mode}. The prompt carries it from here.")
+        for line in _MODE_NOTICE[self.mode]:
+            self._write(f"  {line}")
+
     def _help(self) -> None:
         self._write("commands:")
         width = max(len(name) for name, _ in _COMMANDS)
@@ -776,14 +969,31 @@ class Console:
 
     # -- a turn -------------------------------------------------------------------------
 
-    async def _turn(self, text: str) -> None:
-        turn_id = self._new_turn_id()
-        request = TurnRequest(
+    def _request_for(self, text: str) -> TurnRequest:
+        """One typed sentence as a turn request. Identical in both modes, deliberately.
+
+        The caller, the session and the profile are what policy, the audit trail and the
+        `ask_peer` grant all key on - so a durable turn and a direct one are the SAME
+        request taking a different route, and a verdict read in one mode is a verdict in
+        the other. A durable path that built its own caller would make `:policy` a liar.
+        """
+        return TurnRequest(
             session=self.session,
             caller=self._caller,
             profile_id=self.profile_id,
             input=UserInput(text=text),
         )
+
+    async def _turn(self, text: str) -> None:
+        """Route one turn by the active mode. See `_MODE_NOTICE` for what each one runs."""
+        if self.mode == DURABLE:
+            await self._durable_turn(text)
+            return
+        await self._direct_turn(text)
+
+    async def _direct_turn(self, text: str) -> None:
+        turn_id = self._new_turn_id()
+        request = self._request_for(text)
         outcome = await self._start_turn.execute(turn_id, request)
 
         self._last_turn_id = turn_id
@@ -801,13 +1011,18 @@ class Console:
             self._last_calls = ()
             trail_error = f"{type(error).__name__}: {error}"
 
+        # SET BEFORE `_render_tool_calls` RUNS, NOT AFTER. t-f11-46 (1): a call the sink
+        # recorded as ALLOW may still have DEFERRED rather than run to completion - see
+        # that method's docstring - and telling the two apart means it must already know
+        # which tool names this very turn suspended on.
+        self._pending = outcome.pending if outcome.is_suspended else ()
+
         self._write(f"[turn {turn_id} / {self.profile_id}]")
         if trail_error is not None:
             self._write(f"  ! the audit trail for this turn could not be read: {trail_error}")
         else:
             self._render_tool_calls(self._last_calls)
 
-        self._pending = outcome.pending if outcome.is_suspended else ()
         if outcome.is_suspended:
             self._render_suspension(outcome.pending)
             return
@@ -823,6 +1038,110 @@ class Console:
             f"{usage.cached_tokens} cached, cost {usage.cost_usd})"
         )
 
+    async def _durable_turn(self, text: str) -> None:
+        """Enqueue the turn, then poll for it the way `GET /turns/{turn_id}` does. t-f11-51.
+
+        WHY THIS IS A POLL AND NOT A WAIT ON THE WORKFLOW HANDLE
+            `enqueue_turn` answers with a durable handle whose `get_result()` would block
+            until the turn finished, and taking that shortcut would make this console the
+            one caller in the deployment that reads a turn a way nothing else can. The
+            stored `turns` row is what every other reader has - the HTTP route, another
+            process, an operator tomorrow - so polling it is the only thing that proves the
+            answer is actually WHERE a reader will look for it. `PullModeChannel`'s
+            docstring makes the same argument for delivery, and the console's own `cli`
+            channel entry is that class for exactly this reason.
+
+        THE ID IS THE WORKFLOW'S AND THE AUDIT TRAIL'S AT ONCE. `_step_new_turn_id` reads
+        the durable workflow id back rather than minting one, so the id printed here is the
+        id `:audit` and `:trace` then answer for. There is no join to remember.
+
+        A TURN THAT IS STILL `waiting` WHEN THE DEADLINE PASSES IS REPORTED, NOT ABANDONED.
+        The workflow keeps running in this process; what ran out is this console's
+        patience, and saying so is different from saying the turn failed.
+        """
+        if self._enqueue is None or self._poll is None:  # pragma: no cover - see __init__
+            self._write(
+                "cannot run a durable turn: this console has no durable path wired. "
+                "`:mode durable` is refused for the same reason."
+            )
+            return
+
+        request = self._request_for(text)
+        turn_id = await self._enqueue(request)
+        self._last_turn_id = turn_id
+        self._last_calls = ()
+        self._pending = ()
+        self._write(f"[turn {turn_id} / {self.profile_id}] enqueued on the durable queue.")
+
+        view = await self._poll_until_settled(turn_id)
+        if view is None:
+            self._write(
+                f"  no row for this turn in this tenant after "
+                f"{self._poll_timeout_seconds:.0f}s. The enqueue succeeded, so the turn "
+                "exists on the queue and has not been dequeued yet - nothing was invented "
+                "here to fill the gap. Is a worker running for this application version?"
+            )
+            return
+        if view.status != "finished":
+            self._write(
+                f"  still {view.status} after {self._poll_timeout_seconds:.0f}s. The "
+                "workflow is durable and is still running; this console stopped waiting. "
+                "A delegated turn needs `python -m agent_core peer-worker` draining the "
+                "peer queue, and a suspension for a HUMAN was published to the channel it "
+                "was raised on - :approve answers it with the handle a human was given."
+            )
+            return
+
+        trail_error: str | None = None
+        try:
+            self._last_calls = await self._audit.tool_calls_for_turn(self._admin, turn_id)
+        except Exception as error:  # see `_direct_turn` for why this catch is its own
+            self._last_calls = ()
+            trail_error = f"{type(error).__name__}: {error}"
+        if trail_error is not None:
+            self._write(f"  ! the audit trail for this turn could not be read: {trail_error}")
+        else:
+            self._render_tool_calls(self._last_calls)
+
+        # `TurnView.text` is None for anything unfinished, and this branch is finished -
+        # but the type says `str | None` and inventing an answer for a null is the one
+        # thing a console reading somebody else's row must never do.
+        self._write(view.text if view.text is not None else "(the row carries no text)")
+        self._write(
+            "  (no usage line: the durable path reads the stored row, which carries the "
+            "answer and not the token counts. :trace admin has the cost per entry.)"
+        )
+
+    async def _poll_until_settled(self, turn_id: TurnId) -> TurnSnapshot | None:
+        """Poll until the turn finishes or this console's patience runs out.
+
+        `waiting` is reported ONCE, the first time it is seen, and then polling continues:
+        a turn that parked on a peer ask or on a human goes waiting and then finished, and
+        a poll that stopped at the first `waiting` would report a delegated turn as stuck
+        every single time.
+
+        AND `None` IS "NOT YET", NOT "NEVER". The enqueue puts the turn on the queue; the
+        `turns` row is written by `StartTurn` once a worker has dequeued it, which is a
+        moment later. Treating the first empty read as a missing turn would report every
+        durable turn as lost and then print its answer nowhere.
+        """
+        assert self._poll is not None  # guarded by `_durable_turn`
+        deadline = self._poll_timeout_seconds
+        waited = 0.0
+        announced = False
+        view = await self._poll(turn_id, self._caller)
+        while (view is None or view.status != "finished") and waited < deadline:
+            if view is not None and view.status == "waiting" and not announced:
+                announced = True
+                self._write(
+                    "  waiting - the turn suspended on something outside itself (a peer "
+                    "ask, a human, an upload) and is parked durably until it is answered."
+                )
+            await asyncio.sleep(self._poll_seconds)
+            waited += self._poll_seconds
+            view = await self._poll(turn_id, self._caller)
+        return view
+
     def _render_tool_calls(self, calls: tuple[AuditedToolCall, ...]) -> None:
         """A tool call WHOLE: who, when, what it was passed, and what the rule SAID.
 
@@ -831,16 +1150,38 @@ class Console:
         model or the human was handed. Rendering the name alone is how a refusal becomes
         folklore.
 
-        "Whether it ran" is a SEPARATE line from the effect on purpose. They are two facts
-        and today they agree; the day `NEEDS_APPROVAL` stops refusing and starts suspending
-        they stop agreeing, and an operator reading only the effect would keep believing
-        the old story.
+        "Whether it ran" is a SEPARATE line from the effect on purpose - and t-f11-46 (1)
+        is exactly the day that pair stopped agreeing. `AuditedToolCall.executed` mirrors
+        `effect is ALLOW` because that is what `before_tool_execute` could know AT THE
+        TIME: the sink writes intent and verdict BEFORE the tool body runs (CLAUDE.md
+        non-negotiable #6), never the outcome. For an ordinary tool "policy let it
+        through" and "it ran to completion" are the same fact. For `ask_peer` they are
+        not: policy ALLOWS it and the call still DEFERS to a peer instead of finishing, so
+        `effect is ALLOW` alone would print "executed" on a call that never did.
+
+        THE THIRD STATE COMES FROM `self._pending`, NOT FROM THE SINK. The trail has no
+        column for "still waiting" - it was never told, and inventing one here would be
+        the console pretending to know more than the append-only record does. What the
+        console DOES already hold is this turn's own suspension list, set by `_turn`
+        before this method runs, so a call whose name is in it is the one that deferred -
+        distinct from "ran" (ALLOW, not deferred) and from "NOT EXECUTED" (DENY, which
+        refuses in place and hands the model the rule's sentence). A NEEDS_APPROVAL
+        verdict is now the DEFERRED case, not the refused one: `t-f11-45` made
+        `PolicyEnforcement.before_tool_execute` raise `ApprovalRequired` rather than
+        blocking, so an approval suspends through the same path a peer ask does and can
+        be answered after a redeploy.
         """
         if not calls:
             self._write("  (no tool calls)")
             return
+        deferred_tool_names = {request.tool_name for request in self._pending}
         for call in calls:
-            ran = "executed" if call.executed else "NOT EXECUTED"
+            if call.tool_name in deferred_tool_names:
+                ran = "DEFERRED - suspended, awaiting an answer; it has not finished"
+            elif call.executed:
+                ran = "executed"
+            else:
+                ran = "NOT EXECUTED"
             rule = call.rule_id if call.rule_id is not None else "no matching rule"
             self._write(f"  tool {call.tool_name} -> {call.effect.value} [{rule}] - {ran}")
             self._write(
@@ -885,6 +1226,17 @@ class Console:
         The tool name and the `tool_call_id` are shown because answering the suspension is
         the operator's job and neither can be guessed. A USER-audience view of the same
         turn shows THAT something is pending and nothing else - `:trace user` renders it.
+
+        A DELEGATION's `reason` IS THE USER-FACING NOTICE, NOT THE ASK - AND THAT PART IS
+        CORRECT. `application/start_turn.py::_notice_for` replaces it for every reader,
+        admin included, because `StartTurn` has no audience to tell apart (CLAUDE.md
+        non-negotiable #11 forbids a USER from learning which peer was asked, and D17
+        requires the SAME sentence to reach whoever reads the outcome next - there is no
+        seat here to answer differently for). t-f11-46 (2): that made this ADMIN surface a
+        copy of the user's view for exactly the one kind t-f11-13 exists to tell apart. So
+        this reconstructs the raw ask from `arguments`, which `_notice_for` never touches -
+        the peer and the question are the RECORD a resumed call keys on, not the message,
+        and were always there to read; see `_raw_delegation_ask`.
         """
         self._write(f"SUSPENDED - waiting on {len(pending)} request(s):")
         for request in pending:
@@ -893,6 +1245,11 @@ class Console:
                 f"tool_call_id={request.tool_call_id}"
             )
             self._write(f"      {request.reason}")
+            if request.kind is PendingKind.DELEGATION:
+                self._write(
+                    "      admin sees the raw ask too (t-f11-13): "
+                    f"{_raw_delegation_ask(request.arguments)}"
+                )
             self._render_arguments(request.arguments)
         self._write(
             "  (this view is ADMIN audience: a user is told only that something is "
@@ -905,13 +1262,29 @@ class Console:
     def _pending_command(self) -> None:
         """What the last turn is waiting on, and the truth about answering it from here.
 
-        THE HONEST PART IS THE SECOND HALF. This console calls `StartTurn` directly, so
-        `HumanGateway.publish` never ran and no correlation row exists for anything listed
-        here - which means `:approve` has no handle to take. Printing a queue and leaving
-        an operator to discover that by typing at it is exactly the "exercises less than
-        the real path" failure `_BANNER` exists to prevent.
+        THE HONEST PART IS THE SECOND HALF, AND IT IS DIFFERENT IN THE TWO MODES (t-f11-51)
+            In DIRECT mode this console calls `StartTurn` directly, so `HumanGateway.publish`
+            never ran and no correlation row exists for anything listed here - which means
+            `:approve` has no handle to take. Printing a queue and leaving an operator to
+            discover that by typing at it is exactly the "exercises less than the real path"
+            failure `_MODE_NOTICE` exists to prevent.
+
+            In DURABLE mode the workflow publishes the suspension, so a handle DOES exist -
+            and it exists in the correlation table rather than in this console's memory,
+            because a durable turn is answered by whoever was published to, from whatever
+            process is holding it. So the durable answer here is not a list: it is where the
+            list actually lives.
         """
         if not self._pending:
+            if self.mode == DURABLE:
+                self._write(
+                    "nothing is held HERE. A durable turn publishes its suspension through "
+                    "HumanGateway, so what is pending lives in the correlation table and on "
+                    "the channel it was published to - not in this console's memory. "
+                    ":approve <handle> takes the handle the human was given there, and D25 "
+                    "still refuses an approver who is the requester."
+                )
+                return
             self._write(
                 "nothing is pending: the last turn in this session finished, or no turn "
                 "has run yet."
@@ -924,6 +1297,13 @@ class Console:
                 f"tool_call_id={request.tool_call_id}"
             )
             self._write(f"      {request.reason}")
+            if request.kind is PendingKind.DELEGATION:
+                # t-f11-46 (2) - see `_render_suspension`, which this list otherwise
+                # duplicates: the reason is the user's notice, not the ask.
+                self._write(
+                    "      admin sees the raw ask too (t-f11-13): "
+                    f"{_raw_delegation_ask(request.arguments)}"
+                )
         self._write(
             "  These were raised by a turn this console started DIRECTLY, so "
             "HumanGateway.publish never ran and none of them has a correlation handle. "
@@ -995,10 +1375,17 @@ class Console:
         answer = "APPROVED" if approved else "REFUSED"
         self._write(f"{answer} - recorded, and the waiting turn was signalled.")
         self._write(f"  turn={turn_id}  tool_call_id={tool_call_id}")
-        self._write(
-            "  the turn resumes in whichever process holds it. This console started no "
-            "workflow, so watch it there and not here."
-        )
+        if self.mode == DURABLE:
+            self._write(
+                "  the turn resumes in whichever process holds it - which in durable mode "
+                "may well be this one. Type the next line and the poll picks it up; "
+                ":trace shows where it got to."
+            )
+        else:
+            self._write(
+                "  the turn resumes in whichever process holds it. This console started no "
+                "workflow, so watch it there and not here."
+            )
 
     # -- sessions and the trace (t-f11-12, t-f11-13) ------------------------------------
 
@@ -1239,6 +1626,17 @@ class Console:
 
     # -- helpers ------------------------------------------------------------------------
 
+    def _prompt(self) -> str:
+        """The agent, the mode, and the caret. t-f11-51.
+
+        THE MODE RIDES ON THE PROMPT BECAUSE THE PROMPT IS THE ONE LINE ALWAYS ON SCREEN.
+        A banner is read once; a session is hours long; and the difference between the two
+        modes is whether durability, publication and delegation were exercised at all. An
+        operator who has to remember which mode they are in will eventually remember wrong,
+        and will report a green turn that proved less than they think.
+        """
+        return f"{self.profile_id} [{self.mode}]> "
+
     def _identity_line(self) -> str:
         """Who the turns are attributed to. Printed because policy branches on all of it.
 
@@ -1258,6 +1656,31 @@ class Console:
 # would appear here the moment it existed - but `:trace` still refuses anything not in it,
 # which is the same refusal `VISIBILITY` makes one layer down.
 _AUDIENCES: Final[dict[str, Audience]] = {audience.value: audience for audience in Audience}
+
+
+def _raw_delegation_ask(arguments: Mapping[str, object]) -> str:
+    """Rebuild the sentence a peer was actually asked, from a DELEGATION's `arguments`.
+
+    t-f11-46 (2). `PendingRequest.reason` for a DELEGATION is the D17 notice
+    (`application/start_turn.py::PEER_SUSPENSION_NOTICE`) for every reader, and that is
+    correct there - `StartTurn` has no audience to answer differently for. This console
+    does, though: it is the ADMIN surface t-f11-13 built precisely so an operator can read
+    what actually happened. The peer and the question are never rewritten - they are the
+    RECORD a resumed call keys on, not the message (see `_notice_for`'s docstring) - so
+    they are read back here exactly as `adapters/driven/agent_pydantic/runner.py
+    ::_pending_reason` first built them from the same two keys, `target` and `question`.
+
+    A MISSING KEY IS NAMED, NOT HIDDEN. `arguments` is a plain `dict[str, object]`
+    (I4 - `domain/turn.py` imports nothing external), so nothing here can assume `ask_peer`
+    put exactly these two keys there. Printing "an unnamed peer" for a key that is absent
+    says the record is short a fact, not that no peer was asked.
+    """
+    target = arguments.get("target")
+    question = arguments.get("question")
+    peer = str(target) if target is not None else "an unnamed peer"
+    if not question:
+        return f"asked {peer} (no question recorded)"
+    return f"asked {peer}: {question}"
 
 
 def _as_arguments(value: object) -> Mapping[str, object]:

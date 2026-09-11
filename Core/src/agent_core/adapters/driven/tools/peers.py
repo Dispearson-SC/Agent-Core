@@ -2,10 +2,11 @@
 
 Phase:   F9 (foundations) / D2 (full A2A wire protocol)
 Tasks:   docs/TASKS.md#t-f9-04, docs/TASKS.md#t-f9-09
-Status:  IMPLEMENTED - always defers, the answer-side wrapping composes mailbox.py
-Tests:   Core/tests/unit/test_ask_peer_tool.py,
-         Core/tests/unit/test_ports_agent_mailbox.py
-Composes: ports/agent_mailbox.py, adapters/driven/peers/mailbox.py (t-f9-03, DONE)
+Status:  IMPLEMENTED - always defers; the answer side belongs to mailbox.py and the
+         workflow, and this module composes neither (see WHY THERE ARE NO RESUME HELPERS)
+Tests:   Core/tests/unit/test_ask_peer_tool.py
+Composes: nothing. It names no port and imports no adapter - the whole module is one
+         deferring function and its toolset.
 
 WHY THIS IS NOT A VERTICAL'S TOOL
 
@@ -60,39 +61,43 @@ WHAT TRAVELS IN THE METADATA, AND WHY NOTHING ELSE DOES
     (t-f9-06); if `hop_limit.py` is ever absent when this module is imported, this module
     still works, because it names the gate only in this comment and never imports it.
 
-THE ANSWER IS UNTRUSTED CONTENT - CLAUDE.md non-negotiable 10
+THE ANSWER IS UNTRUSTED CONTENT - CLAUDE.md non-negotiable 10, AND THIS MODULE HAS NO
+PART IN APPLYING IT
 
-    `mailbox.py` exports `wrap_peer_answer` for exactly this module to use, rather than
-    have this module re-derive the boundary - a delimiter that drifts between two modules
-    is a boundary the model cannot see. `ask_peer_result` below is that composition: the
-    value whoever resumes the turn (again, t-f9-06) should put in
-    `DeferredToolResults.calls[tool_call_id]`, produced by calling `wrap_peer_answer`
-    directly and never by rebuilding its delimiters.
+    `mailbox.py` owns that boundary. It wraps ON READ rather than on write, and said why:
+    wrapping on write would "double-wrap the day a second reader is added". So
+    `AgentMailbox.read_answer` returns the peer's answer ALREADY inside the delimiters,
+    and `workflow/turn_workflow.py::_step_answer_peer` puts exactly those bytes into
+    `DeferredToolResults.calls[tool_call_id]` - unchanged, unexamined, unwrapped again.
 
-TWO READERS NOW, AND ONLY ONE OF THEM RESUMES A TURN (t-f9-09)
+    ONE BOUNDARY, APPLIED AT ONE PLACE, IS THE WHOLE PROPERTY. Non-negotiable 10 is not
+    "wrap a lot"; it is that a model can point at one `<untrusted-tool-output>` and know
+    what it delimits. Double-wrapping is not twice as safe - a nested boundary is a fence
+    the model has to parse, and a delimiter whose meaning is ambiguous is not a delimiter.
 
-    `mailbox.py` wraps on read rather than on write and said why: wrapping on write would
-    "double-wrap the day a second reader is added". `AgentMailbox.read_answer` is that
-    second reader - the port now declares the read-back that both adapters already had -
-    and it returns the answer ALREADY wrapped.
+WHY THERE ARE NO RESUME HELPERS HERE ANY MORE (t-f9-09's pair, retired as t-f11-50
+collateral)
 
-    So there are two shapes in play and they must not be confused:
+    This module used to export two: `ask_peer_result(answer)`, which wrapped a peer's RAW
+    bytes, and `ask_peer_result_for(mailbox, correlation_id)`, which redeemed the handle
+    through the port and returned what the adapter had already wrapped. Since t-f11-48
+    neither was reachable from production - `_step_answer_peer` does the read itself - and
+    both are now deleted rather than kept as a documented surface.
 
-      `ask_peer_result(answer)`     takes the peer's RAW bytes - the value `answer()` was
-                                    handed - and wraps them.
-      `ask_peer_result_for(mailbox, correlation_id)` redeems the handle through the PORT
-                                    and returns what the adapter already wrapped.
+    KEEPING THEM AND "MAKING THEM IMPOSSIBLE TO MISUSE" WAS NOT ON THE TABLE. The only
+    way to make one function safe against being handed the other's input is a check of the
+    form "is this text already wrapped?", and no such check can exist here: a hostile peer
+    controls its own bytes, so it can open with the opening delimiter and close with the
+    closing one, and the sniff is then a test the attacker passes ON PURPOSE - skipping
+    the stripping on exactly the answer that needed it. Which shape a string is, is a fact
+    about WHERE it came from, and nothing recoverable from the string.
 
-    A resumer holding a mailbox uses the second. Passing `read_answer`'s output into
-    `ask_peer_result` nests one boundary inside another, and a model shown a nested
-    `<untrusted-tool-output>` cannot tell which delimiter is the real one - a boundary
-    whose meaning is ambiguous is not a boundary.
-
-    There is deliberately no "is it already wrapped?" sniff anywhere here. A hostile peer
-    controls its own bytes and can open with the opening delimiter and close with the
-    closing one, so a sniff is a check the attacker passes on purpose - it would skip the
-    stripping on exactly the answer that needed it. Which function to call is a fact about
-    WHERE the text came from, and the type is what carries it.
+    So the pair's safety rested entirely on a caller reading a docstring and picking the
+    right one, and its only remaining callers were tests. Two functions kept for that is
+    two ways to nest a boundary, sitting in the one module a future vertical imports when
+    it wants peers. A vertical that needs raw bytes wrapped calls
+    `mailbox.wrap_peer_answer`; a resumer holding a mailbox calls
+    `AgentMailbox.read_answer` and passes what comes back through UNCHANGED.
 """
 
 from __future__ import annotations
@@ -100,46 +105,16 @@ from __future__ import annotations
 from pydantic_ai.exceptions import CallDeferred
 from pydantic_ai.toolsets import FunctionToolset
 
-from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
-from agent_core.ports.agent_mailbox import AgentMailbox
-
 
 def ask_peer(target: str, question: str) -> str:
     """Ask another agent `target` a question. Always defers - see module docstring.
 
     The return type is `str` only so a type checker can tell what the AGENT eventually
     sees once the deferred call resolves (a tool result has to have some declared shape) -
-    the peer's answer, wrapped by `ask_peer_result`. Every actual call raises before
-    reaching that return.
+    the peer's answer, as `AgentMailbox.read_answer` hands it back: already inside the
+    untrusted-content delimiters. Every actual call raises before reaching that return.
     """
     raise CallDeferred(metadata={"target": target, "question": question})
-
-
-def ask_peer_result(answer: str) -> str:
-    """The value to place in `DeferredToolResults.calls[tool_call_id]` once a peer answers.
-
-    A thin composition of `mailbox.wrap_peer_answer`, not a second implementation of it -
-    see THE ANSWER IS UNTRUSTED CONTENT above. Exported so the runner that eventually
-    resumes an `ask_peer` call (t-f9-06) has one place to call instead of importing
-    `wrap_peer_answer` directly and forgetting that this is the tool that needs it.
-    """
-    return wrap_peer_answer(answer)
-
-
-async def ask_peer_result_for(mailbox: AgentMailbox, correlation_id: str) -> str | None:
-    """The resume value for an `ask_peer` call, redeemed through the PORT.
-
-    Typed on `AgentMailbox`, not on a concrete adapter: that is the whole point of
-    t-f9-09. Before the port declared `read_answer`, a resumer had to name
-    `PgAgentMailbox` or `A2AAgentMailbox` to get an answer back, which put the choice of
-    transport in the one module that is supposed to be transport-agnostic.
-
-    Returns what the adapter already wrapped, verbatim - see TWO READERS NOW above for why
-    it does not wrap again, and why it does not try to detect whether it should.
-    None means the peer has not answered yet; the turn stays suspended, and a caller that
-    turned that None into an empty tool result would be fabricating an answer nobody gave.
-    """
-    return await mailbox.read_answer(correlation_id)
 
 
 def build_toolset() -> FunctionToolset[None]:

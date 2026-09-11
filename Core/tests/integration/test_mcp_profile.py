@@ -1,7 +1,7 @@
 """An MCP server declared in a SHIPPED PROFILE, reached for real.
 
 Phase:   F11
-Tasks:   docs/TASKS.md#t-f11-16
+Tasks:   docs/TASKS.md#t-f11-16, docs/TASKS.md#t-f11-39, docs/TASKS.md#t-f11-40
 Subject: Core/profiles/delivery_optimizer.yaml, adapters/driven/mcp/toolsets.py,
          adapters/driven/agent_pydantic/runner.py
 
@@ -18,13 +18,34 @@ WHAT THIS FILE ADDS THAT THE F6 SUITE DOES NOT
     "connect it to an MCP server without a code change"; a test that hand-builds the
     server it then reaches proves the opposite claim.
 
-WHY THE SERVER IS THE REPOSITORY'S OWN FIXTURE, AND WHY THAT IS STILL "FOR REAL"
-    `Core/tests/fixtures/mcp_echo_server.py` is a REAL stdio MCP server - a child process
+WHICH SERVER THE FILE NAMES, AND WHY IT IS NOT THE ONE IT USED TO (t-f11-39)
+    It named `python Core/tests/fixtures/mcp_echo_server.py`, and that was two defects in
+    the SHIPPED FILE rather than anything wrong with this test. It put a TEST in the one
+    file an operator reads instead of the code. And the path was relative to the working
+    directory, which a profile cannot know: `python -m agent_core` resolves the package
+    from `Core/src`, and from there it does not exist - so the very configuration this
+    module proved end to end was unreachable in the process that ships it.
+
+    It now names `python -m agent_core.adapters.driven.mcp.reference_server`: the
+    repository's own stdio MCP server, addressed by IMPORT PATH so it resolves from
+    wherever the package is importable. The autouse fixture below runs this whole module
+    from `Core/src` for that reason - it used to guarantee the repository root, which is
+    the one directory in which the defect was invisible.
+
+WHY THE SERVER IS THE REPOSITORY'S OWN, AND WHY THAT IS STILL "FOR REAL"
+    `adapters/driven/mcp/reference_server.py` is a REAL stdio MCP server - a child process
     speaking the protocol - and it is the one this repository can run from a fresh clone
     with no network and no credentials. What makes this end to end is that the process is
     genuinely spawned, genuinely advertises its tools, and genuinely answers a call; the
     two lines an operator changes to point the same profile at a real traffic service are
     `command` and `args`, and nothing else in the tree moves. That is the anchor's claim.
+
+AND WHAT A DEGRADED START LOOKS LIKE (t-f11-40)
+    The last two tests drive a server that dies before it speaks, because that is what an
+    operator meets first and it was rendered as a crash: a handled, documented, deliberate
+    fallback printing sixty lines of `ExceptionGroup` under a warning that was already
+    correct. They assert the RENDERED record - what `logging.lastResort` puts on a
+    terminal - rather than the call, because the traceback was a property of the record.
 
 NON-NEGOTIABLE #4 HAS THREE CLAUSES AND EACH GETS ITS OWN TEST
     1. `test_a_rule_written_for_a_local_tool_does_not_reach_the_profile_s_mcp_tools`
@@ -50,13 +71,23 @@ WHY THE LOCAL PROVIDER HERE IS NOT `LocalToolProvider`
     real gap in the wiring, it is outside this anchor's files, and it is reported rather
     than papered over: the local seat below builds the vertical's REAL toolset so the
     local half of every assertion is the production one.
+
+WHAT STILL EXERCISES A DECLARED SERVER FROM A PROFILE FILE
+    `tests/integration/test_preflight.py` writes a profile that DECLARES an MCP server
+    nothing is listening on, and asserts the operator is told so by name with a remedy.
+    That is the other half of t-f11-39's bargain: this file proves a reachable server is
+    reached; that one proves an unreachable one is reported rather than swallowed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import dataclasses
+import logging
 import re
-from collections.abc import Sequence
+import sys
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -113,22 +144,35 @@ is the prefix.
 # exactly two of these survive in the text the model reads.
 TAG = re.compile(r"<\s*/?\s*untrusted-tool-output\s*>", re.IGNORECASE)
 
+# A line of the shipped profile that names a process to spawn or an endpoint to address -
+# commented out or not, because a commented declaration exists to be uncommented. Prose
+# that merely mentions a directory is not one of these.
+_DECLARES_A_PATH = re.compile(r"^\s*#?\s*(-\s*)?(command|args|url)\s*:", re.IGNORECASE)
+
 
 @pytest.fixture(autouse=True)
-def _at_the_repository_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The profile's `args` are repository-root relative, so the process starts there.
+def _somewhere_that_is_not_the_repository_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run from `Core/src`, which is where `python -m agent_core` actually resolves from.
 
-    CLAUDE.md, Conventions: every command in this repository runs from the root. A stdio
-    server is spawned with the parent's working directory, so that is the directory the
-    paths in the profile are written against - and saying so in an executable line beats
-    saying it in a comment.
+    THIS FIXTURE USED TO GUARANTEE THE ONE DIRECTORY THE DEFECT NEEDED. It ran the whole
+    module from the repository root, because the profile's `args` were written relative to
+    it - so the suite pinned the single cwd in which the shipped configuration worked, and
+    the process that ships starts in a different one. A stdio server is spawned with the
+    parent's working directory; nothing about a profile may depend on which directory that
+    is, and the cheapest way to hold that is to run from somewhere else on purpose.
+    docs/TASKS.md#t-f11-39.
     """
-    monkeypatch.chdir(REPO_ROOT)
+    monkeypatch.chdir(REPO_ROOT / "Core" / "src")
+
+
+def _shipped_profile() -> AgentProfile:
+    """The shipped file, through the production loader. Never a hand-built profile."""
+    return profiles_loader.load_profile_sync(PROFILE_PATH)
 
 
 def _profile() -> AgentProfile:
     """The shipped file, through the production loader. Never a hand-built profile."""
-    return profiles_loader.load_profile_sync(PROFILE_PATH)
+    return _shipped_profile()
 
 
 def _declared_server(profile: AgentProfile) -> MCPServerRef:
@@ -477,4 +521,187 @@ def test_an_mcp_result_from_the_profile_reaches_the_model_wrapped() -> None:
         "a payload from the profile's MCP server closed the untrusted-content wrapper: "
         f"the model saw {TAG.findall(seen)!r}, so everything after the first close tag "
         "reads as trusted text (CLAUDE.md non-negotiable #4)"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# t-f11-39 - the SHIPPED profile must not name a test fixture
+
+
+def test_the_shipped_profile_names_nothing_inside_the_test_tree() -> None:
+    """A profile is production configuration, and `Core/tests/` is not production.
+
+    Two defects in one line. It shipped a TEST as configuration - an operator reading the
+    file that opens "a profile is DATA ... this file answers what this agent is allowed to
+    do without opening any code" learns from it to point production at `tests/`, and
+    configuration is the surface people copy rather than audit. And the path was relative
+    to the working directory: started from `Core/src`, which is where `python -m
+    agent_core` resolves the package from, python reports `can't open file
+    '...Core/src/Core/tests/fixtures/mcp_echo_server.py'`.
+
+    Asserted against the RAW TEXT as well as the loaded object, because a commented-out
+    declaration is configuration too: it is there to be uncommented, and it teaches the
+    same thing to the same reader. Prose ABOUT the test tree is not a declaration and is
+    not matched - `_DECLARES_A_PATH` looks for the three keys that actually spawn or
+    address a server.
+    """
+    text = PROFILE_PATH.read_text(encoding="utf-8")
+    offenders = [
+        line.strip()
+        for line in text.splitlines()
+        if _DECLARES_A_PATH.match(line)
+        and ("Core/tests" in line or "tests/fixtures" in line)
+    ]
+    assert not offenders, (
+        f"{PROFILE_PATH.name} names the repository's TEST TREE as production "
+        f"configuration: {offenders}. docs/TASKS.md#t-f11-39"
+    )
+
+    for server in _shipped_profile().mcp_servers:
+        for argument in server.args:
+            assert "tests" not in Path(argument).parts, (
+                f"the shipped server {server.name!r} is spawned as {list(server.args)!r}, "
+                "which is a path inside the test tree"
+            )
+            assert not (argument.endswith(".py") and not Path(argument).is_absolute()), (
+                f"the shipped server {server.name!r} names the relative script "
+                f"{argument!r}, so it resolves only when the process happens to start in "
+                "one directory. `python -m agent_core` starts in Core/src."
+            )
+
+
+def test_the_shipped_server_is_reached_from_a_directory_it_was_not_written_in() -> None:
+    """The half of t-f11-39 a path check cannot make: it still ANSWERS from anywhere.
+
+    The autouse fixture above has already moved this process to `Core/src`. A declaration
+    that merely avoids naming `tests/` could still be unreachable from here - which is
+    precisely the state the profile shipped in - so the assertion is that the child
+    process spawned from THIS directory advertised its tools.
+    """
+    assert Path.cwd() == REPO_ROOT / "Core" / "src", (
+        "this assertion is about the working directory, so it has to be the one the "
+        "shipped process uses rather than whatever the runner happened to leave"
+    )
+    profile = _shipped_profile()
+    server = _declared_server(profile)
+    assert _mcp_names(profile), (
+        f"the shipped server {server.name!r} is spawned as {server.command!r} "
+        f"{list(server.args)!r} and advertised nothing from {Path.cwd()}. A profile whose "
+        "MCP server resolves in one directory only is a profile that works everywhere "
+        "except in the process that ships it. docs/TASKS.md#t-f11-39"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# t-f11-40 - a handled, documented degraded start must not be rendered as a crash
+
+
+_DEAD_SERVER = MCPServerRef(
+    name="routing",
+    transport="stdio",
+    # Exits before it speaks a word of the protocol: the cheapest possible "did not
+    # answer", and the same failure an operator gets from a server that is not installed.
+    command=sys.executable,
+    args=("-c", "raise SystemExit(1)"),
+)
+
+
+@contextlib.contextmanager
+def _collecting(level: int) -> Iterator[list[logging.LogRecord]]:
+    """Capture this adapter's records so they can be RENDERED, not merely counted.
+
+    A handler on the module's own logger rather than pytest's `caplog`, because the
+    subject is what `logging.lastResort` puts on a terminal - the FORMATTED record,
+    traceback and all. There is no logging configuration anywhere in this process
+    (`rg basicConfig src` finds nothing), so that last-resort handler is exactly what an
+    operator gets, and the traceback was a property of the record rather than of the call.
+    """
+    records: list[logging.LogRecord] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger(mcp_toolsets.__name__)
+    handler = _Collector(level)
+    previous = logger.level
+    logger.setLevel(level)
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+
+def _rendered(records: list[logging.LogRecord], level: int) -> list[str]:
+    """What the default formatter - and therefore `logging.lastResort` - would print."""
+    formatter = logging.Formatter()
+    return [formatter.format(record) for record in records if record.levelno == level]
+
+
+def _degraded_start_records(level: int) -> list[logging.LogRecord]:
+    """Drive BOTH paths that swallow a discovery failure, and collect what they logged.
+
+    `_discover_raw_names` is the one an operator meets first - `preflight` and every
+    policy filter go through `tool_names_for` - and `_GuardedToolset.get_tools` is the one
+    a running turn meets. They make the same bargain and must report it the same way.
+    """
+    profile = dataclasses.replace(_shipped_profile(), mcp_servers=(_DEAD_SERVER,))
+    provider = mcp_toolsets.MCPToolProvider()
+
+    with _collecting(level) as records:
+        assert asyncio.run(provider.tool_names_for(profile)) == (), (
+            "a server that exits before the handshake advertised tools, so the rest of "
+            "this is not measuring a degraded start"
+        )
+        toolset = asyncio.run(provider.toolset_for(profile))
+        assert isinstance(toolset, AbstractToolset)
+        ctx: RunContext[None] = RunContext(deps=None, model=TestModel(), usage=RunUsage())
+        assert asyncio.run(toolset.get_tools(ctx)) == {}
+    return records
+
+
+def test_an_unreachable_mcp_server_is_not_rendered_as_a_crash() -> None:
+    """The first thing an operator sees at startup must not look like the process died.
+
+    `adapters/driven/mcp/toolsets.py` calls this out in its own docstring: "AN UNREACHABLE
+    SERVER IS A DEGRADED START, NOT A REFUSAL". It is handled, it is deliberate, and it is
+    documented - and it printed an `ExceptionGroup` traceback through fastmcp's internals
+    onto the terminal, above a one-line warning that was already correct and sufficient.
+    docs/TASKS.md#t-f11-40.
+    """
+    lines = _rendered(_degraded_start_records(logging.WARNING), logging.WARNING)
+    assert len(lines) == 2, (
+        "both swallowing paths - discovery and `get_tools` - must report, and neither may "
+        f"report twice: {lines}"
+    )
+
+    for line in lines:
+        assert "Traceback (most recent call last)" not in line, (
+            "a handled degraded start prints a traceback, so the operator's first "
+            f"impression of this process is a crash:\n{line}"
+        )
+        assert "ExceptionGroup" not in line
+        assert line.count("\n") == 0, f"the degraded start is not one line:\n{line}"
+
+        # What must SURVIVE the suppression. A quieter warning that dropped any of these
+        # would be the opposite defect: an operator who cannot act on it.
+        assert _DEAD_SERVER.name in line, f"it does not say WHICH server: {line}"
+        assert "degraded start, not a refusal" in line, (
+            f"it does not say the process is continuing on purpose: {line}"
+        )
+        assert "DEBUG" in line, (
+            f"it suppressed the cause without saying how to get it back: {line}"
+        )
+
+
+def test_the_suppressed_cause_is_still_retrievable() -> None:
+    """Suppressed on the normal path, never swallowed. An error nobody can retrieve is
+    the opposite failure, so the full cause is logged at DEBUG on the same logger.
+    """
+    lines = _rendered(_degraded_start_records(logging.DEBUG), logging.DEBUG)
+    assert any("Traceback (most recent call last)" in line for line in lines), (
+        "the traceback was removed from the warning and put nowhere, so nobody debugging "
+        f"this can recover the cause. DEBUG carried: {lines}"
     )

@@ -2,7 +2,7 @@
 
 Phase:   F0
 Tasks:   docs/TASKS.md#t-f0-05, docs/TASKS.md#t-f0-07, docs/TASKS.md#t-f11-04,
-         docs/TASKS.md#t-f11-18
+         docs/TASKS.md#t-f11-18, docs/TASKS.md#t-f11-43
 Status:  DONE - build_app() wires the container once and mounts chat, transcript and admin.
          t-f0-07: `main()` now dispatches between two ways to run the same container -
          `serve` (the HTTP process) and `console` (the operator REPL). The dispatch is
@@ -14,6 +14,9 @@ Status:  DONE - build_app() wires the container once and mounts chat, transcript
          gate the other two run before they open a socket or a prompt.
          t-f11-18: the console's tool-call read goes through `Container.audit_reader` and
          the hand-built `_PgToolCallLog` is retired.
+         t-f11-43: `peer-worker` is the fourth subcommand - the consumer the durable peer
+         mailbox never had. It is four lines of wiring here and a driving adapter in
+         `adapters/driving/peers/worker.py`, for the reason every other subcommand is.
          t-f0-06 / t-f3-11: build_app() now binds routes.py's `lookup_turn` and `decide`
          seats to the container's OWN `turn_lookup` / `decide_approval` by default -
          previously neither was passed to create_app at all, so GET /turns/{turn_id} and
@@ -50,14 +53,36 @@ WHY THE FRAMEWORK TYPE IS NOWHERE IN THIS FILE
     fair statement of that: the day a router is served by something other than FastAPI,
     this file does not change.
 
-WHAT THIS FILE STILL CANNOT DO, NAMED RATHER THAN HIDDEN
-    It cannot launch DBOS. `dbos` is banned outside `adapters/driving/workflow/` for the
-    same reason `fastapi` is banned here, and nothing under that package exposes a launch.
-    So a process started by `serve()` answers on every route, and a `POST /turns` fails
-    when it reaches the queue until the durable engine has a bootstrap with a home. That
-    home is `adapters/driving/workflow/`, not here - see the note in docs/STATE.md.
+WHICH PROCESSES LAUNCH THE DURABLE ENGINE, AND WHY IT IS NOT ALL OF THEM
+    `dbos` is banned outside `adapters/driving/workflow/` for the same reason `fastapi` is
+    banned here, so this file never imports it: `launch_dbos(container)` is that package's
+    bootstrap (t-f2-13) and it takes the CONTAINER, so no launcher can hand DBOS a second
+    opinion about the pinned `application_version`.
 
-    It also builds two driven adapters that `composition.py` has no seat for yet -
+    `serve` launches it, because a turn is enqueued onto a queue that does not exist until
+    it does. `peer-worker` launches it too (t-f11-49), because waking the turn that asked
+    a peer is `DBOS.send_async` - see that subcommand for what launching costs and what it
+    does not buy.
+
+    `console` LAUNCHES IT ONLY FOR `--durable`, AND THAT IS THE t-f11-51 CHANGE
+        It used to decline unconditionally, and the reason it gave was correct for the only
+        mode it had: a console that calls `StartTurn` directly has no queue to dequeue and
+        no workflow of its own to recover, so launching would start a recovery worker for
+        turns this process is not serving. That reason does not survive the durable mode.
+        `enqueue_turn` puts the turn on a queue that does not exist until `launch_dbos`
+        runs, and it is THIS process that must dequeue it - so without the engine the first
+        durable turn fails at the enqueue, from the prompt, with the operator holding
+        nothing. What was a lie in one direction would become a lie in the other.
+
+        So the launch follows the flag, one decision with one reason on each side: no
+        `--durable`, no engine, and the banner's direct-mode notice is true as it always
+        was; `--durable`, and this process is a full executor of the application exactly as
+        `peer-worker` is - it dequeues `agent-core-turns` and takes part in version-scoped
+        startup recovery. That is acceptable rather than accidental, for the reason
+        `run_peer_worker_process` gives: `build_container` has already bound the workflow's
+        collaborators through `bind_turn_workflow` before the launch is reached.
+
+    This file also builds two driven adapters that `composition.py` has no seat for yet -
     `PgTranscriptReader` and `PgKnowledgeAdmin` - because a router mounted against nothing
     is a router that is not mounted. They are marked below and they belong in the
     container; this is the only place in the tree outside `composition.py` that chooses a
@@ -102,8 +127,17 @@ from agent_core.adapters.driving.http.routes import (
     create_app,
 )
 from agent_core.adapters.driving.http.transcript_routes import create_transcript_router
+from agent_core.adapters.driving.peers.worker import (
+    DirectTurnRunner,
+    PeerQueue,
+    answerable_targets,
+    run_peer_worker,
+)
 from agent_core.adapters.driving.workflow.bootstrap import launch_dbos
-from agent_core.adapters.driving.workflow.turn_workflow import enqueue_turn
+from agent_core.adapters.driving.workflow.turn_workflow import (
+    enqueue_turn,
+    signal_peer_answer,
+)
 from agent_core.application.decide_approval import DecideApproval
 from agent_core.application.ingest_media import IngestMedia
 from agent_core.composition import (
@@ -114,6 +148,7 @@ from agent_core.composition import (
     start_container,
 )
 from agent_core.domain.knowledge import CollectionId
+from agent_core.domain.peers import AgentId
 from agent_core.domain.turn import (
     CallerIdentity,
     SessionId,
@@ -137,6 +172,7 @@ __all__ = [
     "main",
     "refuse_unless_ready",
     "run_console",
+    "run_peer_worker_process",
     "serve",
 ]
 
@@ -188,6 +224,30 @@ async def _start_turn_on_the_queue(request: TurnRequest) -> TurnHandle:
     """
     handle = await enqueue_turn(request)
     return _QueuedTurn(turn_id=TurnId(handle.workflow_id))
+
+
+async def _enqueue_console_turn(request: TurnRequest) -> TurnId:
+    """The console's durable starter: enqueue, take the id, let go. t-f11-51.
+
+    THE SAME `enqueue_turn` `POST /turns` USES, AND NOT A SECOND WAY IN. Starting a turn
+    any other way - `DBOS.start_workflow_async`, or calling the workflow function - skips
+    the per-session partition and lets two messages of one conversation run at once, which
+    is the interleaving D19 exists to prevent and which fails only under real load.
+
+    THE ID IS THE TURN'S, NOT A SECOND IDENTIFIER. `_start_turn_on_the_queue` above records
+    a seam here; it is closed on this path by `turn_workflow._step_new_turn_id`, which reads
+    the durable workflow id back instead of minting one. So the id handed to the console is
+    the id the audit rows are filed under and the id `GET /turns/{turn_id}` resolves - one
+    value, joined by construction rather than by a query somebody has to remember to write.
+
+    NO WINDOW, deliberately. `enqueue_turn_window` is what opens the per-session coalescing
+    window, and it belongs to `POST /turns`: an operator typing one sentence at a prompt has
+    nothing to coalesce with, and a console that waited out a window before starting would
+    be slower than the direct path for no property gained. The console's durable-mode notice
+    says coalescing is still not exercised, and this is why.
+    """
+    handle = await enqueue_turn(request)
+    return TurnId(handle.workflow_id)
 
 
 def _env_admin_authenticator(environ: Mapping[str, str] | None = None) -> AdminAuthenticator:
@@ -412,6 +472,7 @@ def build_console(
     channel: str = _CONSOLE_CHANNEL_ID,
     roles: frozenset[str] = frozenset(),
     session_id: SessionId | None = None,
+    durable: bool = False,
     write_line: Callable[[str], None] = print,
     read_line: Callable[[str], str | None] | None = None,
 ) -> Console:
@@ -483,6 +544,27 @@ def build_console(
         # t-f11-18. The container's OWN reader, on the audit pool it was built with -
         # never a second one assembled here from a connection string.
         audit=container.audit_reader,
+        # t-f11-51. THE DURABLE PATH, AND BOTH HALVES OF IT COME FROM HERE.
+        #
+        # The console gains a second way to run a turn and does not become a second
+        # composition root to get it: `_enqueue_console_turn` is the same `enqueue_turn`
+        # `POST /turns` starts a turn with, and `container.turn_lookup` is the same seat
+        # `GET /turns/{turn_id}` reads it back through (`build_app` passes that very
+        # object). So a durable console turn is started and read exactly as an HTTP one is,
+        # by the objects this deployment was built with - a console that assembled its own
+        # queue or its own SELECT would be inspecting a system nobody deploys, which is the
+        # whole reason every other seat here is the container's.
+        #
+        # BOUND ONLY WHEN THE ENGINE IS. `--durable` is one decision with two halves:
+        # `run_console` launches DBOS, and these seats are filled. Filling them in a
+        # process that declined to launch would hand the console a queue that does not
+        # exist, and `:mode durable` would succeed and then fail at the first turn - so the
+        # absence IS the signal, and the console's refusal names the command to restart
+        # with. Inside a `--durable` process both modes stay reachable through `:mode`,
+        # because the direct path is an addition this task deliberately did not remove.
+        durable_enqueue=_enqueue_console_turn if durable else None,
+        durable_poll=container.turn_lookup if durable else None,
+        durable=durable,
         admin=_console_audit_admin(),
         caller=CallerIdentity(
             subject_id=subject_id,
@@ -561,11 +643,18 @@ def run_console(arguments: argparse.Namespace) -> None:
     container without migrating is the t-f1-23 gap reopened at the one place nobody writes
     a test for.
 
-    IT DELIBERATELY DOES NOT `launch_dbos`. The console calls `StartTurn` directly, so
-    there is no queue to dequeue from and no workflow to recover - which is exactly what
-    the console's own banner tells the operator. Launching the durable engine here would
-    start a recovery worker for turns this process is not serving, and it would make the
-    banner a lie in the other direction.
+    IT LAUNCHES `launch_dbos` FOR `--durable` AND FOR NOTHING ELSE (t-f11-51)
+        Without the flag it does not, and the reason is the one it always gave: the console
+        calls `StartTurn` directly, so there is no queue to dequeue from and no workflow to
+        recover, and launching would start a recovery worker for turns this process is not
+        serving. That reason is exactly as true as it ever was - for that mode.
+
+        With the flag the console enqueues through `turn_workflow.enqueue_turn`, onto a
+        queue that does not exist until the engine is launched, and it is THIS process that
+        has to dequeue and run it. Declining here would make the durable mode fail at the
+        very first turn, from the prompt, with no queue and no explanation - the banner a
+        lie in the other direction. See WHICH PROCESSES LAUNCH THE DURABLE ENGINE above for
+        what launching costs.
     """
     container = asyncio.run(start_container())
     # t-f11-04. AFTER `start_container`, deliberately: that is what creates the databases
@@ -575,6 +664,11 @@ def run_console(arguments: argparse.Namespace) -> None:
 
     container.domain_pool.open()
     container.audit_pool.open()
+    if arguments.durable:
+        # Before the console and after the pools, which is the order `serve()` and
+        # `run_peer_worker_process` both use: recovery begins inside `launch`, and a
+        # recovered workflow's first step reaches for a pool.
+        launch_dbos(container)
     try:
         console = build_console(
             container,
@@ -586,6 +680,7 @@ def run_console(arguments: argparse.Namespace) -> None:
             session_id=(
                 None if arguments.session is None else SessionId(arguments.session)
             ),
+            durable=arguments.durable,
         )
         asyncio.run(console.run())
     finally:
@@ -593,11 +688,122 @@ def run_console(arguments: argparse.Namespace) -> None:
         container.domain_pool.close()
 
 
+def run_peer_worker_process(arguments: argparse.Namespace) -> None:
+    """`python -m agent_core peer-worker` - the answering side of the mailbox. t-f11-43.
+
+    THIN ON PURPOSE, LIKE EVERY OTHER SUBCOMMAND HERE. The claim, the identity, the fresh
+    session and the answer all live in `adapters/driving/peers/worker.py`; what belongs in
+    the entry point is which container the worker runs against and which agents it answers
+    for. An entry point that grew the loop would be the second composition root this file
+    exists not to become.
+
+    WHY THE QUEUE IS CHECKED RATHER THAN BUILT. `Container.mailbox` is typed on the PORT
+    (`composition.py` says why: D2's A2A adapter is a swap), and the ANSWERING half -
+    `claim_next` - is deliberately not on that port. So the bound adapter either can be
+    claimed from or it cannot, and this asks at startup instead of a minute later on the
+    first ask. Building a `PgAgentMailbox` here instead would make this file choose a
+    driven adapter again, which is exactly the debt t-f11-33 just paid off.
+
+    IT DOES `launch_dbos`, AND THAT IS THE COMPOSITION DECISION THIS SUBCOMMAND MAKES
+    (t-f11-49)
+        It used to decline, quoting `run_console`'s reasoning. That reasoning does not
+        survive the move: the console never wakes anybody, and this process must. Waking
+        the turn that asked is `turn_workflow.signal_peer_answer`, which is
+        `DBOS.send_async`, and send needs a launched DBOS in THIS process - so a worker
+        that declines to launch is a worker that records an answer and wakes nobody. The
+        asking turn then sleeps until its `reply_timeout_seconds` and reports that nobody
+        replied, to a question that was answered minutes ago and is sitting on the row. A
+        durable queue whose consumer cannot wake anything is a queue that drains into
+        nothing, which is worse than having no consumer at all: the ask is consumed.
+
+        WHAT LAUNCHING COSTS, NAMED RATHER THAN DISCOVERED. This process becomes a full
+        executor of the same application: it dequeues `agent-core-turns` alongside
+        `serve`, and it takes part in version-scoped startup recovery. That is acceptable
+        rather than accidental, because `build_container` has already bound the workflow's
+        collaborators through `bind_turn_workflow` before this line is reached
+        (`adapters/driving/workflow/bootstrap.py` says so), and the pinned
+        `application_version` is the same one `serve` claims - so any turn this process
+        picks up is served by a fully-composed process, not a half-wired one. An operator
+        who wants the two roles on separate capacity runs them on separate deployments,
+        which is a deployment decision and not one this file can make for them.
+
+        WHAT IT DOES NOT BUY, so the banner below stays honest: the PEER turn is still not
+        durable. `DirectTurnRunner` calls `StartTurn` directly because the worker needs the
+        OUTCOME in order to answer, and `enqueue_turn` returns a handle whose result would
+        never come back here. Kill this process while B is thinking and that turn is gone -
+        the ask stays `delivered` with a null answer and nobody recovers it
+        (`adapters/driving/peers/worker.py`, WHAT HAPPENS WHEN THE WORKER DIES MID-TURN).
+    """
+    container = asyncio.run(start_container())
+    refuse_unless_ready(container.settings)
+
+    queue = container.mailbox
+    if not isinstance(queue, PeerQueue):
+        raise SystemExit(
+            "peer-worker: the configured mailbox cannot be claimed from - it answers "
+            "`ask` and `read_answer` but not `claim_next`, so there is no queue to drain. "
+            "A deployment that talks to peers over A2A is answered by the far side, not "
+            "by this process."
+        )
+
+    named = tuple(AgentId(agent) for agent in (arguments.agents or ()))
+    targets = named if named else answerable_targets(container.profiles)
+    if not targets:
+        raise SystemExit(
+            "peer-worker: no loaded profile sets `peers.enabled: true`, so there is no "
+            "queue to drain. Name an agent with --agent, or enable peers on the profile "
+            "that is meant to answer."
+        )
+
+    print(
+        "[peer-worker] answering for: "
+        + ", ".join(targets)
+        + " - peer turns run through StartTurn directly, so one killed halfway is not "
+        "recovered. This process launches the durable engine (it has to, to wake the turn "
+        "that asked), so it also dequeues ordinary turns and takes part in recovery."
+    )
+
+    container.domain_pool.open()
+    container.audit_pool.open()
+
+    # t-f11-49. The durable engine, because the wake below is `DBOS.send_async` and send
+    # needs one in this process. See IT DOES `launch_dbos` above for what that costs.
+    # Before the loop and after the pools, which is the order `serve()` uses: recovery
+    # begins inside `launch`, and a recovered workflow's first step reaches for a pool.
+    launch_dbos(container)
+    try:
+        # t-f11-49. `wake` BOUND, and the loop is only a loop once it is. The worker
+        # records the answer on the row; this is what tells the turn that asked. It is
+        # `turn_workflow.signal_peer_answer` and never a send assembled here, for the
+        # reason `dbos` is banned outside that package (pyproject.toml's TID251, the
+        # mechanical form of CLAUDE.md non-negotiable #1): the topic, the payload type and
+        # the idempotency key are one decision, and a second spelling of them would be a
+        # second opinion about which turn an answer belongs to.
+        asyncio.run(
+            run_peer_worker(
+                queue,
+                DirectTurnRunner(container.start_turn),
+                targets=targets,
+                wake=signal_peer_answer,
+                idle_seconds=arguments.poll,
+            )
+        )
+    except KeyboardInterrupt:
+        # The ordinary way an operator stops a polling process. The `finally` below still
+        # closes the pools, which is the whole reason this is caught rather than unwound.
+        print("[peer-worker] stopped.")
+    finally:
+        container.audit_pool.close()
+        container.domain_pool.close()
+
+
 def _argument_parser() -> argparse.ArgumentParser:
-    """Two ways to run one container. No subcommand means `serve`, as it always did."""
+    """Four ways to run one container. No subcommand means `serve`, as it always did."""
     parser = argparse.ArgumentParser(
         prog="agent-core",
-        description="Run the agent core as an HTTP process or as an operator console.",
+        description=(
+            "Run the agent core as an HTTP process, an operator console or a peer worker."
+        ),
     )
     subcommands = parser.add_subparsers(dest="command")
     subcommands.add_parser("serve", help="the HTTP process (the default)")
@@ -648,6 +854,45 @@ def _argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="continue a named session instead of a fresh one",
     )
+    # t-f11-51. The durable path, as a flag rather than as a separate subcommand: it is the
+    # SAME console, on the same container, with the same commands - what changes is which
+    # route a typed sentence takes, and `:mode` moves between them once the process is up.
+    console.add_argument(
+        "--durable",
+        action="store_true",
+        help=(
+            "start in durable mode: launch the DBOS engine in this process, enqueue every "
+            "turn onto the durable queue and poll for it, exercising durability, "
+            "publication and peer delegation. `:mode direct` switches back to the "
+            "answer-now path at any time"
+        ),
+    )
+
+    # t-f11-43. The answering side of a peer ask. Hyphenated rather than `peerworker`
+    # because the other three read as words, and this is two.
+    worker = subcommands.add_parser(
+        "peer-worker",
+        help=(
+            "answer asks other agents left on the durable mailbox: claim one, run the "
+            "turn as the TARGET agent under its own profile and policy, answer it"
+        ),
+    )
+    worker.add_argument(
+        "--agent",
+        action="append",
+        dest="agents",
+        default=None,
+        help=(
+            "an agent whose queue to drain; repeatable. Defaults to every loaded profile "
+            "with peers enabled"
+        ),
+    )
+    worker.add_argument(
+        "--poll",
+        type=float,
+        default=1.0,
+        help="seconds to wait after a pass that found nothing; a busy queue never waits",
+    )
     return parser
 
 
@@ -656,8 +901,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     It lives HERE and not in `__main__.py` because that file says in its own docstring that
     it must stay three lines, and it is right: every decision about what the process IS
-    belongs to this module. See WHAT THE SUBCOMMAND DISPATCH CANNOT REACH in the module
-    docstring for the one line still missing on the other side.
+    belongs to this module. See WHICH PROCESSES LAUNCH THE DURABLE ENGINE in the module
+    docstring for what each of the four actually starts.
     """
     arguments = _argument_parser().parse_args(argv)
     if arguments.command == "console":
@@ -665,6 +910,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
     if arguments.command == "preflight":
         run_preflight(arguments)
+        return
+    if arguments.command == "peer-worker":
+        run_peer_worker_process(arguments)
         return
     serve()
 
