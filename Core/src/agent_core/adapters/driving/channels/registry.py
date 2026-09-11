@@ -53,6 +53,24 @@ WHO USES IT
     - `ChannelHumanGateway` (`adapters/driven/human/gateway.py`), for the mid-turn
       approval or evidence prompt. One lookup table, both paths - that shared use is the
       point of D23's Shape A.
+
+THE PICKLE TRAP (t-f3-18)
+    DBOS pickles a workflow's raised exception to hand it back to a caller of
+    `get_result()`. `BaseException.__reduce__` reconstructs the instance by calling
+    `type(self)(*self.args)` - and `self.args` is whatever was passed to
+    `Exception.__init__`, which here is the ALREADY-FORMATTED MESSAGE STRING, not the
+    structured `channel_id` (and `known`) the real `__init__` requires. An `__init__`
+    with more than one required positional parameter beyond that message is one argument
+    short at unpickle time, and the caller sees a `TypeError` about this class's own
+    constructor instead of the delivery failure that was actually raised - exactly the
+    "mangled, not loud" failure `t-f3-07` exists to prevent.
+
+    Both errors below fix this with an explicit `__reduce__` that hands back the
+    STRUCTURED constructor arguments instead of the formatted string, so unpickling calls
+    `__init__` the same way the original raise site did. ANY exception raised inside a
+    DBOS workflow with a required constructor argument beyond a single message has this
+    same trap - give it the same treatment (a defaulted extra parameter, or its own
+    `__reduce__`) before it crosses a workflow boundary.
 """
 
 from __future__ import annotations
@@ -100,6 +118,16 @@ class DuplicateChannelError(ChannelRegistryError):
         )
         self.channel_id = channel_id
 
+    def __reduce__(self) -> tuple[type[DuplicateChannelError], tuple[str]]:
+        """Round-trip through pickle with the STRUCTURED arg, not the formatted message.
+
+        See the module docstring's "THE PICKLE TRAP" - without this, DBOS unpickling
+        this exception at `get_result()` would call `DuplicateChannelError(message)`,
+        which happens to type-check (one required parameter) but would then re-format a
+        message that quotes the ALREADY-FORMATTED message as the channel id.
+        """
+        return (self.__class__, (self.channel_id,))
+
 
 class UnknownChannelError(ChannelRegistryError):
     """Nothing is registered under that id.
@@ -113,6 +141,18 @@ class UnknownChannelError(ChannelRegistryError):
         super().__init__(f"no channel registered under {channel_id!r}; registered: {list(known)}")
         self.channel_id = channel_id
         self.known = known
+
+    def __reduce__(self) -> tuple[type[UnknownChannelError], tuple[str, tuple[str, ...]]]:
+        """Round-trip through pickle with the STRUCTURED args, not the formatted message.
+
+        See the module docstring's "THE PICKLE TRAP" (t-f3-18). Without this,
+        `BaseException.__reduce__` hands back only `self.args` - the already-formatted
+        message string - and DBOS unpickling this at `get_result()` would call
+        `UnknownChannelError(message)`, one positional argument short of `known`. That
+        surfaces to the caller as `TypeError: UnknownChannelError.__init__() missing 1
+        required positional argument: 'known'`, with the channel id nowhere in it.
+        """
+        return (self.__class__, (self.channel_id, self.known))
 
 
 @runtime_checkable

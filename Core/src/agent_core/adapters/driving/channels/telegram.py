@@ -2,10 +2,17 @@
 
 Phase:   F3 - Deferred human interaction
 Tasks:   docs/TASKS.md#t-f3-09
-Status:  DONE — registers against `t-f3-13`'s `Channel` Protocol; fixture-only, no live
-         call (no bot token exists yet). Wiring into `composition.py`'s registry is
-         `t-f3-06`'s job, not this file's.
-Tests:   Core/tests/unit/test_channel_telegram.py
+Status:  DONE — registers against `t-f3-13`'s `Channel` Protocol. Verified live against
+         the real Bot API (`TELEGRAM_BOT`): `getMe` authenticates through this adapter's
+         own `poster` seam, and a real `getUpdates` response maps through `to_turn_request`
+         with no divergence from the fixture `test_channel_telegram.py` assumed — the
+         documented `Update`/`Message` shape holds. `sendMessage` itself is still exercised
+         only against a stub (no chat id available to send into here), and the inbound
+         webhook path is NOT exercised — this environment has no public HTTPS endpoint, so
+         `getUpdates` (long polling) is the inbound path actually verified live; see
+         `test_telegram_live.py`. Wiring into `composition.py`'s registry is `t-f3-06`'s
+         job, not this file's.
+Tests:   Core/tests/unit/test_channel_telegram.py, Core/tests/integration/test_telegram_live.py
 
 WHAT THIS FILE IS
     A leaf adapter, exactly as `adapters/driving/channels/registry.py` describes: it
@@ -44,13 +51,13 @@ OUTBOUND: THE DOCUMENTED `sendMessage` BODY, NOTHING MORE
     unverified behaviour shipped as if it were documented.
 
 WHY THE HTTP CALL IS INJECTED, NOT IMPORTED
-    Same reasoning as `routes.py`'s `TurnStarter`: no bot token exists yet
-    (`docs/TASKS.md#t-f3-09`), so this file must not be able to dial out even by
-    accident. `poster` is a structural seam matching `httpx.AsyncClient.post`'s
-    signature closely enough that the real client can be handed in directly once a
-    token exists — Telegram's `getUpdates` needs no public URL to verify that live,
-    unlike WhatsApp Cloud API's inbound webhook. A test hands in a stub that records the
-    body instead.
+    Same reasoning as `routes.py`'s `TurnStarter`: this module never imports an HTTP
+    client itself, so which client dials out — a real `httpx.AsyncClient` or a recording
+    stub — is entirely the caller's choice. `poster` is a structural seam matching
+    `httpx.AsyncClient.post`'s signature, so the real client is handed in directly once a
+    token exists (`test_telegram_live.py`, now that `TELEGRAM_BOT` does) — Telegram's
+    `getUpdates` needs no public URL to verify that live, unlike WhatsApp Cloud API's
+    inbound webhook. The unit suite hands in a stub that records the body instead.
 """
 
 from __future__ import annotations
