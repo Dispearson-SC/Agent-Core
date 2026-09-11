@@ -1,8 +1,11 @@
 """Use case: DecideApproval - record a human's answer and wake the waiting turn.
 
 Phase:   F3
-Tasks:   docs/TASKS.md#t-f3-03
-Status:  IMPLEMENTED (t-f3-03). Four-eyes (t-f3-05) still open - see STEP 2 below.
+Tasks:   docs/TASKS.md#t-f3-03, docs/TASKS.md#t-f3-05, docs/TASKS.md#t-f3-14
+Status:  IMPLEMENTED (t-f3-03). Four-eyes DECIDED AND ENFORCED (t-f3-05,
+         docs/DECISIONS.md#d25) - see STEP 2 below - and a refused attempt now leaves a
+         row through `AuditSink.record_rejected_decision` (t-f3-14), which is the gap
+         D25 recorded and left open.
 
 WHERE THIS SITS
     Called from the HTTP adapter when a human replies - possibly days later, from a
@@ -35,12 +38,41 @@ from agent_core.domain.turn import ToolCallId, TurnId
 from agent_core.ports.audit_sink import AuditSink
 from agent_core.ports.human_gateway import HumanGateway
 
-__all__ = ["DecideApproval", "DecisionSignal", "UnknownCorrelationError"]
+__all__ = [
+    "SELF_APPROVAL",
+    "UNKNOWN_REQUESTER",
+    "DecideApproval",
+    "DecisionSignal",
+    "FourEyesError",
+    "RequesterLookup",
+    "UnknownCorrelationError",
+]
 
 # Waking the suspended turn: fire-and-return, nothing to await a result on. `note` travels
 # with it because a REFUSAL's reason is what lets the model adapt instead of retrying -
 # ResumeTurn builds the refusal result out of it.
 DecisionSignal = Callable[[TurnId, ToolCallId, bool, str | None], Awaitable[None]]
+
+
+# Who STARTED the turn, as a `subject_id`. Injected, not imported, for exactly the two
+# reasons `DecisionSignal` above is: `application/` may not reach for a repository, and a
+# narrow callable gives this file nothing it could wait on. Returns None when nobody is on
+# record for that turn - which D25 treats as a refusal, not as a pass.
+RequesterLookup = Callable[[TurnId], Awaitable[str | None]]
+
+
+class FourEyesError(PermissionError):
+    """The approver could not be shown to be a second person. docs/DECISIONS.md#d25.
+
+    Covers both halves of that failure - the approver IS the requester, and the requester
+    is unknown - because they are the same outcome: nothing here can demonstrate two
+    people, and an approval that cannot be demonstrated is not one.
+
+    A subclass of `PermissionError` so the HTTP adapter maps one exception type to 403
+    without knowing anything about four-eyes, mirroring `UnknownCorrelationError` being a
+    `LookupError` for 404. The two must stay distinguishable: 404 says the handle is not
+    yours, 403 says the handle is yours and the answer still is not.
+    """
 
 
 class UnknownCorrelationError(LookupError):
@@ -55,13 +87,64 @@ class UnknownCorrelationError(LookupError):
     """
 
 
+# The grounds a refusal is filed under, and the message `FourEyesError` carries. They are
+# constants because they are read twice: once by the person the exception reaches now, and
+# once by whoever queries `audit_rejected_decisions` months later asking WHICH control
+# fired. One shared string would answer the second question with "four-eyes, somehow".
+#
+# They name the rule and nothing else. No note, no arguments, no correlation handle: an
+# audit row is grounds, not a place to spill the payload the attempt carried.
+SELF_APPROVAL = (
+    "four-eyes: an approval must come from someone other than the human who started "
+    "this turn"
+)
+UNKNOWN_REQUESTER = (
+    "four-eyes: nobody is on record as having started this turn, so the approver cannot "
+    "be shown to be a second person"
+)
+
+
+def _refusal_grounds(requester_id: str | None, approver_id: str) -> str | None:
+    """Why this approval is refused, or None when it is not. docs/DECISIONS.md#d25.
+
+    Both halves of `FourEyesError` reach the same outcome - nothing here can demonstrate
+    two people - but they are not the same event, and the trail has to keep them apart.
+    """
+    if requester_id is None:
+        return UNKNOWN_REQUESTER
+    if _same_person(requester_id, approver_id):
+        return SELF_APPROVAL
+    return None
+
+
+def _same_person(requester_id: str, approver_id: str) -> bool:
+    """Compare on `subject_id` alone, stripped and casefolded. docs/DECISIONS.md#d25.
+
+    On `subject_id` ALONE - never on the channel or the roles. The same person answering
+    from WhatsApp instead of the web is still the same person, and matching on a tuple
+    would let a channel switch defeat the rule.
+
+    Stripped and casefolded because the two mistakes are not symmetric: an exact-match
+    rule is defeated by whichever spelling of their own id the requester can persuade a
+    channel to send, while over-matching costs one identity provider that issues subjects
+    differing only by case - which is a defect there, not a decision here.
+    """
+    return requester_id.strip().casefold() == approver_id.strip().casefold()
+
+
 class DecideApproval:
     def __init__(
-        self, *, gateway: HumanGateway, audit: AuditSink, signal: DecisionSignal
+        self,
+        *,
+        gateway: HumanGateway,
+        audit: AuditSink,
+        signal: DecisionSignal,
+        requester: RequesterLookup | None = None,
     ) -> None:
         self._gateway = gateway
         self._audit = audit
         self._signal = signal
+        self._requester = requester
 
     async def execute(
         self,
@@ -88,15 +171,36 @@ class DecideApproval:
             with nobody looking for it. Nothing rolls the row back - the sink is
             append-only and writes outside the domain transaction by design.
 
-        STEP 2 - AUTHORISE THE DECIDER (still open)
+        STEP 2 - FOUR-EYES (t-f3-05, docs/DECISIONS.md#d25)
             The person replying must be allowed to decide THIS request. Do not assume the
             channel proves identity: a shared inbox, a forwarded message or a group chat
             all break that assumption.
 
-            TODO(t-f3-05): decide whether the approver must differ from the requester
-            (four-eyes). For the fraud vertical it almost certainly must. `subject_id` is
-            recorded either way, so the answer is reconstructible from the audit trail even
-            for decisions taken before the rule lands.
+            The rule, decided: an APPROVAL must come from someone other than the human who
+            started the turn. "Requester" is that human - `TurnRequest.caller.subject_id` -
+            and not the agent, because the agent is not a person and a rule comparing a
+            human to a piece of software can never fire.
+
+            It gates `approved=True` only. Refusing your own request removes a permission
+            rather than conferring one, and blocking it would leave the turn asleep with
+            the one person who wants it stopped unable to stop it.
+
+            An unknown requester is a REFUSAL, not a pass. The approver may well be a
+            second person; nothing here can show it, and "probably fine" is how a control
+            becomes decoration.
+
+            The check runs before `record_human_decision`, and that member is not what a
+            refusal is filed through: it means "a human decided", so a refused attempt
+            recorded there would read in the trail as a refusal the human never made.
+            The attempt gets `record_rejected_decision` instead (t-f3-14) - its own
+            member over its own table, carrying no verdict, written BEFORE the exception
+            propagates. That makes this path the same shape as the DENY path in
+            `PolicyEnforcement.before_tool_execute` after all: row first, then raise.
+
+            D25 recorded the silence as a gap, and it is now closed. A control nobody can
+            show fired is indistinguishable from one that was never wired, and the row is
+            append-only and outside the domain transaction (CLAUDE.md non-negotiable #6),
+            so the rollback of the turn it refused cannot take it.
 
         IDEMPOTENCY IS NOT BUILT HERE, AND THAT IS DELIBERATE
             The same handle answered twice must not resume the turn twice - humans
@@ -117,6 +221,20 @@ class DecideApproval:
                 "no pending human decision for this correlation handle"
             )
         turn_id, tool_call_id = resolved
+
+        # Four-eyes (D25). After correlation, so a stray reply never becomes a lookup
+        # against a turn nobody resolved; before `record_human_decision`, for the reason
+        # in STEP 2 - and it writes `record_rejected_decision` instead.
+        if approved and self._requester is not None:
+            grounds = _refusal_grounds(await self._requester(turn_id), subject_id)
+            if grounds is not None:
+                # The row FIRST, then the refusal - the same ordering, for the same
+                # reason, as `record` before `signal` below. A refusal that propagates
+                # before its row is written is a control nobody can show fired.
+                await self._audit.record_rejected_decision(
+                    turn_id, tool_call_id, subject_id, grounds
+                )
+                raise FourEyesError(grounds)
 
         # BEFORE the signal. See the docstring; these two statements must not swap.
         await self._audit.record_human_decision(

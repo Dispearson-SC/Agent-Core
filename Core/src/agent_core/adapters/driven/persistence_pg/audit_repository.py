@@ -12,10 +12,26 @@ NON-NEGOTIABLE #6 - THE WHOLE REASON THIS FILE IS SEPARATE
     default behaviour if you wire it the obvious way.
 
 TABLES (all append-only, no UPDATE, no DELETE)
-    audit_tool_calls        turn_id, caller, tool, arguments jsonb, effect, rule_id, at
-    audit_human_decisions   turn_id, tool_call_id, subject_id, approved, note, at
-    audit_media             turn_id, media_id, sha256, direction, at
-    audit_turn_costs        turn_id, input_tokens, output_tokens, cached, cost_usd, at
+    audit_tool_calls          turn_id, caller, tenant_id, tool, arguments jsonb, effect,
+                              rule_id, reason, at
+    audit_human_decisions     turn_id, tool_call_id, subject_id, approved, note, at
+    audit_rejected_decisions  turn_id, tool_call_id, subject_id, reason, at
+    audit_media               turn_id, media_id, sha256, direction, at
+    audit_turn_costs          turn_id, input_tokens, output_tokens, cached, cost_usd, at
+
+    `audit_rejected_decisions` IS A TABLE OF ITS OWN, and it is the storage half of the
+    argument in `ports/audit_sink.py#record_rejected_decision`. A refused attempt has no
+    verdict, so it has no `approved` column to fill; writing it into
+    `audit_human_decisions` would need one, and whichever value went there would assert a
+    decision the human never made. Two members over one table would put that lie back.
+
+    IT HAS NO MIGRATION YET. `migrations.py` stops at `0008_audit_turn_costs`, so this
+    one INSERT raises `UndefinedTable` against a real database until a forward-only
+    `0009_audit_rejected_decisions` is added there. Nothing calls this member yet either
+    (`DecideApproval` still raises `FourEyesError` without writing), so the gap is
+    reachable only by wiring the use case - and both halves belong to the same anchor.
+    Stated here rather than left to be discovered, because a sink member that cannot
+    write is the exact silent shape non-negotiable #6 exists to prevent.
 
 REDACTION
     Arguments carry credentials, tokens and personal data. Use a per-tool ALLOWLIST of
@@ -55,13 +71,29 @@ ConnectionFactory = Callable[[], AbstractContextManager[Any]]
 # domain/, application/ or ports/ changes to add one.
 ARGUMENT_ALLOWLIST: Mapping[str, frozenset[str]] = {}
 
+# `reason` is migration 0022's column (audit_reason_migration.py, t-f11-07). It is the
+# SENTENCE the winning rule gave - what the model is handed as the tool result on DENY and
+# what the human is asked on NEEDS_APPROVAL - and it is written here, on the same INSERT,
+# because a second statement would be a second chance for the evidence to be the half that
+# did not land.
+#
+# `tenant_id` is migration 0023's column (audit_tenant_migration.py, t-f11-21). It rides
+# the SAME INSERT for the same reason, and it is taken from the `CallerIdentity` this call
+# was decided for - never from `turns`. That table is written inside the domain
+# transaction, so a rolled-back turn has these rows and no turn row at all, and a join for
+# the tenant would drop exactly the evidence #6 exists to keep.
 _INSERT_TOOL_CALL = (
-    "INSERT INTO audit_tool_calls (turn_id, caller, tool, arguments, effect, rule_id) "
-    "VALUES (%s, %s, %s, %s, %s, %s)"
+    "INSERT INTO audit_tool_calls "
+    "(turn_id, caller, tenant_id, tool, arguments, effect, rule_id, reason) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
 )
 _INSERT_HUMAN_DECISION = (
     "INSERT INTO audit_human_decisions (turn_id, tool_call_id, subject_id, approved, note) "
     "VALUES (%s, %s, %s, %s, %s)"
+)
+_INSERT_REJECTED_DECISION = (
+    "INSERT INTO audit_rejected_decisions (turn_id, tool_call_id, subject_id, reason) "
+    "VALUES (%s, %s, %s, %s)"
 )
 _INSERT_MEDIA = (
     "INSERT INTO audit_media (turn_id, media_id, sha256, direction) VALUES (%s, %s, %s, %s)"
@@ -114,16 +146,40 @@ class PgAuditSink:
         `rule_id` travels with the row: it is the field that answers "why was this
         allowed?" six months later, and it is the only one that cannot be reconstructed
         from anything else here.
+
+        SO DOES `caller.tenant_id`, AND UNTIL t-f11-21 THERE WAS NOWHERE TO PUT IT. The
+        row could be scoped to a turn and to nothing else, and the tenant was recoverable
+        only by joining `turns` - which is written inside the domain transaction, so a
+        turn whose domain writes rolled back has these rows and no turn row to join to.
+        The tenant is taken from the identity the decision on this row was made for and
+        written on this statement; see audit_tenant_migration.py for what a NULL means.
+
+        SO DOES `decision.reason`, AND UNTIL t-f11-07 IT DID NOT. The id names the rule;
+        the reason is what the rule SAID, and the two are not the same evidence. A rule's
+        text changes, so resolving the id against `policy_rules` months later answers with
+        today's wording - which is exactly the wording that differs on the day somebody
+        edits a rule to explain an incident. The sentence is also the only part a human
+        ever read: on DENY the model got it back as the tool result, on NEEDS_APPROVAL it
+        was the ask somebody answered.
+
+        IT IS STORED VERBATIM AND IS NOT REDACTED, for the reason `record_rejected_decision`
+        gives: unlike the arguments it is written by this codebase - the grounds - not by a
+        caller. That is also why nothing here assembles a reason out of the call. The
+        arguments have their own column and their own per-tool allowlist; a reason built
+        from the payload would route a credential around that allowlist into free text no
+        redaction ever looks at, and an audit row is not a place to spill a payload.
         """
         await self._append(
             _INSERT_TOOL_CALL,
             (
                 str(turn_id),
                 caller.subject_id,
+                str(caller.tenant_id),
                 tool_name,
                 _jsonb(self._redact(tool_name, arguments)),
                 str(decision.effect.value),
                 decision.rule_id,
+                decision.reason,
             ),
         )
 
@@ -138,6 +194,29 @@ class PgAuditSink:
         await self._append(
             _INSERT_HUMAN_DECISION,
             (str(turn_id), str(tool_call_id), subject_id, approved, note),
+        )
+
+    async def record_rejected_decision(
+        self,
+        turn_id: TurnId,
+        tool_call_id: ToolCallId,
+        subject_id: str,
+        reason: str,
+    ) -> None:
+        """The attempt that was refused, on its own row and in its own table.
+
+        Same connection source and same append-only rule as every other member here
+        (CLAUDE.md non-negotiable #6): this is the ONLY evidence that the four-eyes
+        control fired, so a rollback that takes it makes an enforced rule
+        indistinguishable from one that was never wired.
+
+        `reason` is stored verbatim and is not redacted. Unlike tool arguments it is
+        written by this codebase - the grounds for the refusal - not by a caller, and it
+        is the only part of the row that answers the question the row is read for.
+        """
+        await self._append(
+            _INSERT_REJECTED_DECISION,
+            (str(turn_id), str(tool_call_id), subject_id, reason),
         )
 
     async def record_media(self, turn_id: TurnId, media: MediaRef, direction: str) -> None:

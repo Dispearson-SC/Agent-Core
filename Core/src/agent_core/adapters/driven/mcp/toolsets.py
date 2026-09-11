@@ -1,8 +1,8 @@
 """Driven adapter: MCP servers composed into the toolset.
 
 Phase:   F6
-Tasks:   docs/TASKS.md#t-f6-03
-Status:  IMPLEMENTED (t-f6-03). The schema cache is still t-f6-05; see `tool_names_for`.
+Tasks:   docs/TASKS.md#t-f6-03, docs/TASKS.md#t-f6-05
+Status:  IMPLEMENTED (t-f6-03, t-f6-05).
 Implements: part of ports/tool_provider.py - MCP IS NOT ITS OWN PORT
 
 WHY THIS IS NOT A PORT
@@ -48,6 +48,29 @@ FAILURE HANDLING - MCP IS THE FLAKIEST DEPENDENCY IN THE SYSTEM
     Swallowing discovery failures is deliberate and is the one place this module chooses
     silence over noise, so it logs at WARNING: an operator has to be able to tell "this
     server offers no tools" from "this server is down".
+
+SCHEMA CACHE (t-f6-05) - WHAT INVALIDATES AN ENTRY
+    Policy filtering (`ToolPolicy.filter_toolset`) runs on every turn via `tool_names_for`.
+    Without a cache that means every turn pays a process launch - or an HTTP handshake -
+    just to ask a question whose answer has not changed since the last turn. `_SchemaCache`
+    remembers, per server NAME, the raw (unprefixed, unfiltered) tool names it last saw
+    plus a fingerprint of the connection config that produced them.
+
+    An entry is served on a cache HIT: same server name, same fingerprint. It is treated
+    as MISSING and refreshed - one fresh discovery call, then re-cached - in exactly two
+    cases:
+      1. Nothing is cached yet for that server name.
+      2. The fingerprint (transport + command + args + url) no longer matches: the profile
+         now points that server name at a different process or endpoint, so the schema on
+         file describes something that will not actually answer.
+
+    `tool_include` / `tool_exclude` do NOT invalidate the entry and are not part of the
+    fingerprint: they are scope filters applied to the cached raw names on every read
+    (see `_is_included`), so changing them costs nothing and never triggers a spawn.
+
+    There is no time-based expiry. A schema cache with a TTL still spawns a server on a
+    schedule nobody asked for; this one is only as stale as the connection config it was
+    built from.
 """
 
 from __future__ import annotations
@@ -114,6 +137,44 @@ def _matches(patterns: tuple[str, ...], name: str) -> bool:
         name.startswith(pattern[:-1]) if pattern.endswith("*") else name == pattern
         for pattern in patterns
     )
+
+
+def _fingerprint(server: MCPServerRef) -> tuple[str, str, tuple[str, ...], str]:
+    """What a cached schema is valid FOR. Changing any of this invalidates the entry.
+
+    Deliberately excludes `tool_include`/`tool_exclude` and `result_budget_chars`: those
+    do not change what the server advertises, only what this adapter does with the
+    advertisement, so they must never force a re-discovery.
+    """
+    return (server.transport, server.command or "", server.args, server.url or "")
+
+
+@dataclass
+class _SchemaCacheEntry:
+    fingerprint: tuple[str, str, tuple[str, ...], str]
+    raw_tool_names: tuple[str, ...]
+
+
+class _SchemaCache:
+    """Per-server-name cache of raw (unprefixed) advertised tool names.
+
+    See the module docstring's "SCHEMA CACHE" section for the invalidation rule. Lives on
+    the `MCPToolProvider` instance, not at module scope: a provider is composed once
+    (F1's `composition.py`) and reused across turns, which is exactly the lifetime this
+    cache needs - and it means two providers in the same test never share state.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, _SchemaCacheEntry] = {}
+
+    def get(self, server: MCPServerRef) -> tuple[str, ...] | None:
+        entry = self._entries.get(server.name)
+        if entry is None or entry.fingerprint != _fingerprint(server):
+            return None
+        return entry.raw_tool_names
+
+    def put(self, server: MCPServerRef, raw_tool_names: tuple[str, ...]) -> None:
+        self._entries[server.name] = _SchemaCacheEntry(_fingerprint(server), raw_tool_names)
 
 
 def _is_included(server: MCPServerRef, tool_name: str) -> bool:
@@ -208,6 +269,7 @@ class MCPToolProvider:
         self._call_timeout_seconds = call_timeout_seconds
         self._discovery_timeout_seconds = discovery_timeout_seconds
         self._connect_timeout_seconds = connect_timeout_seconds
+        self._schema_cache = _SchemaCache()
 
     async def toolset_for(self, profile: AgentProfile) -> object:
         """One `AbstractToolset` carrying the local tools plus every declared server."""
@@ -231,9 +293,9 @@ class MCPToolProvider:
         the order it lists tools in, and an audit record that reshuffles between two
         identical turns is one nobody can diff.
 
-        TODO(docs/TASKS.md#t-f6-05): back this with a persisted schema cache keyed by
-        server name plus a fingerprint of the connection config, so policy filtering never
-        spawns an stdio child. Today it does, which is exactly what t-f6-05 removes.
+        Backed by `_SchemaCache` (t-f6-05): a server is only ever spawned to fill or
+        refresh a cache entry, never merely to answer this method. See the module
+        docstring's "SCHEMA CACHE" section for exactly what invalidates an entry.
         """
         names: list[str] = []
         if self._local is not None:
@@ -243,7 +305,27 @@ class MCPToolProvider:
         return tuple(names)
 
     async def _names_for_server(self, server: MCPServerRef) -> tuple[str, ...]:
+        """Prefixed, filtered names for one server - a cache hit spawns nothing.
+
+        `tool_include`/`tool_exclude` are applied here, AFTER the cache lookup/fill, so
+        that changing them never counts as a cache miss (see `_fingerprint`).
+        """
+        raw = self._schema_cache.get(server)
+        if raw is None:
+            raw = await self._discover_raw_names(server)
+            if raw is not None:
+                self._schema_cache.put(server, raw)
+        if raw is None:
+            return ()
         prefix = server_prefix(server.name)
+        return tuple(f"{prefix}_{name}" for name in raw if _is_included(server, name))
+
+    async def _discover_raw_names(self, server: MCPServerRef) -> tuple[str, ...] | None:
+        """The one place that actually spawns/connects to fill or refresh the cache.
+
+        Returns `None` on ANY failure rather than caching an empty result - a dead server
+        must be retried next turn, not permanently remembered as "offers nothing".
+        """
         try:
             async with asyncio.timeout(self._discovery_timeout_seconds):
                 advertised = await self._mcp_toolset(server).list_tools()
@@ -255,12 +337,8 @@ class MCPToolProvider:
                 server.name,
                 exc_info=True,
             )
-            return ()
-        return tuple(
-            f"{prefix}_{tool.name}"
-            for tool in sorted(advertised, key=lambda tool: tool.name)
-            if _is_included(server, tool.name)
-        )
+            return None
+        return tuple(sorted(tool.name for tool in advertised))
 
     def _mcp_toolset(self, server: MCPServerRef) -> MCPToolset[Any]:
         return MCPToolset(

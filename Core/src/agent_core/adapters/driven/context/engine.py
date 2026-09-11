@@ -1,8 +1,10 @@
 """Driven adapter: ContextEngine - the compaction ladder.
 
 Phase:   F5
-Tasks:   docs/TASKS.md#t-f5-04
+Tasks:   docs/TASKS.md#t-f5-04, docs/TASKS.md#t-f5-11
 Status:  IMPLEMENTED (t-f5-04). L1-L4 climb; the summariser behind L3/L4 is injected.
+         t-f5-11: the local estimate is CONTEXT SIZE, replaced per response and
+         lowered by a successful climb - never a running total of spend.
 Implements: ports/context_engine.py
 
 SILENT-BUG AREA. Wrong here = a bigger bill, never a red test.
@@ -553,10 +555,20 @@ class LadderContextEngine:
 
     def update_from_response(self, session: SessionRef, usage: Usage) -> None:
         """Keep the local estimate current. It is the ONLY input the trigger has whenever
-        the provider does not report `context_window_used`, which is the common case."""
-        self._estimates[session] = (
-            self._estimates.get(session, 0) + usage.input_tokens + usage.output_tokens
-        )
+        the provider does not report `context_window_used`, which is the common case.
+
+        REPLACED, NEVER ACCUMULATED (docs/TASKS.md#t-f5-11). `input_tokens` is the whole
+        prompt this response was billed for and `output_tokens` is what was appended to
+        it, so their sum is already the size of the conversation as it now stands. Adding
+        one response to the next counts every earlier turn again, once per turn that
+        follows it, and produces TOTAL SPEND - a number that only ever grows. The trigger
+        divides this by the window, so a running total crosses `trigger_fraction` once and
+        then stays across it for the rest of the session: the ladder runs on every turn,
+        rewrites the prompt prefix every turn, and re-bills the whole prompt at full price
+        every turn. That is the exact failure `domain/compaction.py` opens by naming, and
+        it would fail no test - only the invoice.
+        """
+        self._estimates[session] = usage.input_tokens + usage.output_tokens
 
     def estimated_tokens(self, session: SessionRef) -> int:
         return self._estimates.get(session, 0)
@@ -649,6 +661,12 @@ class LadderContextEngine:
             context_window=self._context_window,
             apply_rung=apply_rung,
         )
+
+        # What the trigger reads has to FALL when the ladder frees room, and it has to
+        # fall now: the next `update_from_response` is one whole model call away, and the
+        # trigger is asked again before it. Left to the accumulator alone the engine would
+        # compact, see the same number it saw before, and compact again.
+        self._estimates[session] = run.tokens_after
 
         checkpoint = self._checkpoint_for(session, climb, run, previous)
         if checkpoint is not None:

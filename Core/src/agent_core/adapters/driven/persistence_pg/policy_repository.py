@@ -1,7 +1,8 @@
 """Driven adapter: ToolPolicy over Postgres.
 
 Phase:   F1 / D2 (tenant dimension)
-Tasks:   docs/TASKS.md#t-f1-15
+Tasks:   docs/TASKS.md#t-f1-15, docs/TASKS.md#t-d2-03
+Status:  DONE (t-f1-15) / TENANT PREDICATE AND MIGRATION 0012 LANDED (t-d2-03)
 Implements: ports/tool_policy.py
 
 SILENT-BUG AREA. A hole here never fails a test.
@@ -32,6 +33,19 @@ HOW THE TABLE ABOVE ACTUALLY LANDED (migration 0004, owned by t-f1-16)
     the tenant dimension included - lives inside `definition`, so the tenant narrowing is
     carried from day 1 as the docstring demands, just as a jsonb key rather than a column.
     An absent `tenant_id` means "all tenants", exactly as a NULL column would.
+
+AND HOW THE TENANT BECAME A COLUMN (migration 0012, t-d2-03)
+    `policy_tenant_migration.py` adds the nullable `tenant_id` column this docstring asked
+    for, backfills it from the jsonb key, and indexes the expression the predicate below
+    uses. Read that module for what an existing row means and why NULL was chosen over
+    NOT NULL; the short version is that the migration RECORDS the reach those rows already
+    have rather than granting them a new one.
+
+    Two halves make the tenant dimension real, and each is inert without the other. The
+    SQL predicate stops another tenant's rows being transferred at all; `_to_rule`
+    populating `PolicyRule.tenant_id` is what lets `RuleSet.applicable` re-check them, so
+    a leaky query still grants nothing. The predicate alone would leave the domain check
+    reading a field nothing writes - which looks safe and is not.
 """
 
 from __future__ import annotations
@@ -49,7 +63,7 @@ from agent_core.domain.policy import (
     PolicyRule,
     RuleSet,
 )
-from agent_core.domain.turn import CallerIdentity
+from agent_core.domain.turn import CallerIdentity, TenantId
 
 _LOG = logging.getLogger(__name__)
 
@@ -60,9 +74,27 @@ ConnectionFactory = Callable[[], AbstractContextManager[Any]]
 # What a store failure is reported through when the caller supplies no hook of its own.
 ErrorHook = Callable[[BaseException], None]
 
+# THE TENANT A RULE BELONGS TO, READ FROM BOTH CARRIERS.
+#
+# The `tenant_id` COLUMN (migration 0012, policy_tenant_migration.py) is authoritative.
+# The jsonb key is the pre-0012 carrier and is still read, because dropping it would widen
+# every row still written in the old shape into a platform-wide rule - the exact privilege
+# widening 0012 exists to avoid, arriving through the reader instead of the migration.
+# One constant, used by the predicate and by what the query hands back, so the rows that
+# survive the WHERE clause and the tenant stamped on them can never come from different
+# expressions.
+_RULE_TENANT = "COALESCE(tenant_id, definition->>'tenant_id')"
+
+# The row shape is (rule_id, EFFECTIVE definition): the stored jsonb with the rule's
+# tenant merged over it, rather than a third column. `_to_rule` then reads every field of
+# a rule from one mapping, and the column-versus-jsonb question is answered once, in SQL,
+# instead of at each field. `jsonb_build_object` with a NULL value yields a JSON null, so
+# a rule belonging to no tenant arrives as `tenant_id: null` and reads as ALL TENANTS -
+# the same reading `domain/policy.py` gives `PolicyRule.tenant_id = None`.
 _SELECT_RULES = (
-    "SELECT rule_id, definition FROM policy_rules "
-    "WHERE definition->>'tenant_id' IS NULL OR definition->>'tenant_id' = %s"
+    f"SELECT rule_id, definition || jsonb_build_object('tenant_id', {_RULE_TENANT}) "
+    "FROM policy_rules "
+    f"WHERE {_RULE_TENANT} IS NULL OR {_RULE_TENANT} = %s"
 )
 
 _NO_RULE_REASON = (
@@ -72,6 +104,45 @@ _NO_RULE_REASON = (
 _STORE_DOWN_REASON = (
     "the policy store was unreachable, so this turn holds no rules and denies every tool."
 )
+
+
+class _UnreachableStore(RuleSet):
+    """The fail-closed snapshot, marked by its TYPE rather than by its emptiness.
+
+    WHY A TYPE AND NOT A COUNT (t-f11-06)
+        `decide` used to read `if rules.rules` to choose between the two sentences above,
+        which makes EMPTINESS the evidence of unreachability. It is not evidence of
+        anything: a reachable `policy_rules` with no rows - the state of every fresh
+        clone, before anyone has inserted a rule - produces exactly the same empty
+        snapshot, and was therefore told, and told its operator, that the database was
+        down. The verdict was right and the explanation was false, which is worse than a
+        wrong verdict in one specific way: it sends a human to check a database that is
+        fine, and hands the model a sentence about the world that is not true.
+
+        So the one place that KNOWS - `load_rules`'s exception handler, where the query
+        actually failed - records it, and `decide` reads it back. A snapshot built any
+        other way, by this adapter or by a caller, is a store that answered.
+
+    WHY IT ADDS NO FIELD, AND WHY IT IS NOT A FLAG ON THIS CLASS
+        `RuleSet` is domain and frozen (`t-d2-06` carries the tenant through it), so this
+        refinement lives in the adapter. It declares no state: an `_UnreachableStore` is
+        equal in every field to the snapshot this code already returned - no rules,
+        `default_effect=DENY`, narrowed for the same caller - so every fail-closed
+        property asserted elsewhere still holds, and only the diagnosis moved.
+
+        Storing the failure on `PgToolPolicy` instead would put per-turn state on an
+        adapter shared by every concurrent turn: one blipped load would explain every
+        other caller's honest DENY, and only under concurrency. The snapshot is already
+        the per-turn object, so the fact travels with it.
+
+        ONE CONSEQUENCE WORTH KNOWING: `RuleSet` is a dataclass, so its `__eq__` compares
+        classes as well as fields, and this snapshot is therefore NOT `==` to a plain
+        `RuleSet` holding the same values. Assert on the fields - `rules`,
+        `default_effect`, the narrowing - as the existing fail-closed tests do, rather
+        than on whole-object equality.
+    """
+
+    __slots__ = ()
 
 
 class PgToolPolicy:
@@ -87,6 +158,13 @@ class PgToolPolicy:
         A store failure is caught here, in `load_rules`, and turned into an empty
         snapshot with `default_effect=DENY`. `decide` then refuses everything from that
         snapshot alone, with no unreachability branch of its own to drift out of step.
+
+        The VERDICT is that snapshot's alone. The EXPLANATION needs one more fact, which
+        `load_rules` is the only code that holds: whether the query failed or simply
+        matched nothing. It travels as the snapshot's type (`_UnreachableStore`), so
+        `decide` still reads one object and cannot infer a failed query from an empty
+        table - t-f11-06, and the reason a fresh clone used to be told its database was
+        down.
     """
 
     def __init__(
@@ -113,7 +191,9 @@ class PgToolPolicy:
             rows = await asyncio.to_thread(self._load_sync, caller)
         except Exception as error:  # fail closed over the whole class of store failures
             self._on_error(error)
-            return RuleSet.for_caller(caller)
+            # The ONE place that knows the query failed, so it is the one place that says
+            # so. Same fields as before, a different type - see `_UnreachableStore`.
+            return _UnreachableStore.for_caller(caller)
         return RuleSet.for_caller(caller, rules=self._to_rules(rows, caller))
 
     def filter_toolset(self, rules: RuleSet, tool_names: tuple[str, ...]) -> tuple[str, ...]:
@@ -146,14 +226,30 @@ class PgToolPolicy:
         """
         matched = rules.applicable(tool_name)
         if not matched:
-            reason = _NO_RULE_REASON if rules.rules else _STORE_DOWN_REASON
+            # WHICH refusal this is comes from the snapshot's TYPE, never from how many
+            # rules it holds: a reachable, empty `policy_rules` and a store whose query
+            # failed both arrive here with nothing to match, and they are not the same
+            # state. "Unreachable" means the query failed; "no rule matched" means it
+            # succeeded and matched nothing. Both deny - t-f1-15 froze that and it is
+            # right - and each says which, in words the other does not use, because these
+            # sentences are what the model receives as the tool result and what a human
+            # reads to diagnose the refusal.
+            store_down = isinstance(rules, _UnreachableStore)
+            reason = _STORE_DOWN_REASON if store_down else _NO_RULE_REASON
             return PolicyDecision(effect=rules.default_effect, reason=reason, rule_id=None)
         winner = min(matched, key=lambda rule: EFFECT_PRECEDENCE.index(rule.effect))
         return PolicyDecision(effect=winner.effect, reason=winner.reason, rule_id=winner.rule_id)
 
     def _load_sync(self, caller: CallerIdentity) -> tuple[tuple[str, Mapping[str, Any]], ...]:
-        """The one blocking query, narrowed by tenant in SQL so a tenant never pays to
-        transfer another tenant's rules."""
+        """The one blocking query, narrowed by tenant IN SQL - never afterwards in Python.
+
+        A post-retrieval filter returns the same list on a good day and the wrong one the
+        day a second code path forgets it, and the failure is silent: a missing predicate
+        returns MORE rows, and more rows look like a more capable agent. So the narrowing
+        is in the WHERE clause, where a statement without it is visible in the statement
+        itself - see test_policy_tenant_sql.py, which asserts on the emitted SQL and not
+        only on the rows.
+        """
         with self._connect() as connection:
             rows = connection.execute(_SELECT_RULES, (str(caller.tenant_id),)).fetchall()
         return tuple((row[0], row[1]) for row in rows)
@@ -186,6 +282,18 @@ class PgToolPolicy:
         return tuple(rules)
 
     def _to_rule(self, rule_id: str, definition: Mapping[str, Any]) -> PolicyRule | None:
+        """One row to one domain rule.
+
+        `tenant_id` IS POPULATED HERE AND THAT IS NOT COSMETIC. `RuleSet.applicable`
+        re-checks the tenant on every decision so the domain survives a leaky query, and
+        that re-check reads exactly this field. Leaving it None - which is what this
+        method did before t-d2-03 - makes every stored rule read as platform-wide and
+        turns the re-check into a no-op: a predicate and a domain check both consulting a
+        field nothing writes is worse than neither, because the shape looks safe.
+
+        Absent or JSON-null means ALL TENANTS, matching `PolicyRule.tenant_id`.
+        """
+        tenant = definition.get("tenant_id")
         try:
             return PolicyRule(
                 rule_id=rule_id,
@@ -194,6 +302,7 @@ class PgToolPolicy:
                 reason=str(definition.get("reason", "")),
                 subject_roles=frozenset(definition.get("subject_roles") or ()),
                 channels=frozenset(definition.get("channels") or ()),
+                tenant_id=None if tenant is None else TenantId(str(tenant)),
             )
         except (KeyError, TypeError, ValueError) as error:
             self._on_error(error)

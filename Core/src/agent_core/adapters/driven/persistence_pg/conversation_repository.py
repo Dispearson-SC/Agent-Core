@@ -1,10 +1,57 @@
 """Driven adapter: ConversationStore over Postgres.
 
 Phase:   F1 (history) / F5 (checkpoints) / F10 (reasoning)
-Tasks:   docs/TASKS.md#t-f1-13, docs/TASKS.md#t-f1-18, docs/TASKS.md#t-f10-04
+Tasks:   docs/TASKS.md#t-f1-13, docs/TASKS.md#t-f1-18, docs/TASKS.md#t-f10-04,
+         docs/TASKS.md#t-f1-22
 Implements: ports/conversation_store.py
-Status:  load_history(), append_request(), append_reasoning() and load_reasoning() DONE.
-         Everything else PSEUDO-CODE, out of those tasks' scope.
+Status:  load_history(), append_messages(), append_request(), append_reasoning(),
+         load_reasoning() and append_outcome() DONE. save_checkpoint() and
+         latest_checkpoint() remain PSEUDO-CODE, F5's scope.
+
+HOW A MESSAGE IS ENCODED, AND WHY IT IS NOT OUR FORMAT (t-f1-24)
+    `messages.content` holds ONE Pydantic AI `ModelMessage`, serialised by Pydantic AI's
+    own `ModelMessagesTypeAdapter`. `messages.role` keeps the vocabulary it already had -
+    'user' / 'assistant' - because `transcript_migration.py`'s `transcript_entries` view
+    branches on that exact string to decide USER_MESSAGE versus AGENT_MESSAGE. The
+    encoding's own discriminator is the `kind` INSIDE the payload, which is where the
+    library keeps it and where `decode_message` reads it from; the column is not a second
+    copy of that answer.
+
+    WHAT A TRANSCRIPT READER NOW SEES IN `payload.content`, WHICH IS A REAL CONSEQUENCE
+        The view projects `content` verbatim, so a transcript entry's payload carries a
+        serialised `ModelMessage` rather than `{"text": ...}`. That is strictly more than
+        it carried before and nothing user-visible reads a field that moved - but a
+        `ModelResponse` can carry a `ThinkingPart`, and reasoning is ADMIN-only
+        (t-f10-04). Nothing writes a `ModelResponse` to this table today; the day
+        something does, the view needs a projection that names the parts it may show
+        rather than handing the blob over. Recorded here because the guard has to be
+        written before that writer exists, not after.
+
+    THIS COLUMN USED TO HOLD A DIFFERENT THING AND NOTHING NOTICED
+        It held `{"role": "user", "content": {"text": ...}}`, an OpenAI-wire shape no
+        reader in this tree consumes. `PydanticAgentRunner._as_message_history` accepts
+        `ModelMessage` values and refuses everything else by name; so do the compaction
+        ladder, `_unpaired` and `_pending_tool_calls`. `ports/conversation_store.py` says
+        `load_history` returns "the provider-shaped message list" and D7 says this port
+        MIRRORS Pydantic AI's vocabulary rather than inventing a parallel one. The store
+        was the only module speaking a third language, and the first turn of the operator
+        console was the first code in the build ever to read what it had written.
+
+    WHAT pydantic-ai 2.31.1 ACTUALLY SHIPS (checked, not assumed)
+        `pydantic_ai.messages.ModelMessagesTypeAdapter` is a `TypeAdapter[list[
+        ModelMessage]]` - the plural is the only one there is, so a single message is
+        dumped and validated as a one-element list. `dump_python(..., mode="json")`
+        yields plain JSON values psycopg can hand to a `jsonb` column, and
+        `validate_python` reverses it exactly: a `ToolCallPart` and the `ToolReturnPart`
+        answering it come back with the same `tool_call_id`, byte for byte, which is what
+        CLAUDE.md non-negotiable #5 depends on. There is deliberately no hand-written
+        codec here: a private encoder for a third-party message type breaks silently on
+        upgrade, and the library already owns the round trip it is asked to guarantee.
+
+    REASONING IS STILL NOT A MESSAGE (t-f10-04, and see below)
+        A `ThinkingPart` is ADMIN-only and lives in `turn_reasoning`. Nothing writes one
+        here, and nothing should: `messages` is what `load_history` returns to the model
+        and the raw material of the USER transcript.
 
 TABLES
     turns              (turn_id pk, session_id, tenant_id, profile_id, state,
@@ -72,12 +119,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import fields, is_dataclass
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from typing import Any
 
 import psycopg
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    UserPromptPart,
+)
 
 from agent_core.adapters.driven.persistence_pg.migrations import Migration
 from agent_core.domain.compaction import CompactionCheckpoint
@@ -88,7 +143,13 @@ from agent_core.domain.transcript import (
     EntryKind,
     TranscriptEntry,
 )
-from agent_core.domain.turn import SessionRef, TurnId, TurnOutcome, TurnRequest
+from agent_core.domain.turn import (
+    SessionRef,
+    TurnId,
+    TurnOutcome,
+    TurnRequest,
+    UserInput,
+)
 
 # WHERE (session_id) + ORDER BY (seq) - the exact two columns `ix_messages_session_seq`
 # covers (migrations.py, migration 0002_messages). Kept as a module constant, not
@@ -132,9 +193,13 @@ _INSERT_TURN_SQL = """
 # computed in Python and raced. D19 gives one turn at a time per session
 # (partition_concurrency=1, keyed by session id), but a store must not depend on the
 # caller's concurrency model to stay correct.
-_APPEND_USER_MESSAGE_SQL = """
+#
+# `role` is the message's own `kind`, supplied rather than hard-coded: a response row is
+# the same row shape as a request row, and a literal 'user' here is how the column came to
+# disagree with what `content` actually held.
+_APPEND_MESSAGE_SQL = """
     INSERT INTO messages (session_id, seq, role, content)
-    SELECT %s, COALESCE(MAX(seq), 0) + 1, 'user', %s
+    SELECT %s, COALESCE(MAX(seq), 0) + 1, %s, %s
     FROM messages
     WHERE session_id = %s
 """
@@ -161,6 +226,18 @@ _LOAD_REASONING_SQL = """
 """
 
 _TURN_STATE_STARTED = "started"
+_TURN_STATE_SUSPENDED = "suspended"
+_TURN_STATE_FINISHED = "finished"
+
+# An UPDATE, not an INSERT: the row was already created by `append_request` (step 2 of
+# StartTurn always runs before step 7). Being an UPDATE is also what makes a repeated
+# append_outcome for the same turn_id idempotent for free - it overwrites the one row
+# rather than ever adding a second, with no ON CONFLICT clause needed.
+_APPEND_OUTCOME_SQL = """
+    UPDATE turns
+    SET state = %s, pending = %s, result = %s, finished_at = %s
+    WHERE turn_id = %s
+"""
 
 
 class UnversionedProfileError(ValueError):
@@ -170,6 +247,77 @@ class UnversionedProfileError(ValueError):
     passed through `ProfileVersionRegistry` and still carries version 0. Both mean the
     turn row could only claim a version it cannot prove, and D20's whole value is that
     the number on the row can be trusted."""
+
+
+# What `messages.role` says for each side of a conversation. NOT Pydantic AI's own `kind`
+# ('request'/'response'), and the difference is load-bearing rather than cosmetic:
+# `transcript_migration.py`'s `transcript_entries` view reads this exact column -
+# `CASE WHEN m.role = 'user' THEN 'user_message' ELSE 'agent_message' END` - so a row
+# written under any other word becomes an AGENT message in the USER-facing transcript.
+# Writing 'request' here would have relabelled every customer's own sentence as something
+# the agent said, on a read path with no test between it and a person.
+#
+# Nothing needs the column to discriminate the ENCODING: `decode_message` reads the `kind`
+# inside the payload, which is where the library keeps it.
+_ROLE_USER = "user"
+_ROLE_ASSISTANT = "assistant"
+
+
+def encode_message(message: ModelMessage) -> tuple[str, str]:
+    """One `ModelMessage` as `(role, content json)` for a `messages` row.
+
+    Pydantic AI's adapter does the work - see HOW A MESSAGE IS ENCODED in the module
+    docstring. The plural adapter is the only one the library ships, so the message goes
+    in and comes out inside a one-element list; that is the library's shape, not a
+    workaround for one.
+
+    `mode="json"` rather than the default, because the value is about to be handed to
+    psycopg as `jsonb`: the default mode leaves `datetime` and `Decimal` as Python
+    objects, and `json.dumps` would then refuse them.
+
+    The role is the transcript view's discriminator and keeps the vocabulary it already
+    had - see `_ROLE_USER` above for why that is not a style choice.
+    """
+    payload = ModelMessagesTypeAdapter.dump_python([message], mode="json")[0]
+    role = _ROLE_USER if isinstance(message, ModelRequest) else _ROLE_ASSISTANT
+    return role, json.dumps(payload)
+
+
+class UnpersistableInputError(NotImplementedError):
+    """A `UserInput` carries something this store has no settled encoding for.
+
+    Today that is `media`: inbound media has no wired path at all (see the INBOUND note in
+    `adapters/driven/agent_pydantic/runner.py`), so nothing produces a `UserInput` with a
+    `MediaRef` on it. The day something does, a `UserPromptPart` can carry the resolved
+    content alongside the text - but resolving a `MediaRef` needs `MediaStore`, which this
+    store does not hold and must not grow a second copy of.
+
+    REFUSING RATHER THAN DROPPING. Writing the text and silently discarding the reference
+    would leave a transcript in which the customer never sent the photo they are asking
+    about, and nothing anywhere would report it. That is the shape of defect this whole
+    anchor exists to answer.
+    """
+
+
+def _user_message(user_input: UserInput) -> ModelMessage:
+    """The inbound turn as the one message Pydantic AI prepends for it."""
+    if user_input.media:
+        raise UnpersistableInputError(
+            f"UserInput carries {len(user_input.media)} media reference(s) and this store "
+            "has no encoding for one. Persisting the text alone would lose the reference "
+            "silently; see UnpersistableInputError. docs/TASKS.md#t-f1-24."
+        )
+    return ModelRequest(parts=[UserPromptPart(content=user_input.text)])
+
+
+def decode_message(payload: object) -> ModelMessage:
+    """One `messages.content` value back into the `ModelMessage` it was written from.
+
+    The stored `role` is NOT consulted. Pydantic AI discriminates on the `kind` INSIDE the
+    payload, and asking the column instead would put a second answer to one question in a
+    place where the two can be edited apart.
+    """
+    return ModelMessagesTypeAdapter.validate_python([payload])[0]
 
 
 def _jsonable(value: object) -> object:
@@ -186,6 +334,11 @@ def _jsonable(value: object) -> object:
         return value.value
     if isinstance(value, Decimal):
         return str(value)
+    if isinstance(value, datetime):
+        # ISO 8601, not `str(...)`: the two agree for a timezone-aware value but not
+        # always for a naive one, and a stored terminal-state timestamp must parse back
+        # unambiguously rather than merely look plausible in a log line.
+        return value.isoformat()
     if isinstance(value, (frozenset, set)):
         # Sorted so that two renders of the same profile are byte-identical; a snapshot
         # that reorders between runs looks like a change that never happened.
@@ -240,6 +393,85 @@ async def apply_profile_snapshot_migration(app_conninfo: str) -> None:
     await asyncio.to_thread(_apply_profile_snapshot_migration_sync, app_conninfo)
 
 
+# t-f1-22's own migration, following PROFILE_SNAPSHOT_MIGRATION's precedent (0009, above)
+# and TURN_REASONING_MIGRATION's (0015, reasoning_migration.py): a dedicated Migration
+# object next to the code that needs it, rather than growing migrations.py for every
+# anchor that adds a column. Id 0017 is the next free slot after 0016
+# (transcript_migration.py) - see the migration-id table in docs/TASKS.md.
+#
+# Both columns are nullable and stay that way: I2 in domain/turn.py makes `pending` and
+# `result` mutually exclusive by construction, so a SUSPENDED row legitimately has a NULL
+# `result` and a FINISHED row legitimately has an empty `pending` array. There is no
+# "unassigned" value to backfill the way PROFILE_SNAPSHOT_MIGRATION's SET NOT NULL guards
+# against - both shapes are valid terminal states, not missing data.
+TURN_OUTCOME_MIGRATION = Migration(
+    id="0017_turn_outcome",
+    sql="""
+    ALTER TABLE turns ADD COLUMN IF NOT EXISTS pending JSONB;
+    ALTER TABLE turns ADD COLUMN IF NOT EXISTS result JSONB;
+    ALTER TABLE turns ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
+    """,
+)
+
+
+def _apply_turn_outcome_migration_sync(app_conninfo: str) -> None:
+    with psycopg.connect(app_conninfo, autocommit=True) as conn:
+        applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE id = %s",
+            (TURN_OUTCOME_MIGRATION.id,),
+        ).fetchone()
+        if applied is not None:
+            return
+        conn.execute(TURN_OUTCOME_MIGRATION.sql)
+        conn.execute(
+            "INSERT INTO schema_migrations (id) VALUES (%s)", (TURN_OUTCOME_MIGRATION.id,)
+        )
+
+
+async def apply_turn_outcome_migration(app_conninfo: str) -> None:
+    """Apply `TURN_OUTCOME_MIGRATION`, once, after `migrations.run_migrations`.
+
+    Postgres transactions are sync (D13); the blocking work runs in a thread.
+    """
+    await asyncio.to_thread(_apply_turn_outcome_migration_sync, app_conninfo)
+
+
+# t-f1-24's own migration, on id 0024 - the last slot docs/TASKS.md still holds free.
+# Discovery in migrations.py picks this object up from the module top level, so nothing
+# has to list it.
+#
+# 0023 WAS ALREADY SPENT, AND THE GUARD COULD NOT SEE IT. docs/TASKS.md lists 0023 as
+# unallocated, but `audit_tenant_migration.py` had taken `0023_audit_tool_calls_tenant`
+# without writing it there - the same "taken outside this table" defect the table records
+# for 0017. `DuplicateMigrationIdError` compares WHOLE ids, so `0023_audit_tool_calls_tenant`
+# and a second `0023_...` differ as strings and coexist silently; the collision the table
+# exists to prevent is on the NUMBER, and nothing checks that. Reported rather than fixed
+# here: the id table is docs/TASKS.md's, and this anchor does not own it.
+#
+# IT DELETES RATHER THAN TRANSLATES, AND THAT IS THE SAFE DIRECTION HERE
+#     Rows written before this anchor hold `{"text": ..., "media": [...]}` under role
+#     'user' - the shape `_as_message_history` refuses. Every one of them was written by a
+#     turn that then CRASHED on reading it back, because `append_request` writes before
+#     `load_history` reads; there is no session anywhere whose conversation is worth
+#     preserving, and no turn ever completed on top of one.
+#
+#     Translating them would mean hand-writing Pydantic AI's serialised message JSON in
+#     SQL - a second, unversioned copy of a third-party format, in the one place nobody
+#     would think to update when the library changes it. That is the maintenance burden
+#     `encode_message` exists to avoid, and it would be taken on to rescue two crashed
+#     turns.
+#
+#     The predicate is the encoding itself, not a date or an id range: a row whose content
+#     has no `kind` is not a Pydantic AI message, and after this migration every row has
+#     one. Re-running it therefore deletes nothing, which is what makes it idempotent.
+MESSAGE_ENCODING_MIGRATION = Migration(
+    id="0024_messages_model_message_encoding",
+    sql="""
+    DELETE FROM messages WHERE content->>'kind' IS NULL;
+    """,
+)
+
+
 class PgConversationStore:
     """Postgres adapter for `ports.conversation_store.ConversationStore`.
 
@@ -260,8 +492,13 @@ class PgConversationStore:
         self._conninfo = conninfo
         self._profiles: Mapping[str, AgentProfile] = {} if profiles is None else profiles
 
-    async def load_history(self, session: SessionRef) -> object:
+    async def load_history(self, session: SessionRef) -> list[ModelMessage]:
         """F1 base case: every message for the session, in `seq` order.
+
+        Returns Pydantic AI `ModelMessage` values, which is what the port means by "the
+        provider-shaped message list" and what every reader of a history in this tree is
+        typed for. See HOW A MESSAGE IS ENCODED in the module docstring for what this used
+        to return instead and why nothing caught it.
 
         No checkpoint folding yet - `latest_checkpoint` is an F5 stub below, so there is
         nothing to fold. The F5 extension of this method adds step 1 of the module
@@ -269,10 +506,58 @@ class PgConversationStore:
         """
         return await asyncio.to_thread(self._load_history_sync, session)
 
-    def _load_history_sync(self, session: SessionRef) -> list[dict[str, object]]:
+    def _load_history_sync(self, session: SessionRef) -> list[ModelMessage]:
         with psycopg.connect(self._conninfo) as conn:
             rows = conn.execute(_LOAD_HISTORY_SQL, (session.session_id,)).fetchall()
-        return [{"role": role, "content": content} for role, content in rows]
+        # `role` is read past deliberately: the payload carries its own discriminator.
+        return [decode_message(content) for _role, content in rows]
+
+    async def append_messages(
+        self, session: SessionRef, messages: Sequence[ModelMessage]
+    ) -> None:
+        """Persist model messages for a session, in the order given, as one transaction.
+
+        DELIBERATELY NOT ON `ports.conversation_store.ConversationStore`. The port speaks
+        domain types, and `ModelMessage` is Pydantic AI's - putting this on the Protocol
+        would drag the library into every use case and every fake, which is the one thing
+        D7 says the port exists to prevent. It is the adapter's own write path, and
+        `append_request` below is expressed in terms of it so there is exactly one place
+        that turns a message into a row.
+
+        ALL OF THEM OR NONE OF THEM - CLAUDE.md non-negotiable #5. A tool call and the
+        return answering it are two messages, and a crash between the two would leave a
+        history the provider rejects with a 400 on some later turn, far from here. One
+        transaction makes that unrepresentable rather than unlikely.
+
+        ASYNC (D13): a database write; the sync psycopg calls run in a thread.
+        """
+        await asyncio.to_thread(self._append_messages_sync, session, tuple(messages))
+
+    def _append_messages_sync(
+        self, session: SessionRef, messages: tuple[ModelMessage, ...]
+    ) -> None:
+        if not messages:
+            return
+        with psycopg.connect(self._conninfo) as conn:
+            self._write_messages(conn, session, messages)
+
+    def _write_messages(
+        self,
+        conn: psycopg.Connection[Any],
+        session: SessionRef,
+        messages: tuple[ModelMessage, ...],
+    ) -> None:
+        """The rows, on an already-open connection, so a caller can widen the transaction.
+
+        `append_request` needs the turn row and the first message to land together, which
+        is only true if both statements run on the same connection.
+        """
+        for message in messages:
+            role, content = encode_message(message)
+            conn.execute(
+                _APPEND_MESSAGE_SQL,
+                (session.session_id, role, content, session.session_id),
+            )
 
     async def append_request(self, turn_id: TurnId, request: TurnRequest) -> None:
         """Persist the turn row and the inbound message BEFORE the model runs.
@@ -286,7 +571,10 @@ class PgConversationStore:
         traceback no longer names the turn.
         """
         profile = self._resolve_profile(request.profile_id)
-        await asyncio.to_thread(self._append_request_sync, turn_id, request, profile)
+        message = _user_message(request.input)
+        await asyncio.to_thread(
+            self._append_request_sync, turn_id, request, profile, message
+        )
 
     def _resolve_profile(self, profile_id: str) -> AgentProfile:
         profile = self._profiles.get(profile_id)
@@ -303,7 +591,11 @@ class PgConversationStore:
         return profile
 
     def _append_request_sync(
-        self, turn_id: TurnId, request: TurnRequest, profile: AgentProfile
+        self,
+        turn_id: TurnId,
+        request: TurnRequest,
+        profile: AgentProfile,
+        message: ModelMessage,
     ) -> None:
         # One transaction (no autocommit): a turn row without its message, or the reverse,
         # is a half-recorded turn, and the ordering rule this method exists to serve is
@@ -321,14 +613,7 @@ class PgConversationStore:
                     json.dumps(profile_snapshot(profile)),
                 ),
             )
-            conn.execute(
-                _APPEND_USER_MESSAGE_SQL,
-                (
-                    request.session.session_id,
-                    json.dumps(_jsonable(request.input)),
-                    request.session.session_id,
-                ),
-            )
+            self._write_messages(conn, request.session, (message,))
 
     async def append_reasoning(
         self, turn_id: TurnId, session: SessionRef, content: str
@@ -392,9 +677,34 @@ class PgConversationStore:
         )
 
     async def append_outcome(self, turn_id: TurnId, outcome: TurnOutcome) -> None:
-        """PSEUDO-CODE - out of t-f1-13's scope. Persist the outcome, including a
-        SUSPENDED one, so a suspended turn survives a crash."""
-        raise NotImplementedError("PgConversationStore.append_outcome: pending")
+        """Persist the turn's terminal state - SUSPENDED or FINISHED alike (t-f1-22).
+
+        `StartTurn` step 7 awaits this on EVERY turn, so a suspended turn is exactly as
+        durable as a finished one: the process may die while a human takes three days to
+        answer, and `outcome.pending` - not just the fact that something is pending - is
+        what makes the turn resumable afterwards (see `PendingRequest.tool_call_id`'s own
+        docstring on why it must round-trip verbatim).
+
+        ASYNC (D13): a database write; the sync psycopg call runs in a thread.
+        """
+        await asyncio.to_thread(self._append_outcome_sync, turn_id, outcome)
+
+    def _append_outcome_sync(self, turn_id: TurnId, outcome: TurnOutcome) -> None:
+        finished_at = outcome.result.finished_at if outcome.result is not None else None
+        result_json = (
+            json.dumps(_jsonable(outcome.result)) if outcome.result is not None else None
+        )
+        with psycopg.connect(self._conninfo) as conn:
+            conn.execute(
+                _APPEND_OUTCOME_SQL,
+                (
+                    _TURN_STATE_SUSPENDED if outcome.is_suspended else _TURN_STATE_FINISHED,
+                    json.dumps(_jsonable(outcome.pending)),
+                    result_json,
+                    finished_at,
+                    turn_id,
+                ),
+            )
 
     async def save_checkpoint(self, checkpoint: CompactionCheckpoint) -> None:
         """PSEUDO-CODE - F5. Append-only: INSERT, never UPDATE. Chain via

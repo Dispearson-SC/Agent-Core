@@ -70,7 +70,13 @@ from dataclasses import dataclass
 
 from agent_core.domain.media import MediaDelivery, MediaRef
 from agent_core.domain.profile import AgentProfile
-from agent_core.domain.turn import SessionRef, ToolCallId, TurnId, TurnOutcome
+from agent_core.domain.turn import (
+    CallerIdentity,
+    SessionRef,
+    ToolCallId,
+    TurnId,
+    TurnOutcome,
+)
 from agent_core.ports.agent_runner import AgentRunner, ToolResolution
 from agent_core.ports.audit_sink import AuditSink
 from agent_core.ports.conversation_store import ConversationStore
@@ -145,17 +151,41 @@ class ResumeTurn:
         session: SessionRef,
         profile_id: str,
         resolutions: tuple[ToolResolution, ...],
+        *,
+        caller: CallerIdentity,
     ) -> TurnOutcome:
         """Feed the human's answers back into a suspended turn.
 
         WHY IT IS ASYNC (D13): it awaits the store, possibly the media store, and then the
         model through `AgentRunner.resume` - the longest await in the system.
 
+        WHOSE POLICY THE CONTINUATION IS JUDGED BY - THE `caller` SEAT (docs/TASKS.md#t-f3-16)
+            A resume is not one tool call. The call a human authorised is the FIRST of
+            them, and the model may ask for more on the same continuation;
+            `ToolPolicy.load_rules` takes a `CallerIdentity`, so without one the runner can
+            attach no policy check and no audit write and every later call runs unwatched.
+            The port grew the seat, and a use case with nowhere to put it would only move
+            the hole up a layer.
+
+            IT IS THE TURN'S OWN CALLER, AND IT IS NOT THE APPROVING HUMAN. The identity
+            that must be enforced is whoever the turn belongs to - the `TurnRequest.caller`
+            the turn started from - because those are the permissions the model is acting
+            under, and they were the permissions before the suspension too. Reaching for
+            the approver instead would widen one identity into another, which is CLAUDE.md
+            non-negotiable #9's whole subject, and it would hand the continuation the
+            REVIEWER's rules: an operator approving one call would silently lend the agent
+            everything else they may do. `_step_resume` (adapters/driving/workflow) is the
+            caller that supplies it, out of the request the workflow already holds.
+
+            KEYWORD-ONLY, matching the port. Appended positionally it would bind to
+            `resolutions` at an un-updated call site and fail far from the mistake.
+
         WHAT THIS METHOD MUST NEVER DO
             - Loop. A resumed turn may suspend AGAIN; the outcome goes back untouched and
               the workflow decides what to do with it.
             - Regenerate a `tool_call_id`.
             - Run the same resolved tool call twice.
+            - Derive `caller` from anything. It arrives, or the call does not happen.
         """
         if not resolutions:
             raise ValueError(
@@ -188,7 +218,9 @@ class ResumeTurn:
         # STEP 4 - RESUME. STEP 5 - PERSIST. A suspended outcome is persisted exactly like
         # a finished one; the process may die while the next human takes three days.
         history = await self._store.load_history(session)
-        outcome = await self._runner.resume(turn_id, profile, history, prepared)
+        outcome = await self._runner.resume(
+            turn_id, profile, history, prepared, caller=caller, session=session
+        )
         await self._store.append_outcome(turn_id, outcome)
 
         # Recorded AFTER the outcome is persisted, never before. A pair marked resolved

@@ -1,9 +1,10 @@
 """Driven adapter: MediaStore over the filesystem.
 
 Phase:   F7
-Tasks:   docs/TASKS.md#t-f7-04
+Tasks:   docs/TASKS.md#t-f7-04, docs/TASKS.md#t-f7-10
 Status:  DONE - content-addressed writes, deduplication, and a signed_url that refuses
-         while delivery is BYTES. tests/unit/test_media_fs.py.
+         while delivery is BYTES. tests/unit/test_media_fs.py, and the type that now
+         travels with the URL in tests/unit/test_media_signed_url.py.
 Implements: ports/media_store.py
 
 LAYOUT
@@ -56,6 +57,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from agent_core.domain.media import MediaDelivery, MediaId, MediaKind, MediaRef
+from agent_core.ports.media_store import SignedMedia
 
 __all__ = [
     "FilesystemMediaStore",
@@ -144,12 +146,19 @@ class FilesystemMediaStore:
         """Resolve to bare bytes. Raises `UnknownMediaError` when nothing is stored."""
         return await asyncio.to_thread(self._get_sync, media_id)
 
-    async def signed_url(self, media_id: MediaId, *, ttl_seconds: int = 300) -> str:
-        """Issue a short-lived URL for one medium, or refuse.
+    async def signed_url(self, media_id: MediaId, *, ttl_seconds: int = 300) -> SignedMedia:
+        """Issue a short-lived URL for one medium, together with what it points at.
 
         The refusal comes first, before the medium is even looked up: whether a third
         party may fetch this file at all is a policy question, and answering it after a
         successful lookup would make an unknown id the more private outcome.
+
+        THE PATH DOES NOT CHANGE, AND THAT IS THE POINT (t-f7-10). The obvious way to let
+        a caller type the provider part is to put an extension - or the uploader's
+        filename - back into the signed path. That is the traversal and the overwrite
+        this store was content-addressed to remove. The sidecar already holds `kind` and
+        `mime_type`, so the type rides back BESIDE the URL instead of inside it, and the
+        path stays a bare digest.
         """
         if self._delivery is not MediaDelivery.SIGNED_URL:
             raise SignedUrlNotPermittedError(
@@ -162,13 +171,14 @@ class FilesystemMediaStore:
         if self._base_url is None:  # pragma: no cover - the constructor already refused
             raise MediaStoreError("no base_url configured for SIGNED_URL delivery")
 
-        digest = await asyncio.to_thread(self._resolved_digest_sync, media_id)
+        ref = await asyncio.to_thread(self._resolved_ref_sync, media_id)
+        digest = str(ref.media_id)
         expires = int(datetime.now(tz=UTC).timestamp()) + ttl_seconds
         signature = hmac.new(
             self._signing_key, f"{digest}:{expires}".encode(), hashlib.sha256
         ).hexdigest()
         query = urlencode({"expires": expires, "sig": signature})
-        return f"{self._base_url}/{digest}?{query}"
+        return SignedMedia(url=f"{self._base_url}/{digest}?{query}", ref=ref)
 
     def _blob_path(self, digest: str) -> Path:
         return self._root / digest[:2] / digest
@@ -218,6 +228,19 @@ class FilesystemMediaStore:
         if not self._blob_path(digest).is_file():
             raise UnknownMediaError(f"no payload stored under {digest}")
         return digest
+
+    def _resolved_ref_sync(self, media_id: MediaId) -> MediaRef:
+        """The stored reference for an id whose payload is really on disk.
+
+        The blob is checked before the sidecar so that a missing file and an id this
+        store never issued fail the same way - a signed URL pointing at nothing would be
+        handed to the provider and fail remotely instead.
+        """
+        digest = self._resolved_digest_sync(media_id)
+        meta = self._meta_path(digest)
+        if not meta.is_file():  # pragma: no cover - put writes both or neither
+            raise UnknownMediaError(f"no metadata stored for {digest}")
+        return self._ref_from_meta(digest, meta)
 
     def _get_sync(self, media_id: MediaId) -> bytes:
         return self._blob_path(self._resolved_digest_sync(media_id)).read_bytes()

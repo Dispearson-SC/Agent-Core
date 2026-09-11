@@ -41,6 +41,38 @@ MEDIA IS NOT BUFFERED YET
     `UserInput.media` exists for F7, which has not landed. Every message reconstructed
     off this table carries `media=()`; buffering media references is out of this
     anchor's scope, left for whichever F7 anchor extends it.
+
+WHY EVERY STATEMENT CARRIES tenant_id - the tenant boundary
+    A `SessionId` is unique only WITHIN a tenant. `append` always stored the tenant, but
+    `drain` deleted on `session_id` alone, so two tenants both using the session id
+    `s-1` drained each other's buffered sentences into their own turn: one customer's
+    message answered inside another customer's conversation.
+
+    Every statement in this module now names BOTH keys, and the sole reader takes them
+    together off one `SessionRef` (`_session_key`) rather than accepting a loose pair - a
+    filter a caller can forget is not a boundary. Same class as `t-d2-06` (a `RuleSet`
+    that recorded no tenant) and `t-f8-02` (a `KnowledgeBase` told to filter on a value
+    its contract never carried), closed the same way on purpose: the tenant travels with
+    the thing it scopes.
+
+    It has to be caught by an assertion rather than by a type or a review, because a
+    missing predicate returns MORE rows, not fewer - the query succeeds, the turn runs,
+    and nothing anywhere reports it. That is
+    `tests/integration/test_pending_input_repository.py`, and it is the only test in the
+    tree that gives two tenants the SAME session id, which is what makes the broken and
+    the fixed statement distinguishable at all.
+
+INDEX - STILL LEADING ON session_id, AND WHY
+    `ix_pending_inputs_session_id` is `(session_id, id)`. It still serves the drain
+    correctly, as an index scan on `session_id` with `tenant_id` re-checked on the heap;
+    correctness does not depend on it. It SHOULD lead on `tenant_id` to match the
+    knowledge table (`0013`) and to keep one tenant's buffer out of another's scan, and
+    that is a new `Migration` in this module - `0011` is already recorded in
+    `schema_migrations` on live databases, so rewriting its SQL in place would silently
+    never run. It is not done here because every id in the pre-allocated table at the end
+    of `docs/TASKS.md` is spent (`0010`-`0016`) and `0017` was taken outside it; picking
+    "the next free id" while other agents run in parallel is the exact collision that
+    table exists to prevent. Allocate an id there first.
 """
 
 from __future__ import annotations
@@ -76,10 +108,23 @@ _APPEND_SQL = """
 
 # Kept as a module constant, not inlined, so the integration test can force the exact
 # same statement on its own connection to simulate a crash mid-drain - see
-# test_pending_input.py.
+# test_pending_input.py. Its parameters are `_session_key(session)`, in that order: a
+# test that binds only the session id is testing a statement this module does not issue.
 _DRAIN_SQL = """
-    DELETE FROM pending_inputs WHERE session_id = %s RETURNING id, text
+    DELETE FROM pending_inputs
+    WHERE tenant_id = %s AND session_id = %s
+    RETURNING id, text
 """
+
+
+def _session_key(session: SessionRef) -> tuple[str, str]:
+    """The buffer's full row key: `(tenant_id, session_id)`, in statement order.
+
+    Both predicates come off one `SessionRef` here so no call site can bind one key and
+    forget the other. A `SessionId` alone identifies nothing: it is unique only within a
+    tenant.
+    """
+    return (session.tenant_id, session.session_id)
 
 
 def _apply_pending_input_migration_sync(app_conninfo: str) -> None:
@@ -135,6 +180,10 @@ class PgPendingInputBuffer:
         buffer as part of the same statement (see the module docstring for why that is
         one `DELETE ... RETURNING` rather than a read followed by a delete).
 
+        Scoped to `session.tenant_id` AND `session.session_id`, never the session id
+        alone: session ids are unique only within a tenant, so a session-only predicate
+        hands one tenant's buffered messages to another tenant's turn.
+
         Empty when nothing is buffered - the NORMAL case for a session with no turn
         currently coalescing, not an error the caller must guard against.
         """
@@ -142,6 +191,6 @@ class PgPendingInputBuffer:
 
     def _drain_sync(self, session: SessionRef) -> tuple[UserInput, ...]:
         with psycopg.connect(self._conninfo) as conn:
-            rows = conn.execute(_DRAIN_SQL, (session.session_id,)).fetchall()
+            rows = conn.execute(_DRAIN_SQL, _session_key(session)).fetchall()
         ordered = sorted(rows, key=lambda row: row[0])
         return tuple(UserInput(text=text) for _, text in ordered)

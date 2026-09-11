@@ -45,6 +45,13 @@ THE ANSWER IS UNTRUSTED CONTENT - CLAUDE.md non-negotiable 10
     imported from the runner rather than re-typed here, because a delimiter that drifts
     between two modules is a boundary the model cannot see.
 
+    `read_answer` is ON THE PORT (docs/TASKS.md#t-f9-09), not an extra this class happened
+    to grow. It was an extra once, and so was `A2AAgentMailbox`'s, which meant application
+    code had to name a concrete adapter to redeem a handle `ask` had given it - the port
+    cut leaking. The wrapping is part of that contract rather than a detail of this file:
+    `ports/agent_mailbox.py` requires every implementation to return the answer wrapped,
+    so no caller typed on the port can be handed raw peer bytes.
+
     The stored row keeps the peer's bytes verbatim and the wrapper is applied on read.
     Wrapping on write would make the audit trail disagree with what the peer actually
     said, and it would double-wrap the day a second reader is added.
@@ -301,6 +308,9 @@ class PgAgentMailbox:
 
     async def read_answer(self, correlation_id: str) -> str | None:
         """The peer's answer, WRAPPED as untrusted content, or None if it has not answered.
+
+        `ports.agent_mailbox.AgentMailbox.read_answer` - the other half of `ask`, and the
+        port is where the wrapping is required rather than here (t-f9-09).
 
         Never returns the raw bytes. The stored row keeps them verbatim for the audit
         trail; every path that leads to a model goes through `wrap_peer_answer`.

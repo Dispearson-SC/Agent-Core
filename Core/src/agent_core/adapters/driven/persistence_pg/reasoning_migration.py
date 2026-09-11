@@ -47,17 +47,37 @@ WHY THE TABLE CARRIES ITS OWN tenant_id
     applies hardest here: reasoning is the most sensitive row in the transcript, and a
     guessed or reused session id must not be enough to read one.
 
-RETENTION IS A SEPARATE DECISION AND IS STILL OPEN
-    Reasoning traces are bulky and hold guesses about a user that were never said out
-    loud; storing them forever is a liability, not an asset. `created_at` is indexed so a
-    retention sweep is a range delete rather than a table scan, but WHAT the window is,
-    is `docs/TASKS.md#t-f10-05` and belongs in `docs/DECISIONS.md`. This migration does
-    not invent one.
+RETENTION (D27) AND THE INDEX THIS DOCSTRING USED TO MISCLAIM
+    This docstring used to claim "`created_at` is indexed so a retention sweep is a
+    range delete rather than a table scan". That was false. The only index at the time,
+    `ix_turn_reasoning_session_created (session_id, tenant_id, created_at, id)`, has
+    `created_at` as its THIRD column - it serves the per-session read it was built for
+    and does NOT serve a sweep that only knows an age cutoff. `docs/DECISIONS.md#d27`
+    records the defect and assigns fixing it here as `t-f10-10`.
+
+    `TURN_REASONING_RETENTION_INDEX_MIGRATION` (`0020`, pre-allocated in docs/TASKS.md,
+    applied by `apply_turn_reasoning_retention_index_migration` after `0015`) adds
+    `ix_turn_reasoning_created_at`, leading on `created_at` alone, so a global sweep by
+    age is an index range scan. `test_reasoning_retention.py` proves this with
+    `EXPLAIN (FORMAT JSON)` against the sweep's own SQL rather than asserting the index
+    merely exists - the old, wrong index also "exists" and would pass that check.
+
+    `sweep_expired_reasoning` is D27's sweep: a bounded, repeated
+    `DELETE ... WHERE created_at < <cutoff>` in batches - never `ON DELETE CASCADE`
+    (nothing here has a parent that expires), never a partition drop (the table is too
+    small to earn monthly partitions), never delete-on-read (an unread row is exactly
+    the one that must still go). The window is a parameter with a 30-day default (D27),
+    not a literal in the migration SQL, so shortening it is a config change at the
+    caller, never a new migration. The query never names `content` - it deletes by `id`
+    alone - so the sweep cannot become a read path into a table that is admin-only from
+    the moment it is written (t-f10-04). Wiring this into the scheduler
+    (`adapters/driving/scheduler/cron.py`, `t-later-01`) is a separate anchor's job.
 """
 
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 
@@ -108,3 +128,88 @@ async def apply_turn_reasoning_migration(app_conninfo: str) -> None:
     runs in a thread.
     """
     await asyncio.to_thread(_apply_turn_reasoning_migration_sync, app_conninfo)
+
+
+# Id 0020 is pre-allocated to t-f10-10 in docs/TASKS.md. `created_at` leads and is the
+# ONLY column - `ix_turn_reasoning_session_created` above cannot serve a global sweep by
+# age (see the module docstring), and this index exists for no other query.
+TURN_REASONING_RETENTION_INDEX_MIGRATION = Migration(
+    id="0020_turn_reasoning_retention_index",
+    sql="""
+    CREATE INDEX IF NOT EXISTS ix_turn_reasoning_created_at
+        ON turn_reasoning (created_at);
+    """,
+)
+
+
+def _apply_turn_reasoning_retention_index_migration_sync(app_conninfo: str) -> None:
+    with psycopg.connect(app_conninfo, autocommit=True) as conn:
+        applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE id = %s",
+            (TURN_REASONING_RETENTION_INDEX_MIGRATION.id,),
+        ).fetchone()
+        if applied is not None:
+            return
+        conn.execute(TURN_REASONING_RETENTION_INDEX_MIGRATION.sql)
+        conn.execute(
+            "INSERT INTO schema_migrations (id) VALUES (%s)",
+            (TURN_REASONING_RETENTION_INDEX_MIGRATION.id,),
+        )
+
+
+async def apply_turn_reasoning_retention_index_migration(app_conninfo: str) -> None:
+    """Apply `TURN_REASONING_RETENTION_INDEX_MIGRATION`, once, after `0015`.
+
+    Runs after the base table exists (`apply_turn_reasoning_migration`). Postgres
+    transactions are sync (D13); the blocking work runs in a thread.
+    """
+    await asyncio.to_thread(_apply_turn_reasoning_retention_index_migration_sync, app_conninfo)
+
+
+# D27's sweep, one bounded batch. A CTE rather than a plain LIMIT so the DELETE only
+# ever touches the rows the SELECT already chose - `id` is the only column read; nothing
+# here ever names `content`, so this cannot become a read path into an admin-only table
+# (t-f10-04). `ix_turn_reasoning_created_at` (0020) is what lets the inner SELECT be an
+# index range scan instead of a sequential scan of the whole table.
+_SWEEP_BATCH_SQL = """
+    WITH expired AS (
+        SELECT id
+        FROM turn_reasoning
+        WHERE created_at < %s
+        ORDER BY created_at
+        LIMIT %s
+    )
+    DELETE FROM turn_reasoning
+    USING expired
+    WHERE turn_reasoning.id = expired.id
+"""
+
+
+def _sweep_expired_reasoning_sync(app_conninfo: str, window: timedelta, batch_size: int) -> int:
+    cutoff = datetime.now(UTC) - window
+    deleted_total = 0
+    with psycopg.connect(app_conninfo, autocommit=True) as conn:
+        while True:
+            cursor = conn.execute(_SWEEP_BATCH_SQL, (cutoff, batch_size))
+            deleted = cursor.rowcount
+            deleted_total += deleted
+            if deleted < batch_size:
+                break
+    return deleted_total
+
+
+async def sweep_expired_reasoning(
+    app_conninfo: str,
+    window: timedelta = timedelta(days=30),
+    batch_size: int = 500,
+) -> int:
+    """Delete `turn_reasoning` rows older than `window` (D27's default: 30 days).
+
+    Runs in bounded batches rather than one unbounded `DELETE`, per D27. `window` is a
+    parameter, not a literal baked into a migration, so shortening it is a config change
+    at whoever calls this (the scheduler, `t-later-01`), never a new migration. Returns
+    the total rows deleted, for the caller to log - never their content, which this
+    function never reads. Postgres transactions are sync (D13); the blocking work runs
+    in a thread.
+    """
+    return await asyncio.to_thread(_sweep_expired_reasoning_sync, app_conninfo, window, batch_size)
