@@ -931,7 +931,18 @@ writing a line of SQL**. See `docs/ROADMAP.md` for why each row below exists.
 | <a id="t-f11-34"></a>t-f11-34 | **Orchestration is unreachable too.** `support_triage` names `billing_specialist` and resolves to NO `ask_peer` tool: `TOOL_PACKAGES` is `{delivery, fraud}` and nothing wires an `AgentMailbox` into the container. Six F9 anchors plus `t-f11-15` are reachable only from unit tests | `Core/src/agent_core/composition.py` | TODO |
 | <a id="t-f11-35"></a>t-f11-35 | `audit_repository.ARGUMENT_ALLOWLIST` is `{}`, so every call in the trail renders "arguments: none recorded" — `t-f11-11`'s "show a call WHOLE" can never show two of its three parts | `adapters/driven/persistence_pg/audit_repository.py` | TODO |
 | <a id="t-f11-36"></a>t-f11-36 | `preflight.py` restates `_DBOS_DATABASE_SUFFIX = "_dbos"`, the name `t-f11-20` retired: a correctly bootstrapped instance is warned that `<app>_dbos` is missing and handed a remedy creating a database nothing opens, while `<app>_dbos_sys` is never checked | `adapters/driving/cli/preflight.py` | TODO |
+| <a id="t-f11-38"></a>t-f11-38 | **`preflight` exits 0 with a FAIL check.** It printed "1 not ready" and returned success, so a deploy script that gates on it gets a green light on a deployment that cannot serve a turn | `adapters/driving/cli/preflight.py` | TODO |
+| <a id="t-f11-39"></a>t-f11-39 | **A shipped profile points its MCP server at a TEST FIXTURE**, `Core/tests/fixtures/mcp_echo_server.py`, by a path relative to the working directory — so it resolves only when the process is started from one place, and it ships a test as production configuration | `Core/profiles/delivery_optimizer.yaml` | TODO |
+| <a id="t-f11-40"></a>t-f11-40 | A raw `ExceptionGroup` traceback is printed to the operator's terminal when an MCP server does not answer. The `[warn]` line beside it is correct and sufficient; the traceback makes a handled, documented degraded start look like a crash | `adapters/driven/mcp/toolsets.py` | TODO |
 | <a id="t-f11-37"></a>t-f11-37 | **`max_cost_usd` accepts a non-finite `Decimal` and fails OPEN.** `Decimal("nan")` parses, every comparison against NaN is False, so `cost_exhausted` can never be True and the agent has NO SPEND LIMIT. This file already rejects non-finite literals in approval conditions and never applied the rule to its own money field | `domain/profile.py` | TODO |
+
+
+> **`t-f11-38` is the one that would have shipped.** The preflight was built because every
+> failure in this phase surfaced one at a time, three commands apart — and it answers that
+> beautifully, in one pass, naming the host, the port, the database and the exact remedy. Then
+> it returns 0. **A readiness check whose exit code does not carry its verdict is a readiness
+> check nothing can gate on**, and the first thing anyone does with one is put it in front of a
+> deploy. The report was right and the only machine-readable part of it was wrong.
 
 > **`t-f11-33` and `t-f11-34` are the seventh and eighth instances of one shape, and they are the
 > two that matter most.** Every command an operator would use to MAKE an agent — `:new`,
