@@ -294,3 +294,23 @@ its agent core (245 modules, 112,973 lines). That extraction is **not** the basi
 repo — it is the field reference. When a provider misbehaves or a failure mode is unclear,
 its `agent/error_classifier.py` and `plugins/model-providers/` usually already contain the
 answer with a comment explaining why.
+
+## Provenance
+
+This repository is a general-purpose agent core, not a product. It was specified and
+implemented before any event or product that builds on it, and its git history is the
+record of that:
+
+| Date | Milestone | Commit |
+|---|---|---|
+| 2026-09-09 | Repository initialized with the specification and skeleton | `1b63e3f` |
+| 2026-09-10 | Implementation begins (D23 resolved, domain and ports) | `dbbc5b5` |
+| 2026-09-11 | Phases F0–F12 closed; last commit of the initial build | `b4362c2` |
+
+The tag `v0.1.0` marks that last commit. Anything built on top of this core — a vertical,
+a frontend, a hackathon project — lives in its own repository and depends on a tagged
+version, so what existed beforehand and what was added later stay separable.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

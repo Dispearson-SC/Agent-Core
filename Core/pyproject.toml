@@ -7,10 +7,13 @@ version = "0.0.0"
 # section 3 is the single source of truth for the count.
 description = "A hexagonal agent core: only two ports change when a vertical is added."
 requires-python = ">=3.12"
+license = "MIT"
 dependencies = [
     "pydantic-ai>=2.0",
     "litellm>=1.0",
-    "dbos>=1.0",
+    # Capped below 3: DBOS 3.0 removed direct `Queue(...)` construction, which
+    # adapters/driving/workflow/turn_workflow.py still uses at import time.
+    "dbos>=1.0,<3",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "psycopg[binary,pool]>=3.2",
