@@ -21,17 +21,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Runs before dependencies are installed, on purpose: a broken import in a stub is
-      # the one failure the (largely skipped) suite cannot catch, and this catches it in
-      # under a second.
-      - name: Imports load
-        run: python Core/scripts/check_imports.py
-
       - name: Install
         working-directory: Core
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
+
+      # Every module must import, adapters included. This used to run before Install,
+      # when the tree was stubs; adapters now import their runtime libraries, so the
+      # check needs the dependencies in place.
+      - name: Imports load
+        run: python Core/scripts/check_imports.py
 
       # Includes the flake8-tidy-imports banned-api rule, which is what mechanically
       # enforces the layer rule: domain/ and application/ may not reach for pydantic_ai,
