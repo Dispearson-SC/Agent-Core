@@ -8,12 +8,52 @@ persona: |
   You optimize delivery routing and pricing to maximize the operator's margin without
   degrading delivery times. State the margin impact of every recommendation in currency,
   not percentages. When a price change exceeds policy, propose it and wait - never assume.
-model: claude-sonnet-5
+model: minimax/MiniMax-M3
 
 toolsets:
   - delivery
 
-mcp_servers: []          # F6: add the maps/traffic server here
+# Tools this agent BORROWS from a third-party process. This block is data: connecting a
+# real traffic service is `command` and `args`, and nothing else in the tree - that is the
+# claim F11 makes and docs/TASKS.md#t-f11-16 checks.
+#
+# Read it as: "this agent may also call whatever the `routing` server offers, under names
+# that all begin `mcp_routing_`, and never under a name of ours."
+mcp_servers:
+  - name: routing
+    # `mcp_routing_<tool>` is the name the model sees and the name a policy rule matches.
+    # The prefix is a security control, not tidiness: the vertical's own `routing_*` tools
+    # keep their bare names, so a rule written for THEM can never reach this server's.
+    transport: stdio
+    command: python
+    # ADDRESSED BY IMPORT PATH, NOT BY A FILE PATH - docs/TASKS.md#t-f11-39.
+    #
+    # This line used to read `["Core/tests/fixtures/mcp_echo_server.py"]`, which was two
+    # defects in one. It shipped a TEST as production configuration, in the one file an
+    # operator reads INSTEAD of the code - so the example to copy was "point production at
+    # tests/". And it was relative to the WORKING DIRECTORY: a stdio server is spawned with
+    # the parent's cwd, this file cannot know what that is, and `python -m agent_core`
+    # resolves from `Core/src`, where that path does not exist. It worked from the
+    # repository root and nowhere else.
+    #
+    # `-m` resolves wherever the package is importable, which is everywhere the process can
+    # start at all. The module is the repository's OWN reference MCP server - a real stdio
+    # server that ships with the product - so a fresh clone runs this profile end to end
+    # with no network, no credentials and nothing else installed.
+    #
+    # To use the real service: replace `command` and `args` with a command on PATH or an
+    # ABSOLUTE path (`/opt/traffic-mcp/bin/traffic-mcp`, `["--region", "eu-west"]`), or
+    # swap the whole block for `transport: http` and a `url:`. Nothing else in the tree
+    # changes - that is the claim F11 makes and docs/TASKS.md#t-f11-16 checks.
+    args: ["-m", "agent_core.adapters.driven.mcp.reference_server"]
+    # A scope reducer applied at discovery, NOT the security boundary - ToolPolicy is.
+    # `hang` is the reference server's deliberately wedged tool: it exists so that this
+    # line has something real to exclude, and no agent should ever be offered it.
+    tool_exclude: ["hang"]
+    # Smaller than the 100,000 characters a local tool gets: a third-party server
+    # routinely answers with 20-50K of un-paginated text, and it is not our code.
+    result_budget_chars: 50000
+
 skill_namespaces:
   - delivery
 

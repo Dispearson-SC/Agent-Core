@@ -2,7 +2,7 @@
 
 Phase:   F3 (approvals) / F7 (evidence, same code path)
 Tasks:   docs/TASKS.md#t-f3-02
-Status:  PSEUDO-CODE ONLY
+Status:  IMPLEMENTED (t-f3-02) - STEP 1 VALIDATION STILL PENDING, SEE THE READ-BACK NOTE
 
 THE INSIGHT THIS FILE ENCODES
     Approval and evidence are the SAME flow. Pydantic AI's deferred tools cover both
@@ -18,16 +18,111 @@ RESUMING CAN SUSPEND AGAIN
     An approval may unlock a tool whose result triggers an evidence request. The workflow
     loops; this use case just returns another two-shaped outcome. That is normal, not an
     error, and the loop needs a bound - see the workflow adapter.
+
+LAYER RULE
+    Imports domain/ and ports/ ONLY - not even a sibling use case; `test_contract.py`
+    enforces that by walking the AST, which is why `UnknownProfileError` is declared below
+    instead of imported from `start_turn.py`. No Pydantic AI, no DBOS, no FastAPI, no
+    driver.
+
+WHY THE HUMAN DECISION IS NOT AUDITED HERE
+    The stub's pseudo-code filed a `record_human_decision` row before resuming. It cannot,
+    and it must not. It cannot because `record_human_decision` takes the `subject_id` of
+    the person who decided, and nothing on this call carries one - `execute` is reached
+    from the workflow waking out of `DBOS.recv()`, not from the human's request.
+
+    It must not because `DecideApproval` (docs/TASKS.md#t-f3-03) already writes that row,
+    on the human's own request, BEFORE it signals the workflow. So the property the stub
+    wanted - "if resuming crashes, the record that a human approved something already
+    exists" - is guaranteed by the time control reaches this method. Writing a second row
+    would double-book an append-only sink (CLAUDE.md non-negotiable #6: never update), and
+    an audit trail that records one decision twice cannot be reconciled afterwards.
+
+    `AuditSink` stays on the constructor because that is the port this use case will file
+    under once t-f3-05 settles who may decide; the seat is deliberate, not a leftover.
+
+THE READ-BACK NOTE - WHAT STEP 1 CANNOT DO YET
+    The stub's STEP 1 validates every incoming `tool_call_id` against the pending requests
+    actually stored for `turn_id`. `ConversationStore` exposes `load_history`,
+    `append_request` and `append_outcome`; it has no read-back of a stored `TurnOutcome`
+    by turn id, and `HumanGateway` publishes and correlates but never reports whether a
+    request is already answered. So there is no port through which the suspended outcome
+    can be loaded, and inventing one belongs to a port anchor, not to this one.
+
+    What is enforced instead is the half that needs no read-back: ids are unique within a
+    batch, and an id this use case has already resolved never reaches the runner twice.
+
+IDEMPOTENCY, AND EXACTLY HOW FAR IT REACHES
+    Keyed on `(turn_id, tool_call_id)`: an already-resolved pair is a no-op returning the
+    stored outcome. The ledger is in-process, which covers the case that actually happens
+    - a retry, a double-clicking human, a redelivered signal - within one running process.
+
+    Across a process death, the durable guarantee is DBOS step memoisation: a step that
+    completed is not re-executed on replay, and this use case is awaited inside one. It is
+    NOT a durable ledger of its own, and it deliberately does not pretend to be: the
+    honest place for that is the `human_requests.answered_at` column migration `0010`
+    already carries, reachable only once a port exposes it.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+from agent_core.domain.media import MediaDelivery, MediaRef
 from agent_core.domain.profile import AgentProfile
-from agent_core.domain.turn import SessionRef, TurnId, TurnOutcome
+from agent_core.domain.turn import (
+    CallerIdentity,
+    SessionRef,
+    ToolCallId,
+    TurnId,
+    TurnOutcome,
+)
 from agent_core.ports.agent_runner import AgentRunner, ToolResolution
 from agent_core.ports.audit_sink import AuditSink
 from agent_core.ports.conversation_store import ConversationStore
 from agent_core.ports.media_store import MediaStore
+
+
+class UnknownProfileError(KeyError):
+    """`profile_id` names no loaded profile. Same rule and same reasoning as `StartTurn`'s
+    error of the same name: falling back to a default profile turns a typo into a turn
+    resumed with someone else's permissions.
+
+    DECLARED HERE RATHER THAN IMPORTED. `test_contract.py` walks the AST of `application/`
+    and allows the standard library, `agent_core.domain.*` and `agent_core.ports.*` only -
+    a sibling use case is not on that list, and that guard is right: one use case importing
+    another is how an application layer grows a private dependency graph nobody drew.
+
+    The duplication is therefore deliberate and visible, not an oversight. A shared
+    `application/errors.py` is the real home for it, and creating one is a task of its own.
+    Subclassing `KeyError` means the obvious `except KeyError` at a call site still catches
+    either type, so no caller has to know there are two.
+    """
+
+
+@dataclass(slots=True)
+class ResolvedTool:
+    """One `ToolResolution` ready to hand back to the runner.
+
+    A concrete carrier exists because step 3 REPLACES the payload of an evidence
+    resolution - a `MediaRef` becomes bytes or a signed URL - and the incoming value may
+    be any structural `ToolResolution` the driving adapter chose to build. The replacement
+    is a NEW value rather than a mutation of the caller's object: a use case that edits its
+    argument in place behaves differently on the second call.
+
+    NOT FROZEN, AGAINST THIS CODEBASE'S HABIT, AND NOT BY PREFERENCE. `ToolResolution` in
+    `ports/agent_runner.py` declares plain attributes, which a Protocol reads as SETTABLE
+    variables; mypy rejects a frozen dataclass against it with "expected settable variable,
+    got read-only attribute". Freezing this class would make the very type this use case
+    hands to `AgentRunner.resume` fail to satisfy the port it is handed to. The immutability
+    is enforced by discipline instead: nothing here mutates an instance after construction.
+
+    `tool_call_id` is copied VERBATIM and never regenerated. CLAUDE.md non-negotiable #5.
+    """
+
+    tool_call_id: ToolCallId
+    approved: bool
+    payload: object | None = None
 
 
 class ResumeTurn:
@@ -45,52 +140,139 @@ class ResumeTurn:
         self._audit = audit
         self._media = media
         self._profiles = profiles
+        # The idempotency ledger. One entry per RESOLVED (turn_id, tool_call_id), holding
+        # the outcome that resolving it produced. Read the module docstring for how far
+        # this reaches and what carries the guarantee past a process death.
+        self._resolved: dict[tuple[TurnId, ToolCallId], TurnOutcome] = {}
 
-    def execute(
+    async def execute(
         self,
         turn_id: TurnId,
         session: SessionRef,
         profile_id: str,
         resolutions: tuple[ToolResolution, ...],
+        *,
+        caller: CallerIdentity,
     ) -> TurnOutcome:
-        """PSEUDO-CODE - implement in F3.
+        """Feed the human's answers back into a suspended turn.
 
-        STEP 1 - VALIDATE THE RESOLUTIONS AGAINST WHAT IS ACTUALLY PENDING
-            pending = load the suspended outcome for turn_id
-            Every resolution's tool_call_id MUST appear in `pending`. Reject unknown ids.
+        WHY IT IS ASYNC (D13): it awaits the store, possibly the media store, and then the
+        model through `AgentRunner.resume` - the longest await in the system.
 
-            SILENT BUG: an id that does not match is dropped by Pydantic AI without an
-            exception, and the agent asks the same question forever. Round-trip the ids
-            VERBATIM - never regenerate, never normalise case, never re-encode.
+        WHOSE POLICY THE CONTINUATION IS JUDGED BY - THE `caller` SEAT (docs/TASKS.md#t-f3-16)
+            A resume is not one tool call. The call a human authorised is the FIRST of
+            them, and the model may ask for more on the same continuation;
+            `ToolPolicy.load_rules` takes a `CallerIdentity`, so without one the runner can
+            attach no policy check and no audit write and every later call runs unwatched.
+            The port grew the seat, and a use case with nowhere to put it would only move
+            the hole up a layer.
 
-        STEP 2 - AUDIT THE HUMAN DECISION BEFORE ACTING ON IT
-            for r in resolutions:
-                self._audit.record_human_decision(turn_id, r.tool_call_id, subject, ...)
-            Before, not after. If resuming crashes, the record that a human approved
-            something must already exist.
+            IT IS THE TURN'S OWN CALLER, AND IT IS NOT THE APPROVING HUMAN. The identity
+            that must be enforced is whoever the turn belongs to - the `TurnRequest.caller`
+            the turn started from - because those are the permissions the model is acting
+            under, and they were the permissions before the suspension too. Reaching for
+            the approver instead would widen one identity into another, which is CLAUDE.md
+            non-negotiable #9's whole subject, and it would hand the continuation the
+            REVIEWER's rules: an operator approving one call would silently lend the agent
+            everything else they may do. `_step_resume` (adapters/driving/workflow) is the
+            caller that supplies it, out of the request the workflow already holds.
 
-        STEP 3 - BUILD THE TOOL RESULTS
-            APPROVAL approved   -> let the tool run
-            APPROVAL refused    -> a refusal result carrying the human's reason, so the
-                                   model can adapt instead of retrying
-            EVIDENCE supplied   -> resolve the MediaRef through MediaStore per the
-                                   profile's delivery mode (BYTES by default; a signed
-                                   URL only when the policy says so)
+            KEYWORD-ONLY, matching the port. Appended positionally it would bind to
+            `resolutions` at an un-updated call site and fail far from the mistake.
 
-        STEP 4 - RESUME
-            outcome = self._runner.resume(turn_id, profile, history, resolutions)
-
-        STEP 5 - PERSIST AND RETURN
-            self._store.append_outcome(turn_id, outcome)
-            Return it. It may be suspended AGAIN. Do not loop here.
-
-        IDEMPOTENCY - THIS IS A DBOS STEP AND IT WILL BE REPLAYED
-            Resuming the same turn with the same resolutions twice must not run the tool
-            twice. Key on (turn_id, tool_call_id) and treat an already-resolved id as a
-            no-op that returns the stored outcome.
-
-            Without that, a crash between the tool running and the outcome being persisted
-            means the account gets frozen twice on recovery. No test will catch it; only a
-            deliberate crash-injection test will.
+        WHAT THIS METHOD MUST NEVER DO
+            - Loop. A resumed turn may suspend AGAIN; the outcome goes back untouched and
+              the workflow decides what to do with it.
+            - Regenerate a `tool_call_id`.
+            - Run the same resolved tool call twice.
+            - Derive `caller` from anything. It arrives, or the call does not happen.
         """
-        raise NotImplementedError("F3 - docs/TASKS.md#t-f3-02")
+        if not resolutions:
+            raise ValueError(
+                "ResumeTurn was called with no resolutions. A resume that answers nothing "
+                "would re-enter the model with the turn still suspended."
+            )
+        self._reject_duplicate_ids(resolutions)
+
+        # Before any write, exactly as in StartTurn: an unknown id must leave no trace.
+        profile = self._resolve_profile(profile_id)
+
+        # STEP 2 - DROP EVERY PAIR THIS USE CASE HAS ALREADY RESOLVED. Before the media
+        # store is touched and long before the runner is: re-resolving an answered call
+        # runs its tool a second time on one human approval.
+        fresh = tuple(
+            resolution
+            for resolution in resolutions
+            if (turn_id, resolution.tool_call_id) not in self._resolved
+        )
+        if not fresh:
+            # Every id in this batch is answered, so this is a replay. Hand back what the
+            # call that answered them produced. The batch is answered as a unit, so any of
+            # its keys names the same outcome; the first is taken for determinism.
+            return self._resolved[(turn_id, resolutions[0].tool_call_id)]
+
+        # STEP 3 - BUILD THE TOOL RESULTS. An approval passes through; an evidence payload
+        # is resolved through MediaStore per the profile's delivery mode.
+        prepared = tuple([await self._prepare(resolution, profile) for resolution in fresh])
+
+        # STEP 4 - RESUME. STEP 5 - PERSIST. A suspended outcome is persisted exactly like
+        # a finished one; the process may die while the next human takes three days.
+        history = await self._store.load_history(session)
+        outcome = await self._runner.resume(
+            turn_id, profile, history, prepared, caller=caller, session=session
+        )
+        await self._store.append_outcome(turn_id, outcome)
+
+        # Recorded AFTER the outcome is persisted, never before. A pair marked resolved
+        # against an outcome that was never stored would hand the next caller a result the
+        # conversation has no record of.
+        for resolution in fresh:
+            self._resolved[(turn_id, resolution.tool_call_id)] = outcome
+        return outcome
+
+    def _reject_duplicate_ids(self, resolutions: tuple[ToolResolution, ...]) -> None:
+        """Two answers for one pending call in a single batch is a caller bug, and a
+        silent one: the runner would take whichever arrived last and the other human's
+        answer would vanish without an exception."""
+        seen: set[ToolCallId] = set()
+        for resolution in resolutions:
+            if resolution.tool_call_id in seen:
+                raise ValueError(
+                    f"Two resolutions carry tool_call_id {resolution.tool_call_id!r}. One "
+                    "pending call has exactly one answer."
+                )
+            seen.add(resolution.tool_call_id)
+
+    def _resolve_profile(self, profile_id: str) -> AgentProfile:
+        try:
+            return self._profiles[profile_id]
+        except KeyError:
+            raise UnknownProfileError(
+                f"No profile is loaded under id {profile_id!r}. Refusing to fall back to a "
+                "default: a typo must not resume the turn with another profile's permissions."
+            ) from None
+
+    async def _prepare(
+        self, resolution: ToolResolution, profile: AgentProfile
+    ) -> ToolResolution:
+        """Turn one human answer into the value the model receives as the tool result.
+
+        Only an EVIDENCE payload needs work, and it is recognised by its TYPE rather than
+        by `PendingKind`: a `MediaRef` is a pointer, and handing a pointer to the model is
+        the bug this resolves. Everything else - an approval, or a refusal carrying the
+        human's reason - passes through so the model can adapt instead of retrying.
+        """
+        payload = resolution.payload
+        if not isinstance(payload, MediaRef):
+            return resolution
+
+        if profile.media.delivery is MediaDelivery.SIGNED_URL:
+            resolved: object = await self._media.signed_url(payload.media_id)
+        else:
+            resolved = await self._media.get(payload.media_id)
+
+        return ResolvedTool(
+            tool_call_id=resolution.tool_call_id,
+            approved=resolution.approved,
+            payload=resolved,
+        )

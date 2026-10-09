@@ -1,0 +1,171 @@
+# The policy this deployment starts with. docs/TASKS.md#t-f11-03.
+#
+# THIS FILE IS THE WHOLE TRUTH ABOUT WHAT IS IN FORCE.
+#   `adapters/driven/policy_fs/loader.py` RECONCILES `policy_rules` with this directory at
+#   every startup: a rule added here is granted, a rule edited here is changed, and a rule
+#   DELETED from here stops applying. Nothing else in production writes that table, so the
+#   diff a reviewer reads is the diff that takes effect.
+#
+# REVIEW THIS FILE LIKE CODE THAT CANNOT BE TESTED, BECAUSE IT IS.
+#   The policy engine is a silent-bug area (CLAUDE.md): a wrong rule here fails on the day
+#   it matters and never in a suite. A green run proves the reducer works, never that the
+#   rules are the ones you meant.
+#
+# THE FIELDS
+#   rule_id       stable, unique across this directory. It is what the audit trail records
+#                 as the reason a tool call was allowed or refused, so renaming one breaks
+#                 the join from six months of audit rows to the rule that produced them.
+#   tool_pattern  exact, or a trailing `*` for a PREFIX (never a substring). Lowercased
+#                 before matching, so a provider advertising `Pricing_Apply` still matches.
+#   effect        allow | needs_approval | deny. DENY beats NEEDS_APPROVAL beats ALLOW,
+#                 whatever the order here or the specificity of the pattern.
+#   reason        REQUIRED, and it has two audiences. On DENY the model reads it as the
+#                 tool result and can adapt; on NEEDS_APPROVAL a human reads it as the ask.
+#   subject_roles empty or absent means ANY ROLE - not "no roles". Same for `channels` and
+#                 `tenant_id`: an absent constraint widens, it never narrows.
+#
+# WHY THERE ARE THREE EFFECTS HERE AND NOT ONE
+#   A fresh deployment used to deny every tool with `[no matching rule]`, which teaches an
+#   operator that policy is a switch. The delivery vertical below is graded instead: read
+#   freely, apply a price change only with a human, and never apply one from a chat
+#   channel at all. That is a decision an operator can read, disagree with, and edit.
+
+rules:
+  # ---- delivery: the read-only half. Nothing here changes anything. ----
+  - rule_id: delivery-orders-lookup
+    tool_pattern: orders_lookup
+    effect: allow
+    reason: >-
+      Reading an order changes nothing. The agent cannot explain a routing or pricing
+      recommendation without the order it is about.
+
+  - rule_id: delivery-routing-estimate
+    tool_pattern: routing_estimate
+    effect: allow
+    reason: >-
+      A routing estimate is a computation over data the agent may already read. It commits
+      the operator to nothing.
+
+  - rule_id: delivery-pricing-quote
+    tool_pattern: pricing_quote
+    effect: allow
+    reason: >-
+      A quote is a proposal, not a change. Separating quoting from applying is what makes
+      the approval below worth asking for.
+
+  # ---- delivery: the half that costs money. ----
+  - rule_id: delivery-pricing-apply-needs-a-human
+    tool_pattern: pricing_apply
+    effect: needs_approval
+    reason: >-
+      Applying a price change moves real money and is not reversible by the agent. State
+      the order, the current price and the new price, then wait for a human.
+
+  # Two rules on one tool, and that is deliberate: DENY beats NEEDS_APPROVAL, so on a chat
+  # channel this wins outright and no approval is ever offered. It is also the one place an
+  # operator can watch the precedence rule do something, on a tool they can actually run.
+  - rule_id: delivery-pricing-apply-never-from-a-chat-channel
+    tool_pattern: pricing_apply
+    effect: deny
+    channels:
+      - telegram
+      - whatsapp
+    reason: >-
+      A price change may not be applied from a chat channel. Approval over chat proves who
+      holds the handset, not who holds the authority; ask from the operator console.
+
+  # ONE AGENT ASKING ANOTHER IS A POLICY DECISION, NOT A CODE CHANGE - and this rule is
+  # where F11's whole claim is tested. `support_triage` names `billing_specialist` in its
+  # own profile and `ask_peer` resolves into its toolset, and until this rule existed the
+  # call was refused by default: an allowlist whose empty value means NOBODY (t-f9-01).
+  #
+  # BOTH DIMENSIONS NARROW ON PURPOSE, AND NEITHER OF THEM MOVED FOR t-f11-51.
+  #
+  #   `channels: [cli]` is the channel the OPERATOR CONSOLE stamps on every turn it starts
+  #   (`main._CONSOLE_CHANNEL_ID`), in both of its modes. The console gained a durable path
+  #   - it can now enqueue a turn through the DBOS workflow instead of calling StartTurn
+  #   directly, which is the only route on which `_step_ask_peers` ever runs - and that
+  #   durable turn carries the SAME `CallerIdentity` the direct one does. So the channel
+  #   this grant has to name is still `cli`, and it is named exactly once. Widening it to
+  #   every channel would have made the test pass and would have granted delegation to
+  #   WhatsApp, Telegram and every HTTP caller on the way past.
+  #
+  #   `subject_roles: [operator]` is the second narrowing, and it is stated because an
+  #   absent constraint WIDENS (see THE FIELDS above). A console started without
+  #   `--role operator` therefore carries no role, matches nothing here, and has `ask_peer`
+  #   refused - which is this rule working rather than the console being broken. The
+  #   command that reaches the peer loop is, in full:
+  #       python -m agent_core console --durable --role operator
+  #   and `:policy ask_peer` at the prompt answers why, naming this rule_id.
+  #
+  # A peer answer is UNTRUSTED CONTENT (non-negotiable #10) - "it is our own agent" is not
+  # a trust argument, because an agent can be misled and then it is a confused deputy
+  # holding our credentials. So delegation is granted where an operator is watching before
+  # it is ever granted on a customer channel.
+  - rule_id: peers-ask-from-the-operator-console
+    tool_pattern: ask_peer
+    effect: allow
+    subject_roles:
+      - operator
+    channels:
+      - cli
+    reason: >-
+      An operator may delegate to a peer agent this deployment's profile already names.
+      The two-sided allowlist and the hop limit still decide WHICH peer; this rule only
+      decides that delegation is permitted at all.
+
+  # ---- what an ANSWERING agent may do, which is a different question. t-f11-49. ----
+  #
+  # THE RULES ABOVE ARE UNREACHABLE FROM A PEER TURN, AND THAT IS THE POINT.
+  #   `adapters/driving/peers/worker.py` runs an answered ask as subject `peer-agent`, on
+  #   channel `peer`, holding the role `peer` - never the identity of the operator who
+  #   started the conversation and never the asking agent's. So a peer turn is judged by
+  #   the rows written for THAT identity, and until these two existed there were none:
+  #   `billing_specialist` resolved to the whole `fraud` toolset and every call was refused
+  #   with `[no matching rule]`, leaving the agent to answer a billing question from its
+  #   persona alone - fluent, unsourced, and indistinguishable from a real answer.
+  #
+  # BOTH DIMENSIONS ARE USED, AND BOTH NARROW.
+  #   `channels: [peer]` and `subject_roles: [peer]` are stated on the grant together
+  #   because either one alone would widen it: channel-only would let anything arriving on
+  #   the peer channel read the ledger, and role-only would follow the role onto any other
+  #   channel a deployment later routes it to. An absent constraint widens (see THE FIELDS
+  #   above), so the way to grant a peer turn less than an operator has is to say so twice.
+
+  - rule_id: peers-answering-agent-reads-the-ledger
+    tool_pattern: account_history
+    effect: allow
+    subject_roles:
+      - peer
+    channels:
+      - peer
+    reason: >-
+      An agent answering another agent's question about a charge must be able to read the
+      account it is being asked about. Reading changes nothing, and an answer given without
+      opening the ledger is a guess written in the voice of a specialist.
+
+  # ONE TOOL OF THE FOUR, DELIBERATELY. `sql_readonly` is arbitrary query reach and
+  # `case_notes_append` writes to a case nobody opened for this conversation; neither is
+  # needed to say what an account was charged, and a grant nobody needs is a grant nobody
+  # reviews. Both stay refused by the absence of a rule, which is what an allowlist means.
+  #
+  # `ask_peer` IS ALSO ABSENT ON PURPOSE. The rule above grants delegation to an OPERATOR on
+  # the console; an answering agent is neither, and granting it here would let B start a
+  # third leg on a question a person asked once. The hop limit would refuse it anyway - but
+  # a permission that is only stopped by a second mechanism is a permission that is granted.
+
+  # `freeze_account` is DENIED rather than left to the absence of a rule, and the extra
+  # sentence is why: on the peer channel the refusal is the one a model can act on. The
+  # profile's own `approval_rules` would otherwise suspend the turn for a human - and a peer
+  # turn runs through `StartTurn` directly (adapters/driving/peers/worker.py), so a
+  # suspension there records no answer at all and the asking agent waits out its reply
+  # timeout for a question that was understood perfectly well.
+  - rule_id: peers-no-account-freeze-from-a-peer-turn
+    tool_pattern: freeze_account
+    effect: deny
+    channels:
+      - peer
+    reason: >-
+      An account freeze is not started by one agent asking another. Report what the ledger
+      shows and say a freeze is warranted; a person asks for it on a channel where a human
+      can approve it.

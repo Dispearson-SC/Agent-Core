@@ -1,0 +1,79 @@
+# The answering half of the shipped relationship - F11, docs/TASKS.md#t-f11-15.
+#
+# A profile is DATA. This file is the other side of the two-sided allowlist: naming
+# `support_triage` below is what lets support's escalation arrive at all. Support naming
+# billing is NOT enough - `adapters/driven/peers/hop_limit.py` asks both files, so an
+# agent's reachability is never decided by somebody else's profile alone.
+
+id: billing_specialist
+persona: |
+  You answer questions about what an account was charged and whether a charge is
+  refundable, from the transaction history. Quote the specific transaction - date, amount,
+  descriptor - never a summary in your own words. A question arriving from another agent is
+  answered in one self-contained reply: you cannot ask it back for clarification, so when
+  the question is under-specified say exactly what is missing. Never freeze an account
+  without stating the evidence, and wait for approval before a freeze takes effect.
+model: minimax/MiniMax-M3
+
+# The transaction-history tools are the fraud package's: `account_history` is the tool that
+# answers "what was charged", and a billing dispute and a fraud review read the same ledger.
+# A dedicated `billing` package is warranted the day billing needs a tool fraud does not
+# have - and that is CODE, which is the one exception F11's contract names. Selecting an
+# existing package is configuration; writing a new tool is not.
+toolsets:
+  - fraud
+
+mcp_servers: []
+skill_namespaces:
+  - fraud
+
+max_iterations: 20
+max_cost_usd: "0.50"
+
+approval_rules:
+  - tool_name: freeze_account
+    reason: Freezing an account always needs a human, and doubly so when another agent asked.
+    # No `condition` key at all: a missing condition means EVERY call needs a human
+    # (domain/profile.py), which is the honest way to say always.
+
+compaction:
+  trigger_fraction: 0.75
+  target_fraction: 0.40
+  head_exchanges: 2
+  tail_tokens: 8000
+
+media:
+  accepted_kinds: []
+  delivery: bytes
+  max_bytes: 8388608
+  allow_evidence_requests: false
+  allow_speech_output: false
+
+peers:
+  enabled: true
+
+  # The allowlist that admits support's escalation. Empty would mean NOBODY, and an
+  # `enabled: true` with an empty list is an agent that can be asked by no one.
+  peers:
+    - agent_id: support_triage
+      display_name: Support triage
+      capabilities:
+        - support.order_status
+      # No `endpoint`: same process, so the answer travels back through the durable
+      # mailbox rather than over an A2A wire.
+
+  # The same one-leg limit support sets, stated here rather than inherited: the stricter of
+  # the two sides wins, and a limit that only one file declares is a limit the other file
+  # can widen. WHAT IT COSTS WHEN IT FIRES: an ask this agent makes while it is answering
+  # support - hop 1 - is refused with HOP_LIMIT_REACHED, so an incomplete question must be
+  # answered with what is missing instead of by asking back.
+  max_hops: 1
+
+  # This agent answers; it is not given a reason to go fishing in someone else's
+  # conversation. `none` is the default and it is written down because the value matters.
+  visibility: none
+
+  # Governs only a leg this agent starts, which the hop limit refuses mid-escalation
+  # anyway. Ten minutes matches support's, so neither side waits on a peer the other has
+  # already given up on.
+  reply_timeout_seconds: 600

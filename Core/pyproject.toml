@@ -7,10 +7,13 @@ version = "0.0.0"
 # section 3 is the single source of truth for the count.
 description = "A hexagonal agent core: only two ports change when a vertical is added."
 requires-python = ">=3.12"
+license = "MIT"
 dependencies = [
     "pydantic-ai>=2.0",
     "litellm>=1.0",
-    "dbos>=1.0",
+    # Capped below 3: DBOS 3.0 removed direct `Queue(...)` construction, which
+    # adapters/driving/workflow/turn_workflow.py still uses at import time.
+    "dbos>=1.0,<3",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "psycopg[binary,pool]>=3.2",
@@ -57,6 +60,10 @@ select = ["E", "F", "I", "UP", "B", "TID"]
 "dbos".msg = "Forbidden outside adapters/driving/workflow/."
 "litellm".msg = "Forbidden outside adapters/driven/llm_litellm/."
 "fastapi".msg = "Forbidden outside adapters/driving/http/."
+# The fifth library nobody had thought to ban, added the day it was caught: an `import
+# yaml` in domain/profile.py made the domain read files and depend on a parser. Reading a
+# profile and parsing it belong to adapters/driven/profiles_fs/; the domain takes a mapping.
+"yaml".msg = "Forbidden outside adapters/. YAML parsing belongs in a driven adapter."
 
 [tool.ruff.lint.per-file-ignores]
 "src/agent_core/adapters/**" = ["TID251"]

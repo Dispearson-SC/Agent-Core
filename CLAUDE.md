@@ -2,11 +2,16 @@
 
 A hexagonal agent core. Fifteen ports; **only two change when a vertical is added**.
 
-**Read `docs/DECISIONS.md` first.** It is short and explains why everything else looks
+**Read `docs/STATE.md` first** — it is the running handover: what works right now, what
+cannot be run, which credentials exist, and what the guard tests have already caught.
+Then **`docs/DECISIONS.md`**. It is short and explains why everything else looks
 the way it does. Then `docs/ARCHITECTURE.md` §3 (the ports table) — that table is the
 contract. Then `docs/ROADMAP.md` for the current phase, and `docs/TASKS.md` for the task
-you are picking up. `docs/GAPS.md` lists what is still undesigned — check it before
-concluding something is missing by accident.
+you are picking up. `docs/WAVES.md` owns the execution order — which tasks may run at the
+same time, and why. `docs/GAPS.md` lists what is still undesigned — check it before
+concluding something is missing by accident. `docs/FIELD-NOTES.md` holds dependency
+signatures and gotchas verified against the installed versions — read it before writing
+against DBOS, LiteLLM or a provider, so the checking is not redone.
 
 ## The contract to defend
 
@@ -108,4 +113,5 @@ usually already contain the answer with a comment explaining why.
 
 ## Current state
 
-Specification complete. No implementation. Phase F0 has not started.
+`docs/STATE.md` owns this. Do not restate it here — a status duplicated in two files
+drifts, and D24 is about exactly that.

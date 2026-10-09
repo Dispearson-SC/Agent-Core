@@ -2,6 +2,8 @@
 
 Phase:   F10
 Tasks:   docs/TASKS.md#t-f10-02
+Status:  t-f10-02 FROZEN - audience and tenant seats pinned by
+         tests/unit/test_ports_transcript_reader.py
 Adapter: adapters/driven/persistence_pg/transcript_repository.py
 Per-vertical: NO
 
@@ -62,12 +64,18 @@ class TranscriptReader(Protocol):
         TENANT SCOPING IS IN THE QUERY, not applied afterwards. This endpoint returns whole
         conversations; a missing tenant predicate here is a cross-tenant data breach with a
         friendly UI on top.
+
+        The tenant arrives inside `SessionRef`, which exists so a session can never be
+        named without one. It is NOT also passed as a second parameter: two sources for one
+        fact can disagree, and the adapter would then have to pick which one scopes the
+        query.
         """
         ...
 
     async def list_conversations(
         self,
         tenant: TenantId,
+        audience: Audience,
         *,
         profile_id: str | None = None,
         suspended_only: bool = False,
@@ -76,5 +84,22 @@ class TranscriptReader(Protocol):
     ) -> tuple[tuple[ConversationSummaryRow, ...], str | None]:
         """The inbox view. `suspended_only=True` is the operational queue: every
         conversation stuck waiting on a human, oldest first. That list is the one an
-        operator actually works from."""
+        operator actually works from.
+
+        THE LIST IS FILTERED TOO, so it takes an `Audience` exactly like `page` does.
+        `ConversationSummaryRow` carries `total_cost_usd`, which is an ADMIN field by the
+        same rule that makes tool arguments admin-only; and the rows a caller may see at
+        all are the caller's own, not every conversation in the tenant. A list method
+        without an audience seat would have to default to one, and a default is either a
+        leak or an operator queue that hides its own work.
+
+        `waiting_since` and `is_suspended` survive into the USER projection on purpose:
+        the same reason `PENDING_PLACEHOLDER` exists. A user must not learn WHICH tool is
+        pending, but must see THAT something is.
+
+        NARROWING IS ENUMERATED, NEVER COMPOSED BY THE CALLER. `profile_id` and
+        `suspended_only` are typed options the adapter turns into SQL itself; `cursor` is
+        an opaque token the adapter minted. There is deliberately no free-form filter
+        parameter - the moment one exists, the tenant predicate stops being this port's
+        guarantee and becomes something every call site is trusted to remember."""
         ...

@@ -23,24 +23,45 @@ THE WAIT DOES NOT LIVE HERE
 
     If you ever find a sleep, a poll loop, or a thread join in an implementation of this
     port, it is wrong: it will silently lose the turn on the next deploy.
+
+    Nor does OUTBOUND DELIVERY of a finished `TurnResult` live here. That is a channel
+    registry shared with the workflow's delivery step, not a port. docs/DECISIONS.md#d23.
+
+WHY BOTH MEMBERS ARE ASYNC (D13)
+    `publish` writes a correlation row and then hands a message to WhatsApp or Telegram
+    over the network; `correlate` reads that row back on the inbound path. Both are I/O,
+    and a sync `def` here would block the event loop for the whole channel round-trip -
+    stalling every other turn in the process. Any `@DBOS.transaction` underneath stays
+    synchronous and the adapter wraps it in `asyncio.to_thread`, exactly as in
+    `ConversationStore`.
+
+    Async is also what keeps the "no waiting" rule honest. A sync member that has to
+    produce an answer has only one way to get one: block. An awaitable member is free to
+    return immediately and let the workflow own the wait.
 """
 
 from __future__ import annotations
 
 from typing import Protocol
 
-from agent_core.domain.turn import PendingRequest, SessionRef, TurnId
+from agent_core.domain.turn import PendingRequest, SessionRef, ToolCallId, TurnId
 
 
 class HumanGateway(Protocol):
-    def publish(
+    async def publish(
         self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...]
     ) -> None:
         """PSEUDO-CODE - F3.
 
-        1. Render each request for a human. For APPROVAL, the ask is
-           `PolicyDecision.reason` plus the tool arguments; for EVIDENCE it is
-           `PendingRequest.reason`.
+        ASYNC (D13): a correlation write followed by a channel send over the network.
+
+        1. Render each request for a human: THAT something is pending, plus a `reason` -
+           for APPROVAL, `PolicyDecision.reason`; for EVIDENCE, `PendingRequest.reason`.
+           NEVER the tool name and NEVER its arguments, redacted or otherwise -
+           non-negotiable #11's WHICH-tool half, not just argument-value redaction. See
+           the only adapter's REDACTION note (adapters/driven/human/gateway.py) for why
+           that is wider than it first looks: a tool's own NAME already tells a user
+           which tool is pending, before a single argument value leaves the process.
         2. Deliver on the session's channel.
         3. Include a correlation handle carrying (turn_id, tool_call_id) so the reply can
            be routed back without the human having to quote anything.
@@ -48,18 +69,25 @@ class HumanGateway(Protocol):
         MUST be idempotent per (turn_id, tool_call_id). A DBOS step can be retried after a
         crash, and re-publishing means the human is asked the same question twice - which
         is how you get two conflicting approvals for one action.
-
-        NEVER put raw tool arguments into the message without redaction. Arguments can
-        contain credentials, tokens or personal data, and the channel is usually less
-        trusted than the database.
         """
         ...
 
-    def correlate(self, correlation_id: str) -> tuple[TurnId, str] | None:
+    async def correlate(self, correlation_id: str) -> tuple[TurnId, ToolCallId] | None:
         """Resolve an inbound human reply back to (turn_id, tool_call_id).
 
-        Returns None for an unknown or expired handle. The HTTP adapter must treat None
-        as 404 and MUST NOT guess: routing a stray reply into the wrong turn approves an
-        action nobody approved.
+        ASYNC (D13): a lookup against the correlation table on the inbound request path.
+
+        Returns None for an unknown or expired handle - that is the NORMAL case, not an
+        error. Correlation ids expire and strangers POST at the decision route, so a miss
+        is a value the caller must handle, never an exception it may forget to catch.
+
+        The HTTP adapter must treat None as 404 and MUST NOT guess: routing a stray reply
+        into the wrong turn approves an action nobody approved.
+
+        The second element is the domain `ToolCallId`, not a bare `str`. It is the id
+        Pydantic AI issued for the deferred call, and it is what `ResumeTurn` keys its
+        idempotency on and what `AuditSink.record_human_decision` files the approval
+        under. Handing back a loose string would push an unchecked cast into every
+        consumer of this port.
         """
         ...

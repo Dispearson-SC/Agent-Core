@@ -284,6 +284,22 @@ explicit go-ahead.
 Recorded during the Hermes core extraction, when parallel work on the extraction and
 the Campus-Alert integration was explicitly stopped.
 
+**Amended 2026-09-10 — scoped to workstreams, not to tasks within a phase.** The user
+directed that implementation run as parallel waves of subagents: tasks whose dependencies
+are satisfied and whose written files are disjoint execute concurrently, wave by wave,
+with a barrier between waves. The original preference still holds at the level it was
+recorded at — one workstream finished before the next begins, and integration into a
+consuming system still waits for an explicit go-ahead. What is now permitted is
+concurrency *inside* a single phase of a single workstream.
+
+Two constraints make that safe, and both are load-bearing:
+
+- No two tasks in one wave may write the same file. The wave schedule is derived from a
+  `writes` set per task, not from the order tasks appear in `docs/TASKS.md`.
+- Every task is test-first. A wave agent writes the failing test, confirms it fails for
+  the intended reason, then implements. A test that passes before implementation is a
+  broken test and stops that task.
+
 
 ---
 
@@ -543,55 +559,72 @@ window to every message, including single ones, so it is a latency decision with
 
 ---
 
-## D23 · OPEN DECISION — the channel layer, and whether Chatwoot owns it
+## D23 · Own channel adapters in phase one; delivery is composition wiring, not a new port
 
-**Status: OPEN. Must be decided before the first driving adapter is written in F0.**
+**Two decisions, recorded together because the second follows from the first.**
 
-Recorded as open rather than settled, because it changes which adapter gets built first and
-that is expensive to reverse.
+### Ownership: Option A — Agent-Core owns the channel layer in phase one
 
-### Option A — own channel adapters
+**Decision.** One driving adapter per channel — WhatsApp Cloud API webhook, Telegram
+webhook, own app — built and maintained by Agent-Core. **Option B (Chatwoot as the channel
+layer) is rejected for phase one**, not dropped: Chatwoot is deferred to phase two, and when
+it arrives it is only a channel adapter, or at most a read-side projection over the
+transcript — never a second write path. `ConversationStore` and `AuditSink` remain the only
+writers (D18); an AgentBot integration that persisted its own state would be exactly the
+two-write-path drift D18 exists to prevent.
 
-One driving adapter per channel: WhatsApp Cloud API webhook, Telegram webhook, own app over
-WebSocket. Full control, no extra hop, no extra infrastructure.
+**What this keeps deferred.** Human handoff (gap A5) stays deferred to D2, as already
+recorded there — Option B would have pulled it forward by adopting Chatwoot's inbox instead
+of building handoff ourselves, but not at the cost of a second writer. Every channel is our
+integration to build until then.
 
-Cost: human handoff (gap A5) stays deferred to D2, and every channel is our integration to
-build and maintain.
+**What is preserved from Option B's evaluation, should phase two revisit it.** Chatwoot
+shows *messages* — no tool calls, reasoning, policy denials, knowledge hits or per-turn cost
+— so it can only ever replace the user-facing half of the F10 transcript viewer, never the
+admin half; `TranscriptReader` stays required either way. Its one capability nothing else
+supplies is inbound typing state from its own web widget, and only there (D22).
 
-### Option B — Chatwoot as the channel layer
+### Shape A: a channel registry plus one delivery step — no sixteenth port
 
-The core owns all agent logic; Chatwoot owns the interface and the inbox. Its **AgentBot**
-integration POSTs conversation events to a bot URL and accepts replies through its API, which
-fits cleanly as a single driving adapter.
+**Decision.** Outbound delivery of a finished `TurnResult` goes through a channel registry
+wired in `composition.py`, plus one generic `_step_deliver` step in
+`adapters/driving/workflow/turn_workflow.py`. **No new port.** The port count stays exactly
+as `docs/ARCHITECTURE.md` §3 states it (see D24 — that section is the only place a count is
+stated). The already-planned `ChannelHumanGateway` (named in `composition.py`'s pseudo-code)
+shares this same registry rather than inventing its own: one channel-id → adapter lookup,
+used by both the mid-turn human-wait path and the end-of-turn delivery path.
 
-**What it gives.** Multi-channel routing, contact management, an agent inbox, and **human
-handoff** — which is exactly the A5 gap we deferred to D2. Handing a conversation to a person
-*is* Chatwoot's core product, so option B closes that gap by adopting rather than building.
+**Shape B — a sixteenth port — was considered and rejected.** Two independent arguments,
+not one:
 
-**What it does NOT replace.** Chatwoot shows *messages*. It shows no tool calls, no
-reasoning, no policy denials, no knowledge hits, no per-turn cost. It replaces the
-**user-facing half** of the F10 transcript viewer and **none of the admin half** —
-`TranscriptReader` is still required either way.
+- `HumanGateway` cannot absorb this instead. Its own docstring scopes it to one question —
+  *"who do I ask, and how do I wait for the answer?"* (`ports/human_gateway.py:1`). Delivering
+  a finished result is a different question; folding it in is the two-questions-one-port
+  mistake `CLAUDE.md`'s layer rule calls a port cut wrong.
+- A new port does not clear the bar D15 sets for when one is worth it: it would not add a
+  question the domain asks, only a dispatch step over channels already carried on
+  `CallerIdentity.channel` (`domain/turn.py:68`). D10 already established the precedent for
+  this shape of problem — MCP composes into `ToolProvider` instead of becoming its own port,
+  because it does not change the question `ToolProvider` answers. `docs/ARCHITECTURE.md` §3
+  is explicit that this is the general pattern here, not an exception: every capability added
+  since the first draft — compaction, skills, MCP, media, knowledge, peers, transcripts —
+  entered as data and composition, and the invariant the architecture defends is that a
+  vertical touches only `ToolProvider` and the rows behind `ToolPolicy`, not that the port
+  count never moves. Moving it anyway is not free regardless: D24's addendum found a
+  stale-count defect that had already spread to five files from one earlier move.
 
-**What it costs.** An extra hop of latency; a mapping from `SessionRef` onto its
-(conversation, contact, inbox) model; and self-hosting means another Rails app with its own
-Postgres **and its own Redis**. That Redis is Chatwoot's, not ours — D21 concerns our work
-queue and is unaffected.
+**Why delivery cannot ride the phase-one polling contract instead.** D13's contract is
+`POST /turns` returning 202, consumed via `GET /turns/{turn_id}`. That assumes a caller able
+to poll us. D22 already verified, for the two channels that matter most, that this does not
+hold: WhatsApp Cloud API and Telegram Bot API are webhook-push in the direction that matters
+here too — the platform POSTs inbound to us, and answering means us calling out to *their*
+send API, never them calling back into ours. Neither channel can be served by a model where
+the client fetches its own answer; the answer has to be pushed.
 
-**One capability it adds that nothing else does.** Inbound typing state, but only from its
-own web widget — never from a WhatsApp or Telegram conversation it relays, because the
-providers do not expose it (D22).
-
-### How to decide
-
-The deciding question is **whether the first paying customer needs human handoff on day one.**
-
-- Customer service: almost certainly yes → Option B is worth the hop.
-- Delivery optimization or fraud analysis, operating internally: probably no → Option A, and
-  handoff arrives with D2 as planned.
-
-Whichever is chosen, record it here as D23 resolved and note the date. Do not let F0 start
-without it: the first driving adapter is written under one of these assumptions.
+**Consequence.** `t-f0-00` closes: the first driving adapter is no longer written under an
+undecided assumption. The webhook adapters and the delivery registry itself are still
+unbuilt — tracked as new tasks in F3, where `ChannelHumanGateway` already lives (see
+`docs/TASKS.md`).
 
 ---
 
@@ -656,3 +689,157 @@ count — nowhere else needs to repeat it.
 This addendum is kept rather than folded into D24 because the failure is the point: a
 decision record written to prevent drift drifted, and a hand-maintained inventory of stale
 strings is itself a stale string waiting to happen.
+
+---
+
+## D25 · Four-eyes: an approval must come from a second person
+
+**Decision.** `DecideApproval` refuses an approval whose `subject_id` is the human who
+started the turn. The "requester" is that human — `TurnRequest.caller.subject_id` — never
+the agent. The rule gates `approved=True` only, treats an unknown requester as a refusal,
+and compares `subject_id` alone, stripped and casefolded.
+
+**Evidence — the agent cannot be the requester.** `CallerIdentity` is the only human
+identity a turn carries, and `PendingRequest` (`domain/turn.py`) carries none at all: it
+holds `kind`, `tool_call_id`, `tool_name`, `arguments` and `reason`. There is nothing to
+compare an approver *against* on the agent side, so a rule phrased "the approver must
+differ from the agent that asked" could never fire. It would be a control that passes by
+construction — the same defect `t-f10-07`'s visibility table had, and for the same reason:
+the assertion restates its own input.
+
+**Evidence — the channel does not prove identity.** `decide_approval.py`'s own STEP 2 note
+already listed the three ways it fails: a shared inbox, a forwarded message, a group chat.
+That is why the comparison is on `subject_id` and not on the tuple with `channel`: the same
+person answering from WhatsApp instead of the web is still the same person, and matching on
+the tuple would let a channel switch defeat the rule.
+
+**Reasoning — why this rule at all.** The suspension exists because `ToolPolicy` returned
+NEEDS_APPROVAL: policy already decided this action needs a human. If the human who asked is
+also the human who answers, the second signature carries no information the first did not —
+the request already expressed their intent. D11 chose delivery as the first vertical
+precisely so the core is not shaped by fraud's regulatory weight, but this control is the
+one piece fraud will need unchanged, and retrofitting it after approvals exist means
+auditing every approval already granted.
+
+**Refusal is not gated, and that is deliberate.** Four-eyes stops a human *granting*
+themselves a permission. Refusing your own request removes one. Gating it would leave the
+turn asleep until it expires with the one person who wants it stopped unable to stop it —
+a worse outcome, produced by a stricter rule.
+
+**Unknown requester fails closed.** When the lookup returns None the approver may well be a
+second person, but nothing here can show it. An approval that cannot be demonstrated is not
+one. `FourEyesError` covers both halves for that reason.
+
+**Casefold and strip, not exact match.** The two mistakes are not symmetric. An exact-match
+rule is defeated by whichever spelling of their own id the requester can persuade a channel
+to send (`U-1`, `u-1 `); over-matching costs one identity provider that issues two distinct
+subjects differing only by case, which is a defect there rather than a decision here. Fail
+in the direction that refuses.
+
+**Where the requester comes from.** An injected `RequesterLookup` callable, bound by the
+composition root — the same arrangement, and the same two reasons, as `DecisionSignal` in
+the same file: `application/` may not reach for a repository, and a narrow callable gives
+the use case nothing it could wait on. No port changes; the invariant holds.
+
+**The refused attempt is not audited, and that is a gap.** `AuditSink` has four members and
+none of them records "somebody tried and was refused". Filing the attempt through
+`record_human_decision(approved=False)` would read in the trail as a refusal the human never
+made, which is worse than silence, so the check runs *before* the audit row and writes
+nothing. This is the one place D25 differs from the DENY path in
+`PolicyEnforcement.before_tool_execute`, which writes its row and then raises. A
+`record_rejected_decision` member is owed and has no anchor.
+
+**Still open.** Nothing constructs `DecideApproval` in `composition.py`, so the `requester`
+seat has a default of `None` and an unwired use case does not evaluate the rule. That is a
+deployment defect, not a permitted mode. `Core/tests/unit/test_four_eyes.py` pins the
+unwired behaviour deliberately — an unenforced rule nobody tested looks exactly like an
+enforced one from the outside.
+
+---
+
+## D26 · Evidence travels to the model as bytes, never as a signed URL
+
+**Decision.** `request_evidence` results reach the model as inline bytes. A signed URL is
+used only where the evidence is known to carry no personal data, and that branch must be
+opted into per profile, never defaulted.
+
+**Evidence.** Verified against the installed Pydantic AI and recorded in `docs/TASKS.md`
+under F7: given `ImageUrl` or `AudioUrl`, Pydantic AI does **not** fetch the file. It sends
+the URL to the provider, and the provider downloads it.
+
+**Reasoning.** That single fact changes what the two options are. It is not "bytes over the
+wire versus a pointer over the wire" — it is *who fetches*. With a URL the provider's
+infrastructure makes an outbound request to our storage, so:
+
+- The disclosure is to a third party. Evidence in this system is a photo of a package, an
+  identity document, an invoice. Handing a provider a URL to it discloses the content to
+  whoever operates that provider and to whatever egress sits in front of them, in a request
+  we do not make, cannot see, and did not log.
+- The signature outlives the turn. A signed URL is valid for its whole TTL to anyone
+  holding it, and it is now in the provider's request logs. Bytes in a request body have no
+  independent lifetime.
+- The failure is silent and remote. A provider that cannot reach the URL produces a model
+  answer about a picture it never saw, not an exception on our side. Bytes either arrive or
+  the call fails here, where the traceback names the culprit.
+- Our storage becomes reachable from the provider's network. `adapters/driven/media_fs/`
+  is content-addressed local storage; a signed-URL path means it must be publicly routable,
+  which is a deployment requirement the bytes path does not create.
+
+**Cost of the decision, stated honestly.** Bytes are re-uploaded on every turn that replays
+the evidence, they count against the request size limit, and they inflate the compaction
+budget that D8 exists to manage. That is the price, and it is a bill, not a disclosure.
+
+**Where the branch lives.** `t-f7-07`, in `adapters/driven/agent_pydantic/runner.py`. This
+entry is the ruling only; no code lands with it.
+
+---
+
+## D27 · Reasoning is kept 30 days, deleted by a scheduled sweep
+
+**Decision.** Rows in `turn_reasoning` are deleted 30 days after `created_at`, by a
+scheduled sweep that owns no other table. The window is configuration with a 30-day
+default, not a constant, and shortening it must not require a migration.
+
+**Evidence — what is in the table.** `reasoning_migration.py` (0015) stores the model's
+`reasoning_content` verbatim, and `docs/FIELD-NOTES.md` records that MiniMax M3 returns it
+in **both** modes — 128 characters on a default call, 91 with `reasoning_effort="medium"`,
+in the same smoke test. Every turn produces a block. This is not an occasional artefact
+whose volume can be ignored; it is one row per turn, forever, by default.
+
+**Evidence — what those rows are.** `domain/transcript.py` answers REASONING as
+`USER: False, ADMIN: True`. The migration's own docstring says why the table is separate:
+reasoning holds the model's private speculation about the person it is speaking to, and a
+`messages` row would put it one forgotten WHERE clause from that person. A store that is
+this sensitive and this deliberately walled off is a store whose value decays fast and
+whose liability does not.
+
+**Reasoning — why 30 days.** The stated purpose (`t-f10-06`, the operator endpoints) is
+letting an operator page a conversation to understand what the agent did. That is an
+incident-response and complaint window, and incidents are looked at in days, not quarters.
+Nothing in F10 reads reasoning for training, analytics, or reproduction — `t-f1-19` proves a
+turn is reproducible from the **profile version** and the audit trail, neither of which is
+in this table. So the window is the one that keeps the operator endpoint useful and gives
+back nothing else. Thirty days covers a monthly review cycle with margin; the audit trail
+and the transcript survive independently, and deleting reasoning does not make a past turn
+unauditable.
+
+**A window nobody wrote down is an unbounded one.** That is the whole reason this entry
+exists. The migration explicitly declined to invent one and pointed here.
+
+**What deletes them.** A scheduled sweep — the same scheduler as `t-later-01`
+(`adapters/driving/scheduler/cron.py`) — issuing a bounded, repeated
+`DELETE FROM turn_reasoning WHERE created_at < now() - <window>` in batches. Not
+`ON DELETE CASCADE` from any parent, because there is no parent that expires; not a
+partition drop, because the table is small enough that the operational cost of monthly
+partitions exceeds the delete cost; not application-side deletion on read, because a row
+nobody reads is exactly the row that must still go.
+
+**A defect this decision found, and does not fix.** `reasoning_migration.py`'s docstring
+claims "`created_at` is indexed so a retention sweep is a range delete rather than a table
+scan". The index it created is
+`ix_turn_reasoning_session_created (session_id, tenant_id, created_at, id)` — `created_at`
+is the *third* column. It serves the per-session read it was designed for and does **not**
+serve a global sweep by age, which is a sequential scan of the whole table. The sweep needs
+its own `created_at`-leading index, or it must run per session. That belongs to whoever
+owns the sweep; the claim in the docstring is wrong today and is recorded here so the sweep
+is not written against it.

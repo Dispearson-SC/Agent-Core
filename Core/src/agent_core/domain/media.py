@@ -2,7 +2,7 @@
 
 Phase:   F7 - Multimodal input and evidence
 Tasks:   docs/TASKS.md#t-f7-01
-Status:  TYPES DEFINED / BEHAVIOUR PENDING
+Status:  TYPES DEFINED / `MediaPolicy.accepts()` IMPLEMENTED (t-f7-01)
 
 WHAT THIS FILE IS
     The domain's view of a file. The domain never holds bytes: it holds a `MediaRef`
@@ -83,13 +83,22 @@ class MediaPolicy:
     allow_speech_output: bool = False
 
     def accepts(self, kind: MediaKind) -> bool:
-        """PSEUDO-CODE - implement in F7.
+        """True only when `kind` was explicitly listed. Plain membership, nothing else.
 
         Empty `accepted_kinds` means NOTHING is accepted, not everything. Media is the
         one place where a permissive default is wrong: an agent that silently accepts
         video because a set was left empty is a cost and a privacy incident.
 
+        So there is no empty-set branch here, and adding one is the defect this line
+        exists to prevent: `if not self.accepted_kinds: return True` reads like a
+        convenience, passes every test that populates the set, and opens every kind on
+        every profile that never configured one.
+
         NOTE the deliberate asymmetry with PolicyRule.subject_roles, where empty means
-        "any". Different defaults because the failure modes are different. Test both.
+        "any". Different defaults because the failure modes are different, not because
+        one of them is an oversight: a role-agnostic policy rule has to match everybody
+        to be useful, while an unconfigured media policy has nobody who decided that
+        video was acceptable. Do NOT "fix" one into the other; both are pinned by
+        tests/unit/test_media.py, which asserts them side by side for this reason.
         """
-        raise NotImplementedError("F7 - docs/TASKS.md#t-f7-01")
+        return kind in self.accepted_kinds

@@ -82,6 +82,162 @@ another device, and the turn resumes with the image as the tool result.
 
 ---
 
+## Day 1.5 — cold start and the operator surface
+
+### F11 · A clone, an empty Postgres, and one command
+
+**Done when** a fresh clone with an empty PostgreSQL instance and a credentials file
+starts with one command, and an operator can create an agent, give it tools, connect it to
+an MCP server, point it at another agent, watch a tool refused, approve that refusal, have
+one agent orchestrate the other, and read the whole exchange in the audit trail — **without
+writing a line of SQL, and without a code change for any of it except a new tool.**
+
+The exception is the contract, not a caveat: writing a new TOOL is code, because a tool is
+behaviour. Everything else — which tools an agent may use, which MCP servers it connects
+to, which agents it may ask, what needs approval — is configuration, or the port cut is
+wrong.
+
+That criterion is written against what actually happened the first time anyone tried to
+use this system. Everything below is a step that had to be performed by hand, and every
+one of them was invisible until a human sat at a terminal:
+
+| What a human had to do by hand | Why nothing complained |
+|---|---|
+| `CREATE DATABASE agent_core_app` and `..._dbos` | `start_container` migrates and deliberately does not create; every test created its own |
+| export `AGENT_CORE_DATABASE_URL` and `MINIMAX_API_KEY` | the process never reads `.env`; only tests do |
+| repoint both profiles off `claude-sonnet-5` | no test ever served a shipped profile against a real provider |
+| `INSERT INTO policy_rules` | **nothing in production writes that table** — only tests |
+
+The pattern is the one this build hit seven times: **the fixture that supplies a missing
+collaborator is exactly what stops anyone noticing it is missing.** F11 is that pattern
+applied to the last mile — the mile a test never walks, because a test is already inside.
+
+#### Why the CLI is the phase, and not an accessory
+
+Agents are *made, used and judged* at a terminal. The HTTP surface answers 202 and polls;
+the channels deliver text. Neither shows the thing an operator has to see to trust the
+system: which tools a profile actually resolved to, which rule admitted or refused each
+one, what the model was handed, and what a user would have seen instead. The console is
+where the silent-bug table in `CLAUDE.md` becomes visible to a person — four of those five
+areas have no failing test by definition, and a human reading a real exchange is the only
+check they will ever get.
+
+#### The two design decisions this phase makes, and what they cost
+
+**1. Bootstrap is opt-in, not automatic.** `Settings` carries no admin URL today on
+purpose: *a deployment that hands its application superuser credentials has a bigger
+problem than a missing table.* That reasoning survives. So `AGENT_CORE_ADMIN_DATABASE_URL`
+is **optional**: present, startup creates the two logical databases and migrates,
+idempotently; absent, startup migrates only and a missing database fails loudly naming the
+exact command. Development leaves it in `.env` and gets one command. Production sets it for
+one bootstrap run and removes it. The app never *requires* superuser to run.
+
+**2. Policy is reviewed configuration, not a console command.** A `:allow` command would be
+the identity widening non-negotiable #9 forbids — the console runs as a `CallerIdentity`
+and policy is an administrative write. Rules therefore live in `Core/policy/*.yaml` and are
+applied at startup the way migrations are: declarative, diffable, idempotent, and reviewed
+before they are in force. The cost is that changing a rule needs a restart, and that cost
+is deliberate — a permission that can be granted at a prompt is a permission granted
+without a record.
+
+## Day 1.6 — one agent asking another
+
+### F12 · Agent-to-agent orchestration
+
+**Done when** an operator gives one agent a question outside its competence, that agent
+delegates to a peer its own profile names, the peer answers under **its own** identity and
+permissions, and the first agent finishes the turn with that answer — surviving a redeploy
+in the middle, and with the answer treated as untrusted text the whole way.
+
+Anchored as `t-f11-42` … `t-f11-46`, which were written before this section existed: the
+loop arrived as a finding, not as a design, and this is that design written down after the
+fact. That order is itself the lesson — see *How this was found*, below.
+
+#### The shape, and why each piece is separate
+
+Delegation is **four moves**, and the reason they are four rather than one function call is
+that a peer may take hours to answer:
+
+| # | Move | Where it lives |
+|---|---|---|
+| 1 | A's model calls `ask_peer`; the turn **suspends** rather than blocking | `agent_pydantic/runner.py` (`t-f11-41`, done) |
+| 2 | The suspension becomes a real `AgentMailbox.ask()`; the correlation id is minted **and persisted together** | `workflow/turn_workflow.py` (`t-f11-42`) |
+| 3 | A worker claims the ask and runs a turn **as B** | `driving/peers/worker.py` (`t-f11-43`) |
+| 4 | The answer resumes A's turn under the provider's **original** `tool_call_id` | `workflow/turn_workflow.py` (`t-f11-44`) |
+
+Move 3 is a **driving** adapter, the sibling of `scheduler/cron.py`: it claims work from
+outside and calls a use case. It is not a service A calls.
+
+#### The five properties that must hold, and what breaks without each
+
+**1. The answering turn runs as B — B's profile, B's toolset, B's policy, B's budget.**
+Running it under A's identity makes delegation a privilege escalation dressed as a
+question: A asks B, B has tools A does not, and if the turn runs as A then A has just used
+them. It would be invisible, because the audit row would name A and everything would look
+correct. The two-sided allowlist exists to stop exactly this, and it stops nothing if the
+identity does not travel.
+
+**2. The wait is durable, and it is not sixty seconds.** `DBOS.recv()` defaults to a
+60-second timeout (`docs/FIELD-NOTES.md`), which is the trap F3 was warned about. B may
+itself suspend to ask a human. A durable wait that quietly becomes a one-minute wait looks
+fine on a fast machine and fails the first time a person is slow.
+
+**3. The `tool_call_id` is the provider's, byte for byte.** Non-negotiable #5. A regenerated
+or normalised id surfaces as a provider 400 much later, never as a failing test here.
+
+**4. A peer's answer is untrusted content.** Non-negotiable #10. *"It is our own agent"* is
+not a trust argument: an agent can be misled, and then it is a confused deputy holding our
+credentials. If B was the victim of an injection, what it sends A is hostile text with
+friendly provenance. `read_answer` already returns it fenced — the risk here is
+**double-wrapping**, not forgetting to wrap.
+
+**5. The hop count travels with the ask.** A cycle A→B→A that resets the counter at every
+hop is a limit that never fires.
+
+#### What suspends, and why they are one mechanism
+
+Three things park a turn and wait for something outside it: a peer ask, a human approval,
+and an evidence upload. They are deliberately the same mechanism — a deferred tool call
+whose result arrives later — and `PendingKind` tells them apart so the workflow can route
+each to something that can actually answer it. Publishing a peer ask to a person asks a
+question nobody can answer; `t-f9-08` exists for that.
+
+`t-f11-45` finishes the set: an approval currently **blocks** inside the run rather than
+suspending, because until `t-f11-41` there was no way to end a run with an unanswered call.
+There is now, and F3's criterion — approve 24 hours later, after a redeploy — is only
+reachable through it.
+
+#### What this phase deliberately does NOT do
+
+- **No agent discovers another.** A profile NAMES its peers, and an unnamed peer is refused.
+  `PeerPolicy.may_ask` is an allowlist whose empty value means *nobody*, and that default is
+  the whole design: a permission model whose default is "anyone" is not a permission model.
+- **No agent is an administrator.** The worker runs under a `CallerIdentity`, never an
+  `AdminIdentity` (non-negotiable #9). An answering agent is a caller with no human behind
+  it.
+- **No shared conversation.** A fresh session per answered ask, for `cron.py`'s reason:
+  inheriting a conversation would let one customer's history answer another's question.
+
+#### How this was found, which is the part worth keeping
+
+Every piece of the ASK side and the TRANSPORT was built and tested across F9: the durable
+mailbox with an exactly-once `claim_next` and a concurrent-claim test behind it, the hop
+limit, the two-sided allowlist, the A2A adapter, `ask_peer` as a shared deferred tool, and
+`PendingKind.DELEGATION` so a peer ask is never published to a human. `t-f11-14` then made
+a profile able to name a peer.
+
+**None of it had ever run.** `ask_peer` resolved into the toolset and the policy engine
+refused it — `deny [no matching rule]`, correctly, because no rule granted it — so the model
+was never offered the tool and the deferred path was never walked. Granting it in YAML,
+which is exactly what this architecture claims should be sufficient, is what finally reached
+the code nobody had executed: first a crash in the runner, then an empty middle where the
+worker should be.
+
+That is the ninth instance in this build of one shape — **a collaborator every test supplied
+and production never exercised** — and the queue with no consumer is its purest form: a
+durable, correct, concurrency-tested mechanism built for a caller nobody wrote. The table in
+`docs/STATE.md` lists the other eight.
+
 ## Day 2 — multi-tenant
 
 ### D2 · LiteLLM becomes a proxy, plus voice out
@@ -111,6 +267,99 @@ backups, independent scaling — and is worth taking when an incident justifies 
 before.
 
 ---
+
+## Day 2.5 — a provider you did not configure by hand
+
+### F13 · Provider and tenant provisioning
+
+**Not built. Specified here because the gap was found by asking a question the system could
+not answer**, and writing it down now is cheaper than rediscovering it on the first machine
+that is not this one.
+
+**Done when** bringing a new machine up is: point it at a database, start it, name a
+provider once — and every tenant that appears afterwards gets its own virtual key, its own
+budget and its own spend line without anyone opening the proxy's UI.
+
+#### What exists today, exactly
+
+Day 1 resolves a credential by litellm's own convention: `MINIMAX_API_KEY` and friends,
+read from the environment, with `.env` layered under it and the mapped names exported
+(`t-f11-23`). `preflight` reports whether each one resolves, by NAME and never by value.
+That half works and needs nothing.
+
+Day 2 sets `AGENT_CORE_LITELLM_BASE_URL` and the same code talks to a proxy instead — which
+is the whole point of `t-d2-01`, and the part of it that is real: the adapter change is one
+URL.
+
+**What nobody built is everything around it.** Registering a model on the proxy, creating a
+team, creating a virtual key, granting the team its models — all of that was performed by
+hand through the proxy's API while this system was being built, and nothing in the tree
+does any of it.
+
+#### The defect that question surfaced
+
+`models.py::proxy_model` builds `LiteLLMProvider(api_base=base_url)` **with no `api_key`**.
+So in proxy mode this code sends no virtual key at all, and **per-tenant separation is not
+reachable through the adapter.**
+
+`test_proxy_mode.py` knows: its own docstring records that `proxy_model` takes no key and
+that its signature was frozen at `t-f0-04`, and it proved per-team spend separation by
+using the two keys **directly** rather than through our code. That is an honest test of the
+proxy and not a test of this system's use of it.
+
+So `t-d2-01` is real for what it claims about the ADAPTER — the code change is one URL — and
+D2's done-when, *"two tenants with different budgets run in parallel and one is cut off by
+the proxy"*, is **not** met on the path production takes. The anchor is qualified rather
+than re-opened, because what it built is right; what is missing was never anyone's.
+
+#### The decision, made 2026-09-11: one key per TENANT
+
+One team per deployment, one virtual key per tenant, created the first time that tenant is
+seen. `CallerIdentity` already carries `tenant_id`, so the key travels with the turn and no
+port changes shape.
+
+**Not per agent**, and the reason is worth keeping. A per-agent budget ALREADY EXISTS:
+`max_cost_usd` in the profile, enforced per turn. Adding a second one in the proxy would be
+two enforcement points for one number, and two enforcement points for one number drift.
+
+They are also not the same control, which is why both are wanted:
+
+| | Stops | Lives |
+|---|---|---|
+| `max_cost_usd` in the profile | a runaway TURN | in our process, and only works while it behaves |
+| the virtual key's budget | real SPEND | on the other side of the network, and does not care whether we behave |
+
+The **team** is the unit that owns model grants. Granting models per agent would mean
+re-granting every time an agent is added, which is configuration churn for no boundary: an
+agent is already restricted by its profile's `model:` line.
+
+#### The CLI shape, and why it is not a console command
+
+```
+python -m agent_core provider add <name>      # register a model and its credential, once
+python -m agent_core provider status          # what the proxy has, and what it costs
+python -m agent_core tenant add <tenant-id>   # a virtual key, a budget, a spend line
+```
+
+**A subcommand, not a `:command` in the console** — for the reason `Core/policy` is not a
+console command either: creating a key is an administrative write, the console runs as a
+`CallerIdentity`, and non-negotiable #9 says a caller is never widened into an
+administrator. A permission granted at a prompt is a permission granted with no record.
+
+Auto-creating a tenant's key on first sight is the convenience; it belongs at
+tenant-provisioning time, behind an administrative identity, and `preflight` should report a
+tenant that has no key rather than the first turn discovering it.
+
+#### What this phase must not do
+
+- **Never print or log a key**, including the one it just created. `preflight` already sets
+  the vocabulary: *set* / *missing*, never a value.
+- **Never fall back to an unkeyed request** when a tenant's key is missing. That is the
+  shape `docs/FIELD-NOTES.md` records for `api_key=None`: a client built without a
+  credential reads `OPENAI_API_KEY` and sends it to whatever provider it was pointed at.
+  Refuse loudly instead — a missing key must not become someone else's spend.
+- **Never store a key in a profile.** A profile is reviewable data an operator reads top to
+  bottom; a credential in one is a credential in a code review, a backup and a diff.
 
 ## Sizing
 

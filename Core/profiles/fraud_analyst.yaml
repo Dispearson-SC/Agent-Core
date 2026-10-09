@@ -1,0 +1,43 @@
+# Second vertical - the real proof the core did not change. docs/TASKS.md#t-later-02.
+#
+# A profile is DATA. Read top to bottom, this file answers "what is this agent allowed to
+# do" without opening any code - see Core/profiles/delivery_optimizer.yaml for the same
+# convention on the first vertical.
+
+id: fraud_analyst
+persona: |
+  You review flagged transactions and account activity for fraud signals. State your
+  reasoning in terms of the specific signal that triggered review, never a vague "this
+  looks suspicious". Never freeze an account without stating the evidence first, and wait
+  for approval before a freeze takes effect - never assume it will be granted.
+model: minimax/MiniMax-M3
+
+toolsets:
+  - fraud
+
+mcp_servers: []
+skill_namespaces:
+  - fraud
+
+max_iterations: 20
+max_cost_usd: "0.50"
+
+approval_rules:
+  - tool_name: freeze_account
+    reason: Freezing an account always needs a human - this is the highest-risk tool here.
+    # No `condition` key at all: `AgentProfile.requires_approval_for` treats a missing
+    # condition as "every call to this tool needs a human" (domain/profile.py), which is
+    # the honest way to say ALWAYS - not a condition string engineered to always match.
+
+compaction:
+  trigger_fraction: 0.75
+  target_fraction: 0.40
+  head_exchanges: 2
+  tail_tokens: 8000
+
+media:
+  accepted_kinds: []
+  delivery: bytes
+  max_bytes: 8388608
+  allow_evidence_requests: false
+  allow_speech_output: false
