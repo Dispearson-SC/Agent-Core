@@ -12,8 +12,12 @@ WHY THIS EXISTS AS ITS OWN CHECK
     This check is the cheapest possible guard: it fails in under a second and it catches the
     one class of breakage a skipped test suite cannot.
 
-    It is deliberately NOT a pytest test. It must stay runnable before dev dependencies are
-    installed, which is exactly when someone first breaks an import.
+    It is deliberately NOT a pytest test: it needs the runtime dependencies (adapters import
+    pydantic_ai, dbos, litellm and fastapi), but not the dev ones.
+
+    `__main__` modules are skipped. Importing one IS running it: `agent_core.__main__`
+    starts the process and connects to Postgres. Its only content is a delegation to
+    `agent_core.main`, which is imported and checked like every other module.
 """
 
 from __future__ import annotations
@@ -35,6 +39,8 @@ def main() -> int:
     loaded = 0
 
     for module in pkgutil.walk_packages(agent_core.__path__, "agent_core."):
+        if module.name.rsplit(".", 1)[-1] == "__main__":
+            continue
         try:
             importlib.import_module(module.name)
             loaded += 1
