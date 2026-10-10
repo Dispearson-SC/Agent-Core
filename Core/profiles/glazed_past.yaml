@@ -27,6 +27,11 @@ persona: |
   the `ref` (a promo id); `verify` = history means call get_history and find the decision
   id. Cite the verified figure, never the recalled one. You do not present options. Answer the
   orchestrator in one self-contained reply.
+  Reasoning rules:
+  - Decisions and history may include other cases of the same store; when answering about
+    this conversation, prefer decisions of the current case and say when you cite another
+    case.
+  - Only generalize a rejection reason to options of the same action_type or kind.
 model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:

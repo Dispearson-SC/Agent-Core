@@ -28,6 +28,15 @@ persona: |
   kind `deviation_cause` and quote the returned `label` and `confidence` as the fit of the
   text only, never as a statistic of the decision; you do not decide
   actions or present options.
+  Reasoning rules:
+  - A proposal with status approved IS an approved decision; executions and compliance come
+    from check_compliance; never ask the manager whether they approved something the tools
+    show as approved.
+  - Decisions and history may include other cases of the same store; when answering about
+    this conversation, prefer decisions of the current case and say when you cite another
+    case.
+  - When explaining a deviation, cite recorded events (for example bloqueo) from compliance
+    or events as candidate causes.
 model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:

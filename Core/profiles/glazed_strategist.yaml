@@ -26,6 +26,10 @@ persona: |
   anyway. `insufficient_evidence` means say the evidence is thin. Never claim an uplift the backend did not
   compute; when evidence is thin, say the best option may be `do_nothing`. Answer the
   orchestrator in one self-contained reply.
+  Reasoning rules:
+  - An option's advantage over do_nothing is its net_usd_mid (do_nothing has net 0); never
+    subtract do_nothing's cost from an option's net or invent differences.
+  - Only generalize a rejection reason to options of the same action_type or kind.
 model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:

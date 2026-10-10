@@ -169,3 +169,53 @@ def test_past_follows_the_verify_hint_of_a_recalled_experience() -> None:
     persona = _persona("past")
     assert "verify" in persona and "ref" in persona
     assert "evaluate_promo" in persona and "get_history" in persona
+
+
+RULES = {
+    "arith": (
+        "an option's advantage over do_nothing is its net_usd_mid (do_nothing has net 0); "
+        "never subtract do_nothing's cost from an option's net or invent differences"
+    ),
+    "status": (
+        "a proposal with status approved IS an approved decision; executions and compliance "
+        "come from check_compliance; never ask the manager whether they approved something "
+        "the tools show as approved"
+    ),
+    "scope": (
+        "decisions and history may include other cases of the same store; when answering "
+        "about this conversation, prefer decisions of the current case and say when you cite "
+        "another case"
+    ),
+    "cause": (
+        "when explaining a deviation, cite recorded events (for example bloqueo) from "
+        "compliance or events as candidate causes"
+    ),
+    "reject": (
+        "only generalize a rejection reason to options of the same action_type or kind"
+    ),
+    "units": (
+        "never treat a summed metric as a data defect without comparing like-for-like units "
+        "(for example stockout_hours is summed across SKUs and is not comparable with "
+        "staff_hours)"
+    ),
+}
+ROLE_RULES = {
+    "orchestrator": ["arith", "status", "scope", "cause", "reject", "units"],
+    "present": ["arith", "units"],
+    "past": ["scope", "reject"],
+    "supply": ["arith", "units"],
+    "strategist": ["arith", "reject"],
+    "sentinel": ["status", "scope", "cause"],
+    "auditor": ["units"],
+}
+
+
+def _flat(role: str) -> str:
+    return " ".join(_persona(role).split()).lower()
+
+
+@pytest.mark.parametrize(
+    ("role", "rule"), [(r, k) for r, ks in ROLE_RULES.items() for k in ks]
+)
+def test_personas_carry_the_reasoning_rules(role: str, rule: str) -> None:
+    assert RULES[rule].lower() in _flat(role)
