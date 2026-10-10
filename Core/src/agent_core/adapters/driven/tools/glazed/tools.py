@@ -37,7 +37,13 @@ def _bounded(limit: int) -> int:
 
 
 async def get_kpis(ctx: Ctx, date_from: str, date_to: str) -> Any:
-    """KPIs (sales, waste, stockout losses...) for the store between two ISO dates."""
+    """KPIs for the store between two ISO dates, computed by the backend.
+
+    Returns sales and traffic figures plus the two losses in USD: `waste_usd` and
+    `lost_sales_usd`, the latter as {low, mid, high} (a range, never a point value; quote
+    all three). `lost_sales_usd` may be absent; never estimate it yourself.
+    Results carry `store_display_name`: use it, never the store code.
+    """
     return await call(
         ctx, "GET", f"{_API}/kpis", params={"date_from": date_from, "date_to": date_to}
     )
@@ -49,7 +55,19 @@ async def get_day_summary(ctx: Ctx, date: str) -> Any:
 
 
 async def get_issues(ctx: Ctx, limit: int = 10) -> Any:
-    """Active issues for the store that are relevant to your role, most urgent first."""
+    """Active issues for the store relevant to your role, most urgent first.
+
+    Each issue has: issue_id, kind, sku?, supplier_id?, store_display_name, as_of,
+    severity_usd, `evidence` [{metric, value, unit, period, source}], `data_caveats` [str]
+    and `options` (up to 4, always including `do_nothing` with its cost). Each option has:
+    option_id, action_type, params, expected_benefit_usd {low, mid, high}, cost_usd,
+    net_usd_mid, loss_impact {waste_usd_delta, lost_sales_usd_delta}, confidence {score
+    0-1, n_backtest, method}, tier (N0-N3, computed by the backend), tier_reasons, urgency
+    {deadline_date?, reason}, risk, if_act and if_not. Present only these options.
+    Optional fields (sku, supplier_id, deadline_date, if_act, if_not) are absent when the
+    backend has no value: a field may be absent; never estimate it yourself.
+    An empty list means there are no issues.
+    """
     return await call(ctx, "GET", f"{_API}/issues", params={"limit": _bounded(limit)})
 
 
@@ -59,12 +77,23 @@ async def explain_metric(ctx: Ctx, metric: str) -> Any:
 
 
 async def get_order_plan(ctx: Ctx) -> Any:
-    """The computed order plan (draft) for the store: SKUs, quantities, deadlines."""
+    """The order plan (draft) computed by the backend, one line per SKU.
+
+    Lines carry the quantity plus: service_level_target, order_deadline,
+    projected_stockout_date, stockout_risk_without_order, vs_current_practice
+    {received_to_sold, qty_delta} and min_order_warning.
+    Any of these may be absent; never estimate it yourself.
+    If one is absent, say it is not available. Results carry `store_display_name`.
+    """
     return await call(ctx, "GET", f"{_API}/order-plan")
 
 
 async def project_inventory(ctx: Ctx, sku: str, horizon: int = 7) -> Any:
-    """Projected stock of one SKU for the next `horizon` days, with the stockout date."""
+    """Projected stock of one SKU for the next `horizon` days (1-30), from the backend.
+
+    Includes the projected stockout date when there is one. Fields may be absent; never
+    estimate it yourself.
+    """
     return await call(
         ctx,
         "GET",
@@ -74,17 +103,27 @@ async def project_inventory(ctx: Ctx, sku: str, horizon: int = 7) -> Any:
 
 
 async def get_supplier_performance(ctx: Ctx) -> Any:
-    """Supplier lead times and delays for the store."""
+    """Supplier lead times and delays for the store, as computed by the backend.
+
+    Fields may be absent; never estimate it yourself.
+    """
     return await call(ctx, "GET", f"{_API}/suppliers/performance")
 
 
 async def get_history(ctx: Ctx) -> Any:
-    """Past decisions, their results and recorded events for the store."""
+    """Past decisions and recorded events for the store, as the backend stores them.
+
+    A decision's measured result is only present once the backend has measured it; it may
+    be absent; never estimate it yourself, say the result is not available yet.
+    """
     return await call(ctx, "GET", f"{_API}/history")
 
 
 async def evaluate_promo(ctx: Ctx, promo_id: str) -> Any:
-    """Computed evaluation (uplift, cost, verdict) of a promotion, past or proposed."""
+    """Backend-computed evaluation (uplift, cost, verdict) of a promotion.
+
+    Fields may be absent; never estimate it yourself.
+    """
     return await call(
         ctx, "GET", f"{_API}/promos/{quote(promo_id, safe='')}/evaluation"
     )
@@ -125,15 +164,13 @@ async def record_event(
     )
 
 
-async def propose_action(
-    ctx: Ctx,
-    issue_id: str,
-    option_id: str,
-    action_type: str,
-    params: dict[str, Any],
-    rationale: str,
-) -> Any:
-    """Propose an action for an issue option. NOTHING is executed: the manager decides."""
+async def propose_action(ctx: Ctx, issue_id: str, option_id: str, rationale: str) -> Any:
+    """Propose one option of an issue. NOTHING is executed: the manager decides.
+
+    Send only the `issue_id` and `option_id` returned by get_issues, and a short
+    `rationale` in prose. The backend copies action_type, params and tier from the stored
+    option; you cannot set or change them. Returns the pending proposal (or an error).
+    """
     return await call(
         ctx,
         "POST",
@@ -141,8 +178,6 @@ async def propose_action(
         body={
             "issue_id": issue_id,
             "option_id": option_id,
-            "action_type": action_type,
-            "params": params,
             "rationale": rationale,
         },
     )

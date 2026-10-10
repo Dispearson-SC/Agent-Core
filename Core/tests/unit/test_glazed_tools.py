@@ -184,16 +184,17 @@ def test_propose_action_posts_a_proposal_and_never_executes(backend: Backend) ->
             _ctx(agent="glazed_orchestrator"),
             issue_id="I1",
             option_id="O2",
-            action_type="place_order",
-            params={"sku": "SKU-1", "qty": 4},
             rationale="stockout in 2 days",
         )
     )
 
     req = backend.requests[0]
     assert (req.method, req.url.path) == ("POST", "/internal/v1/proposals")
-    assert json.loads(req.content)["option_id"] == "O2"
-    assert json.loads(req.content)["params"] == {"sku": "SKU-1", "qty": 4}
+    assert json.loads(req.content) == {
+        "issue_id": "I1",
+        "option_id": "O2",
+        "rationale": "stockout in 2 days",
+    }
     assert len(backend.requests) == 1
 
 
@@ -245,7 +246,7 @@ def test_an_unexpected_exception_never_escapes_a_tool(backend: Backend) -> None:
 
 def test_a_body_that_cannot_be_serialised_becomes_an_error_result(backend: Backend) -> None:
     result = _run(
-        gt.propose_action(_ctx(), "I1", "O1", "reorder", {"bad": object()}, "because")
+        gt.propose_action(_ctx(), "I1", "O1", object())  # type: ignore[arg-type]
     )
 
     assert "error" in result
