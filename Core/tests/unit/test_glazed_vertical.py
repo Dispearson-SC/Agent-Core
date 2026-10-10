@@ -133,7 +133,9 @@ READ = (
     "get_snapshot check_compliance get_integrity_issues audit_promo "
     "get_kpis get_day_summary get_issues explain_metric get_order_plan project_inventory "
     "get_supplier_performance get_history evaluate_promo recall_experiences "
-    "offer_surplus request_stock forecast_demand forecast_daily_flow"
+    "offer_surplus request_stock forecast_demand forecast_daily_flow "
+    "get_inventory_status get_expiring get_deliveries get_issue_analysis "
+    "get_staffing get_promos get_outlook"
 ).split()
 
 
@@ -244,3 +246,75 @@ def test_supply_and_strategist_personas_route_future_questions_to_forecast_tools
         assert tool in persona
         assert "never estimate a forecast yourself" in persona.lower()
         assert "unavailable" in persona.lower()
+
+
+NEW_VIEW_TOOLS = (
+    "get_inventory_status get_expiring get_deliveries get_issue_analysis "
+    "get_staffing get_promos get_outlook"
+).split()
+
+
+@pytest.mark.parametrize("tool", NEW_VIEW_TOOLS)
+def test_each_view_tool_has_its_own_read_row_for_peer_and_service_on_glazed(tool: str) -> None:
+    rule = _rule("glazed-read-" + tool.replace("_", "-"))
+    assert rule.tool_pattern == tool
+    assert rule.effect is Effect.ALLOW
+    assert rule.subject_roles == frozenset({"peer", "glazed-service"})
+    assert rule.channels == frozenset({"peer", "glazed"})
+
+
+def test_the_orchestrator_toolset_stays_free_of_data_tools() -> None:
+    from agent_core.adapters.driven.tools.glazed.tools import TOOLSETS
+
+    tools = set(TOOLSETS["orchestrator"]().tools)
+    assert tools == {"propose_action", "classify_text", "get_briefing"}
+
+
+def test_orchestrator_routes_staffing_promos_expiry_inventory_and_today_tomorrow() -> None:
+    persona = " ".join(_profile("orchestrator").persona.split())
+    assert "staffing hours" in persona and "glazed_strategist" in persona
+    assert "promotions" in persona
+    assert "expiring items" in persona and "inventory cover" in persona
+    assert "deliveries" in persona
+    assert "today or tomorrow" in persona and "glazed_present" in persona
+
+
+@pytest.mark.parametrize(
+    ("role", "tools"),
+    [
+        (
+            "supply",
+            ("get_inventory_status", "get_expiring", "get_deliveries", "get_issue_analysis"),
+        ),
+        ("present", ("get_expiring", "get_outlook")),
+        ("strategist", ("get_staffing", "get_promos", "get_outlook")),
+    ],
+)
+def test_specialist_personas_call_their_tool_before_saying_data_is_missing(
+    role: str, tools: tuple[str, ...]
+) -> None:
+    persona = " ".join(_profile(role).persona.split())
+    for tool in tools:
+        assert tool in persona
+    assert "BEFORE saying data is missing" in persona
+
+
+@pytest.mark.parametrize("role", ["orchestrator", "present", "supply", "strategist"])
+def test_weekdays_come_from_the_briefing_calendar(role: str) -> None:
+    persona = " ".join(_profile(role).persona.split())
+    assert "weekday_es" in persona
+    assert "never compute a weekday" in persona.lower()
+
+
+def test_order_recommendations_carry_confidence_do_nothing_and_min_order_warning() -> None:
+    for role in ("orchestrator", "supply"):
+        persona = " ".join(_profile(role).persona.split())
+        assert "min_order_warning" in persona
+        assert "do-nothing comparison" in persona
+
+
+def test_past_outcomes_are_cited_for_what_happened_before() -> None:
+    for role in ("orchestrator", "past"):
+        persona = " ".join(_profile(role).persona.split())
+        assert "decision_log" in persona and "outcome" in persona
+        assert "what happened before" in persona.lower()

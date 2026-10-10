@@ -9,10 +9,10 @@ Code computes (the Glazed backend), agents explain.
 | Profile | Toolset package | Tools |
 |---|---|---|
 | `glazed_orchestrator` | `glazed_orchestrator` (+ `peers`, added by the `peers:` block) | `get_briefing`, `propose_action`, `classify_text`, `ask_peer` |
-| `glazed_present` | `glazed_present` | `get_snapshot`, `get_kpis`, `get_day_summary`, `get_issues`, `explain_metric` |
+| `glazed_present` | `glazed_present` | `get_snapshot`, `get_kpis`, `get_day_summary`, `get_issues`, `explain_metric`, `get_expiring`, `get_outlook` |
 | `glazed_past` | `glazed_past` | `get_snapshot`, `get_history`, `evaluate_promo`, `recall_experiences` |
-| `glazed_supply` | `glazed_supply` | `get_snapshot`, `get_order_plan`, `project_inventory`, `get_supplier_performance`, `get_issues`, `forecast_demand` |
-| `glazed_strategist` | `glazed_strategist` | `get_snapshot`, `get_kpis`, `get_day_summary`, `evaluate_promo`, `audit_promo`, `forecast_daily_flow` |
+| `glazed_supply` | `glazed_supply` | `get_snapshot`, `get_order_plan`, `project_inventory`, `get_supplier_performance`, `get_issues`, `forecast_demand`, `get_inventory_status`, `get_expiring`, `get_deliveries`, `get_issue_analysis` |
+| `glazed_strategist` | `glazed_strategist` | `get_snapshot`, `get_kpis`, `get_day_summary`, `evaluate_promo`, `audit_promo`, `forecast_daily_flow`, `get_staffing`, `get_promos`, `get_outlook` |
 | `glazed_sentinel` | `glazed_sentinel` | `get_history`, `record_event`, `check_compliance`, `classify_text` |
 | `glazed_auditor` | `glazed_auditor` | `get_integrity_issues` |
 | `glazed_liaison` | `glazed_liaison` | `offer_surplus`, `request_stock` (placeholders: "not available yet") |
@@ -245,6 +245,40 @@ Rules the tools enforce:
   `qty_range` / `transactions` range yields `{forecast_available: false, reason, ...}`. Nothing
   is fabricated. Other errors (for example 500) are returned as the usual `{error, status}`.
 - Only the fields listed above are forwarded; unknown backend fields are dropped.
+
+## Manager-view tools (inventory, expiry, deliveries, staffing, promos, outlook, analysis)
+
+The backend computes these for the web screens; the same use cases are exposed under
+`/internal/v1/*` so the chat quotes the same numbers. Each tool binds store and case from the
+turn headers (`X-Glazed-Store`, `X-Glazed-Case`, `X-Glazed-Agent`); the model never supplies
+`store_id` or `as_of`. Replies are compacted with a key whitelist (no store codes or internal
+sources). The orchestrator holds none of them (star topology): its persona routes staffing and
+promotions to `glazed_strategist`, expiring items, inventory cover and deliveries to
+`glazed_supply`, and today or tomorrow to `glazed_present`. Policy: one `glazed-read-<tool>` row
+per tool for `peer` and `glazed-service` on channels `peer` and `glazed`. Audit: every argument is
+recorded by value (windows, sort, status, issue id); none is free text.
+
+| Tool (profiles) | Request (model arguments, clamped) | Compact reply |
+|---|---|---|
+| `get_inventory_status(sort?, limit=15)` (supply) | GET `/internal/v1/inventory?sort&limit` (`sort` in `days_of_cover`, `turnover`, `slow`; limit 1-50) | `coverage`, `items[]`: `days_of_cover`, `status`, `status_reason`, `next_delivery_date`, `projected_stockout_date`, `forecast_outflow_units`, `on_hand`, ... |
+| `get_expiring(days=7)` (supply, present) | GET `/internal/v1/expiring?days&limit=10` (days 1-30) | `total_items`, `total_waste_usd`, `by_day[]`, `items[]` with `waste_usd {low,mid,high}` |
+| `get_deliveries(days=7)` (supply) | GET `/internal/v1/deliveries?days` (days 1-14) | `days[]` -> `deliveries[]` (supplier, kind `open_po`/`scheduled`, lines, value) |
+| `get_issue_analysis(issue_id)` (supply) | GET `/internal/v1/issues/{issue_id}/analysis` | `recommendation`, `pros`, `cons`, `confidence`, `tier`, `deadline`, `impact_usd`, `dialog` (`if_not_act` = do-nothing, `alternatives`) |
+| `get_staffing(days=7)` (strategist) | GET `/internal/v1/staffing?days` (days 1-14, daily only) | `benchmark`, `days[]`: `recommended_staff_hours {low,mid,high}`, `forecast_transactions`, `basis: daily` |
+| `get_promos(status?, days=14)` (strategist) | GET `/internal/v1/promos?status&days&limit=10` (status `active`/`upcoming`/`past`, days 1-365) | `items[]`: `audit_verdict`, `evaluation` (ended promos only) |
+| `get_outlook(days=2)` (present, strategist) | GET `/internal/v1/outlook?days` (days 1-7) | `days[]`: `net_sales`, `transactions`, `avg_ticket`, `expected_waste_usd`, `expected_lost_sales_usd` (ranges), `weather`, `weather_note` |
+
+Failure behaviour: HTTP 404/503, an unreachable or timed-out backend, or an unexpected body gives
+`{available: false, reason}` ("never estimate it yourself"); other errors (for example 400) stay
+`{error, status}`; an unknown `sort` or `status` is refused locally without a request.
+
+Persona rules (asserted in `test_glazed_vertical.py`): call the matching tool BEFORE saying data is
+missing; weekdays and dates come from the briefing `calendar` (`weekday_es`, `is_weekend`,
+`holiday`, `delivery_suppliers`), never computed by the model (specialists use a `calendar` only when
+their results carry one, otherwise they give the ISO date); order recommendations carry the
+confidence, the do-nothing comparison and `min_order_warning` when present; "what happened before"
+questions cite the `outcome` in `decision_log` / experiences. The `calendar` itself is added to the
+briefing by the backend.
 
 ## Reply-quality rules
 
