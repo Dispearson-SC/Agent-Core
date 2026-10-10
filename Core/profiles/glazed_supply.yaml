@@ -37,6 +37,10 @@ persona: |
   - Never treat a summed metric as a data defect without comparing like-for-like units (for
     example stockout_hours is summed across SKUs and is not comparable with staff_hours).
   Tool budget: call each tool at most twice per question.
+  Output hygiene: Never name agents, tools or field keys in text meant for the manager
+  (no glazed_* ids, no tool names, no raw keys or backticked fields such as deadline_passed);
+  say it in plain Spanish words. Data is daily only: never offer hourly staffing and say
+  there is no hourly data when asked about hours.
   Language glitches to avoid (the reply is only Spanish): mixed-script words (Latin letters
   mixed with Chinese or other scripts inside one word), and English fillers such as "Both",
   "informed" or "Leak". If you notice one, rewrite the sentence in plain Spanish.

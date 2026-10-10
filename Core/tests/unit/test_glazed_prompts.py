@@ -271,3 +271,58 @@ def test_briefing_and_snapshot_docstrings_name_their_fields() -> None:
     snapshot = inspect.getdoc(gt.get_snapshot) or ""
     for term in ("kpis", "top_issues", "order_plan", "suppliers", "integrity", "may be absent"):
         assert term in snapshot
+
+
+SPECIALISTS = [r for r in ROLES if r != "orchestrator"]
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_no_internal_names_in_user_text(role: str) -> None:
+    persona = _persona(role)
+    assert "Never name agents, tools or field keys in text meant for the manager" in persona
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_daily_granularity_only(role: str) -> None:
+    persona = _persona(role)
+    assert "Data is daily only" in persona
+    assert "never offer hourly staffing" in persona
+    assert "there is no hourly data" in persona
+
+
+def test_orchestrator_writes_exactly_one_final_answer() -> None:
+    persona = _persona("orchestrator")
+    assert "Write exactly ONE final answer, composed after all tool and peer results" in persona
+    assert "no drafts, self-talk or meta statements about access" in persona
+
+
+def test_orchestrator_uses_spanish_roles_for_specialists() -> None:
+    persona = _persona("orchestrator")
+    assert "el analista de abastecimiento" in persona
+
+
+def test_orchestrator_treats_other_cases_and_store_memory_as_history() -> None:
+    persona = _persona("orchestrator")
+    assert "other_case" in persona and "store_memory" in persona
+    assert "en otro caso" in persona and "experiencia previa de la tienda" in persona
+    assert "never as current" in persona
+
+
+def test_orchestrator_proposes_only_on_request_and_matches_plan_lines() -> None:
+    persona = _persona("orchestrator")
+    assert "Only propose actions when the manager asks for a recommendation or decision" in persona
+    assert "For a diagnosis, diagnose" in persona
+    assert "order-plan line or issue option" in persona
+    assert "respect the do_nothing comparison" in persona
+
+
+def test_orchestrator_never_skips_an_order_that_runs_out_of_cover() -> None:
+    persona = _persona("orchestrator")
+    assert "Never propose skip_order when the projected cover runs out" in persona
+    assert "next delivery" in persona
+
+
+def test_sentinel_quotes_compliance_cause_as_the_cause() -> None:
+    persona = _persona("sentinel")
+    assert "`cause`" in persona
+    assert "quote it as the cause" in persona

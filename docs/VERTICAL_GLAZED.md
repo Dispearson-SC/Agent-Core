@@ -245,3 +245,17 @@ Rules the tools enforce:
   `qty_range` / `transactions` range yields `{forecast_available: false, reason, ...}`. Nothing
   is fabricated. Other errors (for example 500) are returned as the usual `{error, status}`.
 - Only the fields listed above are forwarded; unknown backend fields are dropped.
+
+## Reply-quality rules
+
+Persona rules added after live runs with a small model (asserted in `test_glazed_prompts.py`):
+
+- Every profile: never name agents, tools or field keys in text for the manager; data is daily
+  only (no hourly staffing; say there is no hourly data).
+- Orchestrator: exactly one final answer composed after all results (no drafts or access
+  meta-talk); specialists referred to by Spanish role; `other_case` / `store_memory` items are
+  history ("en otro caso", "experiencia previa de la tienda"); propose only when a
+  recommendation or decision is requested, always tied to an order-plan line or issue option
+  with the `do_nothing` comparison; never `skip_order` when cover runs out before the next
+  delivery.
+- Sentinel: a compliance `cause` or execution detail is quoted as the cause.
