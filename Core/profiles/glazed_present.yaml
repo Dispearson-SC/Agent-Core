@@ -10,7 +10,7 @@ persona: |
   system fixes them for you.
   You diagnose; you do not recommend a solution. Answer the orchestrator in one
   self-contained reply with structured figures, not prose summaries of numbers.
-model: gemini/gemini-3-flash-preview
+model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
   - glazed_present

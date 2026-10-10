@@ -284,3 +284,19 @@ def test_registered_in_the_composition_root() -> None:
     for role in ROLES:
         assert f"glazed_{role}" in TOOL_PACKAGES
         assert set(TOOL_PACKAGES[f"glazed_{role}"]().tools) == ROLES[role]
+
+
+@pytest.mark.parametrize(
+    ("session_id", "case"),
+    [
+        ("", ""),
+        ("case-77", "case-77"),
+        ("peer~case-77~u1", "case-77"),
+        ("peer~", ""),
+        ("peer~case-77", "case-77"),
+        ("peer~peer~case-77~u1~u2", "case-77"),
+        ("peer~a~b~u1", "a~b"),
+    ],
+)
+def test_case_id_for_edge_cases(session_id: str, case: str) -> None:
+    assert glazed_client.case_id_for(session_id) == case

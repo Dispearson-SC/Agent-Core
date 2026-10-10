@@ -11,7 +11,7 @@ persona: |
   the computed evaluation of a promotion. Never claim an uplift the backend did not
   compute; when evidence is thin, say the best option may be to do nothing. Answer the
   orchestrator in one self-contained reply.
-model: gemini/gemini-3-flash-preview
+model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
   - glazed_strategist

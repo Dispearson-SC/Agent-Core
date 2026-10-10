@@ -20,7 +20,7 @@ Code computes (the Glazed backend), agents explain.
 One toolset package per role because the contract test requires a profile to select exactly
 one package. Shared code lives in `adapters/driven/tools/glazed/` (`client.py`, `tools.py`);
 the `glazed_<role>/tools.py` modules only expose `build_toolset`, registered in
-`composition.TOOL_PACKAGES`. Model: `gemini/gemini-3-flash-preview`. Budgets are small
+`composition.TOOL_PACKAGES`. Model: `minimax/MiniMax-M3.1-flash-preview` (see Model selection). Budgets are small
 (`max_iterations` 5-15, `max_cost_usd` 0.10-0.50 per turn).
 
 `recall_experiences(query, limit=5)` reads the store's long-term memory (Backboard). Its
@@ -91,8 +91,38 @@ and network failures come back as `{"error": ...}` the agent can explain; they n
 | Variable | Purpose |
 |---|---|
 | `GLAZED_BACKEND_URL` | Backend internal API base (default `http://backend:8080`) |
-| `GEMINI_API_KEY` | Gemini credential. `preflight` checks it by name; never faked |
-| `AGENT_CORE_LITELLM_BASE_URL` | LiteLLM proxy. **Needed for Gemini today**: in library mode `preflight` fails with "no endpoint and credential resolve" for `gemini/...` (litellm's Gemini config exposes no `get_api_base`); the proxy route passes |
+| `MINIMAX_API_KEY` | MiniMax credential, the name litellm reads (documented, wins when both are set). `MINIMAX_API` (this repository's `.env` name) is accepted too, in preflight and in the model client. Names only are ever reported, never values |
+| `MINIMAX_API_BASE` | Optional MiniMax endpoint override |
+| `GEMINI_API_KEY` / `GEMINI_API_BASE` | Gemini credential and optional base override (default: Google's OpenAI-compatible endpoint). See the caveat below |
+| `AGENT_CORE_LITELLM_BASE_URL` | Optional LiteLLM proxy; when set, provider credentials are the proxy's |
+
+## Model selection
+
+The Core has **no env or config override** for a profile's model: `model:` in the profile is
+the single source of truth. Default for this vertical: `minimax/MiniMax-M3.1-flash-preview`
+(chat accepts it although `/models` does not list it; `minimax/MiniMax-M3` also works). To
+change all eight profiles at once:
+
+```
+python Core/scripts/set_glazed_model.py minimax/MiniMax-M3
+```
+
+(or edit the single `model:` line of each `Core/profiles/glazed_*.yaml`). The script rewrites
+only the top-level `model:` line and is idempotent.
+
+**Gemini is not supported for this vertical's tool-calling flows.** Library-mode preflight now
+resolves `gemini/*` (litellm's Gemini config has no `get_api_base`/`get_api_key`, so the Core
+falls back to `GEMINI_API_KEY` and Google's OpenAI-compatible endpoint), but multi-step tool
+calls through that endpoint fail with HTTP 400 "Function call is missing a thought_signature".
+Use MiniMax.
+
+## Failure behaviour
+
+Every glazed tool returns `{"error": ...}` instead of raising (timeouts, HTTP errors, non-JSON
+bodies, unserialisable arguments, any other exception): a tool that raises would leave the
+turn stranded as running. `ask_peer` needs the exact peer id as `target`; the orchestrator
+persona lists them. The allow row for it is `glazed-orchestrator-asks-specialists` (channel
+`glazed`, role `glazed-manager`).
 
 ## Running the console against the orchestrator
 

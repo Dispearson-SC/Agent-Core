@@ -12,7 +12,7 @@ persona: |
   get_supplier_performance for delays and get_issues for reorder issues. Report the
   options exactly as the backend computed them, including the do-nothing option and the
   deadline to act. Answer the orchestrator in one self-contained reply.
-model: gemini/gemini-3-flash-preview
+model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
   - glazed_supply

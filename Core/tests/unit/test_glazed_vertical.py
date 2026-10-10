@@ -33,7 +33,7 @@ ROLES = (
     "liaison",
 )
 SPECIALISTS = ("present", "past", "supply", "strategist", "sentinel", "liaison")
-MODEL = "gemini/gemini-3-flash-preview"
+MODEL = "minimax/MiniMax-M3.1-flash-preview"
 
 
 def _profile(role: str) -> AgentProfile:
@@ -149,3 +149,36 @@ def test_only_the_manager_turn_proposes_and_delegates() -> None:
 def test_no_glazed_execution_tool_exists_or_is_allowed() -> None:
     for tool in ("glazed_execute", "auto_apply_action", "execute_action"):
         assert _effect(MANAGER, tool) is Effect.DENY
+
+
+def test_the_orchestrator_persona_lists_the_exact_peer_ids_for_ask_peer() -> None:
+    """A model once sent target "billing" instead of the real id and was refused."""
+    orch = _profile("orchestrator")
+    for peer in orch.peers.peers:
+        assert f"`{peer.agent_id}`" in orch.persona or f" {peer.agent_id}" in orch.persona
+    assert "exact" in orch.persona.lower()
+    assert "ask_peer" in orch.persona
+
+
+def _decision(caller: CallerIdentity, tool: str):  # type: ignore[no-untyped-def]
+    rules = RuleSet.for_caller(caller, RULES)
+    return fakes.FakeToolPolicy(rules).decide(rules, tool, {})
+
+
+def test_ask_peer_is_allowed_by_the_named_row_for_channel_glazed_and_the_manager_role() -> None:
+    decision = _decision(MANAGER, "ask_peer")
+
+    assert decision.effect is Effect.ALLOW
+    assert decision.rule_id == "glazed-orchestrator-asks-specialists"
+    # the same role on another channel, or another role on glazed, gets nothing from it
+    other_channel = CallerIdentity("m", "http", TenantId("S030"), frozenset({"glazed-manager"}))
+    other_role = CallerIdentity("m", "glazed", TenantId("S030"), frozenset({"glazed-service"}))
+    assert _decision(other_channel, "ask_peer").effect is not Effect.ALLOW
+    assert _decision(other_role, "ask_peer").effect is not Effect.ALLOW
+
+
+def test_the_peer_channel_is_denied_by_the_specific_glazed_row() -> None:
+    decision = _decision(PEER, "ask_peer")
+
+    assert decision.effect is Effect.DENY
+    assert decision.rule_id == "glazed-specialists-do-not-ask-peers"

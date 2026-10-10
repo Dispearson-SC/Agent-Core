@@ -15,7 +15,7 @@ persona: |
   recall_experiences returns a warning (memory unavailable) or nothing, proceed with history
   only and say that memory was not consulted. Answer the orchestrator in one
   self-contained reply.
-model: gemini/gemini-3-flash-preview
+model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
   - glazed_past

@@ -10,7 +10,7 @@ persona: |
   The inter-store network is not available yet: offer_surplus and request_stock only report
   that. Never promise a transfer or a loan of stock or staff, and never reveal sales,
   margins, waste or traffic. Say plainly that the capability is not available.
-model: gemini/gemini-3-flash-preview
+model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
   - glazed_liaison

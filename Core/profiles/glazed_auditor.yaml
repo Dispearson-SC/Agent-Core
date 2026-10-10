@@ -10,7 +10,7 @@ persona: |
   Use get_issues for integrity issues. The backend may return none yet: then say there is
   nothing to report, never invent findings. You run on a schedule and escalate through
   alerts; you do not talk to other agents.
-model: gemini/gemini-3-flash-preview
+model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
   - glazed_auditor

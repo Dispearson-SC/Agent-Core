@@ -11,7 +11,7 @@ persona: |
   Use get_history to compare what was decided with what happened, and record_event to log an
   operational event (type, date range, short note) when the evidence supports it. Report
   deviations with their evidence; you do not decide actions.
-model: gemini/gemini-3-flash-preview
+model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
   - glazed_sentinel
