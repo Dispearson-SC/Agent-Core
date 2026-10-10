@@ -26,6 +26,11 @@ persona: |
   `min_order_warning`); say not available for any that is absent. Report the options exactly
   as the backend computed them, including `do_nothing` and the deadline to act
   (`urgency`). Answer the orchestrator in one self-contained reply.
+  Forecasts: for ANY question about future demand of a SKU use forecast_demand with the
+  SKU and the target date; never estimate a forecast yourself. Quote the range (`qty_range`
+  p10-p50-p90, not only `qty`) and the `model`. If the tool says the forecast is
+  unavailable (`forecast_available` false) or returns an error, say so and stop. Forecasts
+  exist only for dates after the case's current date.
   Reasoning rules:
   - An option's advantage over do_nothing is its net_usd_mid (do_nothing has net 0); never
     subtract do_nothing's cost from an option's net or invent differences.

@@ -7,6 +7,7 @@ No network: `httpx.MockTransport` stands in for the backend.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import inspect
 import json
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ ROLES = {
         "project_inventory",
         "get_supplier_performance",
         "get_issues",
+        "forecast_demand",
     },
     "strategist": {
         "get_snapshot",
@@ -37,6 +39,7 @@ ROLES = {
         "get_day_summary",
         "evaluate_promo",
         "audit_promo",
+        "forecast_daily_flow",
     },
     "sentinel": {"get_history", "record_event", "check_compliance", "classify_text"},
     "auditor": {"get_integrity_issues"},
@@ -458,3 +461,160 @@ def test_get_snapshot_and_get_briefing_take_no_model_parameter(backend: Backend)
     assert dict(snapshot.url.params) == {} and dict(briefing.url.params) == {}
     assert not set(inspect.signature(gt.get_snapshot).parameters) - {"ctx"}
     assert not set(inspect.signature(gt.get_briefing).parameters) - {"ctx"}
+
+
+# ---- forecast tools ------------------------------------------------------------------
+
+_DEMAND_BODY = {
+    "sku": "SKU-1",
+    "target_date": "2026-03-10",
+    "qty_range": {"p10": 8, "p50": 12, "p90": 19},
+    "quantiles": {"p05": 6, "p95": 22},
+    "censored_share": 0.18,
+    "weather_kind": "observed",
+    "model": "lgbm-quantile",
+    "model_version": "2026.03.1",
+    "forecast_origin": "2026-03-07",
+    "internal_debug": "must not leak",
+}
+_FLOW_BODY = {
+    "target_date": "2026-03-10",
+    "transactions": {"p10": 90, "p50": 120, "p90": 150},
+    "avg_ticket": {"p10": 8.0, "p50": 9.5, "p90": 11.0},
+    "granularity": "daily",
+    "model": "lgbm-quantile",
+    "forecast_origin": "2026-03-07",
+}
+_TARGET = dt.date(2026, 3, 10)
+
+
+def test_forecast_demand_calls_the_contract_endpoint_without_store_or_as_of(
+    backend: Backend,
+) -> None:
+    backend.body = _DEMAND_BODY
+    _run(gt.forecast_demand(_ctx(), "SKU-1", _TARGET))
+
+    (req,) = backend.requests
+    assert req.method == "GET"
+    assert req.url.path == "/internal/v1/forecast/demand"
+    assert dict(req.url.params) == {"sku": "SKU-1", "target_date": "2026-03-10"}
+    assert req.headers["X-Glazed-Store"] == "S030"
+    assert req.headers["X-Glazed-Case"] == "case-77"
+
+
+def test_forecast_demand_returns_the_documented_shape(backend: Backend) -> None:
+    backend.body = _DEMAND_BODY
+    out = _run(gt.forecast_demand(_ctx(), "SKU-1", _TARGET))
+
+    assert out["qty"] == 12
+    assert out["qty_range"] == {"p10": 8, "p50": 12, "p90": 19}
+    assert out["quantiles"] == {"p05": 6, "p95": 22}
+    assert out["censored_share"] == 0.18
+    assert out["weather_kind"] == "observed"
+    assert (out["model"], out["model_version"]) == ("lgbm-quantile", "2026.03.1")
+    assert (out["sku"], out["target_date"], out["forecast_origin"]) == (
+        "SKU-1",
+        "2026-03-10",
+        "2026-03-07",
+    )
+    assert "internal_debug" not in out
+
+
+def test_forecast_demand_omits_optional_quantiles_when_absent(backend: Backend) -> None:
+    backend.body = {k: v for k, v in _DEMAND_BODY.items() if k != "quantiles"}
+    out = _run(gt.forecast_demand(_ctx(), "SKU-1", _TARGET))
+    assert "quantiles" not in out
+
+
+@pytest.mark.parametrize("status", [400, 422])
+def test_forecast_demand_backend_rejecting_a_non_future_date_is_a_clear_error(
+    backend: Backend, status: int
+) -> None:
+    backend.status = status
+    out = _run(gt.forecast_demand(_ctx(), "SKU-1", _TARGET))
+    assert "future" in out["error"].lower()
+
+
+def test_forecast_demand_refuses_a_date_not_after_the_forecast_origin(
+    backend: Backend,
+) -> None:
+    backend.body = {**_DEMAND_BODY, "forecast_origin": "2026-03-10"}
+    out = _run(gt.forecast_demand(_ctx(), "SKU-1", _TARGET))
+    assert "future" in out["error"].lower()
+    assert "qty" not in out
+
+
+@pytest.mark.parametrize("status", [404, 503])
+def test_forecast_demand_unavailable_on_404_503(backend: Backend, status: int) -> None:
+    backend.status = status
+    out = _run(gt.forecast_demand(_ctx(), "SKU-1", _TARGET))
+    assert out["forecast_available"] is False
+    assert out["sku"] == "SKU-1"
+    assert "qty" not in out and "qty_range" not in out
+
+
+def test_forecast_demand_unavailable_when_backend_unreachable(backend: Backend) -> None:
+    backend.error = httpx.ConnectError("boom")
+    out = _run(gt.forecast_demand(_ctx(), "SKU-1", _TARGET))
+    assert out["forecast_available"] is False
+
+
+def test_forecast_demand_without_a_range_is_unavailable_never_invented(
+    backend: Backend,
+) -> None:
+    backend.body = {"sku": "SKU-1", "model": "m"}
+    out = _run(gt.forecast_demand(_ctx(), "SKU-1", _TARGET))
+    assert out["forecast_available"] is False
+
+
+def test_forecast_demand_other_backend_errors_stay_errors(backend: Backend) -> None:
+    backend.status = 500
+    out = _run(gt.forecast_demand(_ctx(), "SKU-1", _TARGET))
+    assert "error" in out and "forecast_available" not in out
+
+
+def test_forecast_daily_flow_calls_the_contract_endpoint(backend: Backend) -> None:
+    backend.body = _FLOW_BODY
+    _run(gt.forecast_daily_flow(_ctx(agent="glazed_strategist"), _TARGET))
+
+    (req,) = backend.requests
+    assert req.url.path == "/internal/v1/forecast/flow"
+    assert dict(req.url.params) == {"target_date": "2026-03-10"}
+    assert req.headers["X-Glazed-Agent"] == "glazed_strategist"
+
+
+def test_forecast_daily_flow_returns_the_documented_shape_with_null_footfall(
+    backend: Backend,
+) -> None:
+    backend.body = _FLOW_BODY
+    out = _run(gt.forecast_daily_flow(_ctx(), _TARGET))
+
+    assert out["transactions"] == {"p10": 90, "p50": 120, "p90": 150}
+    assert out["footfall"] is None
+    assert out["avg_ticket"]["p50"] == 9.5
+    assert out["granularity"] == "daily"
+    assert (out["model"], out["forecast_origin"]) == ("lgbm-quantile", "2026-03-07")
+    assert out["target_date"] == "2026-03-10"
+
+
+def test_forecast_daily_flow_keeps_footfall_when_present(backend: Backend) -> None:
+    backend.body = {**_FLOW_BODY, "footfall": {"p10": 100, "p50": 150, "p90": 200}}
+    out = _run(gt.forecast_daily_flow(_ctx(), _TARGET))
+    assert out["footfall"] == {"p10": 100, "p50": 150, "p90": 200}
+
+
+def test_forecast_daily_flow_future_only_and_unavailable(backend: Backend) -> None:
+    backend.status = 422
+    assert "future" in _run(gt.forecast_daily_flow(_ctx(), _TARGET))["error"].lower()
+    backend.status = 503
+    out = _run(gt.forecast_daily_flow(_ctx(), _TARGET))
+    assert out["forecast_available"] is False and "transactions" not in out
+    backend.status, backend.error = 200, httpx.ConnectError("x")
+    assert _run(gt.forecast_daily_flow(_ctx(), _TARGET))["forecast_available"] is False
+
+
+def test_forecast_daily_flow_refuses_a_date_not_after_the_forecast_origin(
+    backend: Backend,
+) -> None:
+    backend.body = {**_FLOW_BODY, "forecast_origin": "2026-03-11"}
+    assert "future" in _run(gt.forecast_daily_flow(_ctx(), _TARGET))["error"].lower()

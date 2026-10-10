@@ -133,7 +133,7 @@ READ = (
     "get_snapshot check_compliance get_integrity_issues audit_promo "
     "get_kpis get_day_summary get_issues explain_metric get_order_plan project_inventory "
     "get_supplier_performance get_history evaluate_promo recall_experiences "
-    "offer_surplus request_stock"
+    "offer_surplus request_stock forecast_demand forecast_daily_flow"
 ).split()
 
 
@@ -236,3 +236,11 @@ def test_get_briefing_is_allowed_for_the_manager_turn_only() -> None:
     assert _effect(MANAGER, "get_briefing") is Effect.ALLOW
     assert _effect(PEER, "get_briefing") is Effect.DENY
     assert _effect(SERVICE, "get_briefing") is Effect.DENY
+
+
+def test_supply_and_strategist_personas_route_future_questions_to_forecast_tools() -> None:
+    for role, tool in (("supply", "forecast_demand"), ("strategist", "forecast_daily_flow")):
+        persona = _profile(role).persona
+        assert tool in persona
+        assert "never estimate a forecast yourself" in persona.lower()
+        assert "unavailable" in persona.lower()

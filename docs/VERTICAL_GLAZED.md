@@ -11,8 +11,8 @@ Code computes (the Glazed backend), agents explain.
 | `glazed_orchestrator` | `glazed_orchestrator` (+ `peers`, added by the `peers:` block) | `get_briefing`, `propose_action`, `classify_text`, `ask_peer` |
 | `glazed_present` | `glazed_present` | `get_snapshot`, `get_kpis`, `get_day_summary`, `get_issues`, `explain_metric` |
 | `glazed_past` | `glazed_past` | `get_snapshot`, `get_history`, `evaluate_promo`, `recall_experiences` |
-| `glazed_supply` | `glazed_supply` | `get_snapshot`, `get_order_plan`, `project_inventory`, `get_supplier_performance`, `get_issues` |
-| `glazed_strategist` | `glazed_strategist` | `get_snapshot`, `get_kpis`, `get_day_summary`, `evaluate_promo`, `audit_promo` |
+| `glazed_supply` | `glazed_supply` | `get_snapshot`, `get_order_plan`, `project_inventory`, `get_supplier_performance`, `get_issues`, `forecast_demand` |
+| `glazed_strategist` | `glazed_strategist` | `get_snapshot`, `get_kpis`, `get_day_summary`, `evaluate_promo`, `audit_promo`, `forecast_daily_flow` |
 | `glazed_sentinel` | `glazed_sentinel` | `get_history`, `record_event`, `check_compliance`, `classify_text` |
 | `glazed_auditor` | `glazed_auditor` | `get_integrity_issues` |
 | `glazed_liaison` | `glazed_liaison` | `offer_surplus`, `request_stock` (placeholders: "not available yet") |
@@ -220,3 +220,28 @@ python -m agent_core console --durable --profile glazed_orchestrator \
 
 `--durable` is required for delegation (see CONSOLE.md). The backend must be reachable at
 `GLAZED_BACKEND_URL` and know the case id used as `--session`.
+
+## Forecast tools
+
+Two read-only tools expose the backend's forecasts. The model never supplies the store or
+`as_of`: they are bound from the turn (`X-Glazed-Store`, `X-Glazed-Case` headers; the backend
+derives `as_of` from the case, as for every other tool). The model supplies only the SKU and the
+target date. Policy: `glazed-read-forecast-demand` / `glazed-read-forecast-daily-flow` allow the
+`peer` and `glazed-service` roles (the specialists), like every other `glazed-read-*` row; the
+manager turn keeps no direct data tools. Both personas must call the tool for any future question,
+never estimate a forecast, quote the range and the model, and say so when it is unavailable.
+
+| Tool (profile) | Request | Response fields the tool returns |
+|---|---|---|
+| `forecast_demand(sku, target_date)` (`glazed_supply`) | GET `/internal/v1/forecast/demand?sku&target_date` (store and as_of from headers/case) | `sku`, `target_date`, `qty` (= `qty_range.p50`), `qty_range {p10,p50,p90}`, `quantiles?`, `censored_share`, `weather_kind` (`observed`), `model`, `model_version`, `forecast_origin` |
+| `forecast_daily_flow(target_date)` (`glazed_strategist`) | GET `/internal/v1/forecast/flow?target_date` | `target_date`, `transactions {p10,p50,p90}`, `footfall {..}` or `null`, `avg_ticket {p10,p50,p90}`, `granularity` (`daily`), `model`, `forecast_origin` |
+
+Rules the tools enforce:
+
+- Future only: the backend must answer HTTP 400/422 for a `target_date` not after the case's
+  `as_of`; the tool turns that into "forecasts are only for future dates". As a second guard it
+  also refuses a response whose `forecast_origin` is not before `target_date`.
+- Unavailable: HTTP 404/503, an unreachable or timed-out backend, or a body without the
+  `qty_range` / `transactions` range yields `{forecast_available: false, reason, ...}`. Nothing
+  is fabricated. Other errors (for example 500) are returned as the usual `{error, status}`.
+- Only the fields listed above are forwarded; unknown backend fields are dropped.

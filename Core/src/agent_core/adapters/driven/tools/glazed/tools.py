@@ -10,6 +10,7 @@ The numbers come from the backend (code computes); these functions only fetch an
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
@@ -149,6 +150,104 @@ async def project_inventory(ctx: Ctx, sku: str, horizon: int = 7) -> Any:
         f"{_API}/inventory/projection",
         params={"sku": sku, "horizon": _clamped(horizon, 1, 30, 7)},
     )
+
+
+_FUTURE_ONLY = {
+    "error": "Forecasts are only available for future dates: the target date must be after "
+    "the case's current date. Tell the manager so; do not estimate one."
+}
+_DEMAND_KEYS = (
+    "quantiles",
+    "censored_share",
+    "weather_kind",
+    "model",
+    "model_version",
+    "forecast_origin",
+)
+_FLOW_KEYS = ("avg_ticket", "granularity", "model", "forecast_origin")
+
+
+def _unavailable(subject: dict[str, Any], reason: str) -> dict[str, Any]:
+    return {
+        **subject,
+        "forecast_available": False,
+        "reason": f"{reason} Say the forecast is unavailable; never estimate one yourself.",
+    }
+
+
+def _after_origin(target: dt.date, origin: Any) -> bool:
+    """True unless the backend's forecast origin proves the target is not in the future."""
+    try:
+        return target > dt.date.fromisoformat(str(origin)[:10])
+    except ValueError:
+        return True  # no usable origin: the backend already enforced the rule
+
+
+async def _forecast(
+    ctx: Ctx, path: str, target: dt.date, params: dict[str, Any], subject: dict[str, Any]
+) -> Any:
+    """Shared forecast call: future-only rule, unavailable handling. Returns the raw body."""
+    data = await call(
+        ctx, "GET", f"{_API}/forecast/{path}", params={**params, "target_date": target.isoformat()}
+    )
+    if not isinstance(data, dict):
+        return _unavailable(subject, "The backend returned an unexpected forecast.")
+    if "error" in data:
+        status = data.get("status")
+        if status in (400, 422):
+            return dict(_FUTURE_ONLY)
+        if status is None or status in (404, 503):
+            return _unavailable(subject, "The forecast service is not available right now.")
+        return data
+    if not _after_origin(target, data.get("forecast_origin")):
+        return dict(_FUTURE_ONLY)
+    return data
+
+
+async def forecast_demand(ctx: Ctx, sku: str, target_date: dt.date) -> Any:
+    """Forecast demand of one SKU on a FUTURE date, from the backend's model.
+
+    Use it for any question about future demand; never estimate a forecast yourself.
+    `target_date` must be after the case's current date. Returns `qty` (the p50),
+    `qty_range` {p10, p50, p90} (quote the range, never only the point), optional
+    `quantiles`, `censored_share` (share of history with stockouts), `weather_kind`
+    ("observed"), `model`, `model_version` and `forecast_origin`. If `forecast_available`
+    is false the forecast is unavailable: say so.
+    """
+    subject = {"sku": sku, "target_date": target_date.isoformat()}
+    data = await _forecast(ctx, "demand", target_date, {"sku": sku}, subject)
+    if "error" in data or data.get("forecast_available") is False:
+        return data
+    qty_range = data.get("qty_range")
+    if not isinstance(qty_range, dict) or qty_range.get("p50") is None:
+        return _unavailable(subject, "The backend returned no demand range.")
+    result: dict[str, Any] = {**subject, "qty": qty_range["p50"], "qty_range": qty_range}
+    result.update({k: data[k] for k in _DEMAND_KEYS if k in data})
+    return result
+
+
+async def forecast_daily_flow(ctx: Ctx, target_date: dt.date) -> Any:
+    """Forecast the store's transactions and average ticket on a FUTURE date (daily).
+
+    Use it for any question about future traffic; never estimate a forecast yourself.
+    `target_date` must be after the case's current date. Returns `transactions`
+    {p10, p50, p90}, `footfall` (null when there is no data), `avg_ticket`
+    {p10, p50, p90}, `granularity` ("daily"), `model` and `forecast_origin`. Quote the
+    range and the model. If `forecast_available` is false the forecast is unavailable.
+    """
+    subject = {"target_date": target_date.isoformat()}
+    data = await _forecast(ctx, "flow", target_date, {}, subject)
+    if "error" in data or data.get("forecast_available") is False:
+        return data
+    if not isinstance(data.get("transactions"), dict):
+        return _unavailable(subject, "The backend returned no transactions range.")
+    result: dict[str, Any] = {
+        **subject,
+        "transactions": data["transactions"],
+        "footfall": data.get("footfall"),
+    }
+    result.update({k: data[k] for k in _FLOW_KEYS if k in data})
+    return result
 
 
 async def get_supplier_performance(ctx: Ctx) -> Any:
@@ -329,10 +428,20 @@ TOOLSETS: dict[str, Callable[[], FunctionToolset[Any]]] = {
     ),
     "past": lambda: _toolset(get_snapshot, get_history, evaluate_promo, recall_experiences),
     "supply": lambda: _toolset(
-        get_snapshot, get_order_plan, project_inventory, get_supplier_performance, get_issues
+        get_snapshot,
+        get_order_plan,
+        project_inventory,
+        get_supplier_performance,
+        get_issues,
+        forecast_demand,
     ),
     "strategist": lambda: _toolset(
-        get_snapshot, get_kpis, get_day_summary, evaluate_promo, audit_promo
+        get_snapshot,
+        get_kpis,
+        get_day_summary,
+        evaluate_promo,
+        audit_promo,
+        forecast_daily_flow,
     ),
     "sentinel": lambda: _toolset(get_history, record_event, check_compliance, classify_text),
     "auditor": lambda: _toolset(get_integrity_issues),

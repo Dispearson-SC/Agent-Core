@@ -299,6 +299,32 @@ rules:
       Reading get supplier performance changes nothing; the backend fixes the store, the case and the
       date, and returns only what this agent's role may see.
 
+  - rule_id: glazed-read-forecast-demand
+    tool_pattern: forecast_demand
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading forecast demand changes nothing; the backend fixes the store, the case and the
+      date, forecasts only future dates, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-forecast-daily-flow
+    tool_pattern: forecast_daily_flow
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading forecast daily flow changes nothing; the backend fixes the store, the case and the
+      date, forecasts only future dates, and returns only what this agent's role may see.
+
   - rule_id: glazed-read-get-history
     tool_pattern: get_history
     effect: allow

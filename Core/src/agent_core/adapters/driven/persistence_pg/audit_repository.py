@@ -170,6 +170,8 @@ ARGUMENT_ALLOWLIST: Mapping[str, frozenset[str]] = {
     "explain_metric": frozenset({"metric"}),
     "get_order_plan": frozenset(),
     "project_inventory": frozenset({"sku", "horizon"}),
+    "forecast_demand": frozenset({"sku", "target_date"}),
+    "forecast_daily_flow": frozenset({"target_date"}),
     "get_supplier_performance": frozenset(),
     "get_history": frozenset(),
     "evaluate_promo": frozenset({"promo_id"}),
