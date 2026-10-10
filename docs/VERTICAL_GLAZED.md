@@ -8,11 +8,11 @@ Code computes (the Glazed backend), agents explain.
 
 | Profile | Toolset package | Tools |
 |---|---|---|
-| `glazed_orchestrator` | `glazed_orchestrator` (+ `peers`, added by the `peers:` block) | `propose_action`, `classify_text`, `ask_peer` |
-| `glazed_present` | `glazed_present` | `get_kpis`, `get_day_summary`, `get_issues`, `explain_metric` |
-| `glazed_past` | `glazed_past` | `get_history`, `evaluate_promo`, `recall_experiences` |
-| `glazed_supply` | `glazed_supply` | `get_order_plan`, `project_inventory`, `get_supplier_performance`, `get_issues` |
-| `glazed_strategist` | `glazed_strategist` | `get_kpis`, `get_day_summary`, `evaluate_promo`, `audit_promo` |
+| `glazed_orchestrator` | `glazed_orchestrator` (+ `peers`, added by the `peers:` block) | `get_briefing`, `propose_action`, `classify_text`, `ask_peer` |
+| `glazed_present` | `glazed_present` | `get_snapshot`, `get_kpis`, `get_day_summary`, `get_issues`, `explain_metric` |
+| `glazed_past` | `glazed_past` | `get_snapshot`, `get_history`, `evaluate_promo`, `recall_experiences` |
+| `glazed_supply` | `glazed_supply` | `get_snapshot`, `get_order_plan`, `project_inventory`, `get_supplier_performance`, `get_issues` |
+| `glazed_strategist` | `glazed_strategist` | `get_snapshot`, `get_kpis`, `get_day_summary`, `evaluate_promo`, `audit_promo` |
 | `glazed_sentinel` | `glazed_sentinel` | `get_history`, `record_event`, `check_compliance`, `classify_text` |
 | `glazed_auditor` | `glazed_auditor` | `get_integrity_issues` |
 | `glazed_liaison` | `glazed_liaison` | `offer_surplus`, `request_stock` (placeholders: "not available yet") |
@@ -143,6 +143,20 @@ Personas enforce: every number verbatim from a tool result; options only from
 confidence and tier always stated, low confidence flagged. The Sentinel and Auditor say what
 their thin tools do today and nothing more. `tests/unit/test_glazed_prompts.py` scans all
 eight profiles for these rules and checks the docstrings.
+
+## Snapshot, briefing and budgets
+
+- `get_briefing` (orchestrator, `GET /internal/v1/briefing`) returns `{snapshot, headline,
+  suggested_focus}`. The orchestrator calls it first on every question, answers directly when
+  it suffices, asks at most one specialist for drill-down and proposes with the `issue_id` /
+  `option_id` of the briefing's `top_issues`. Policy: allow for `glazed-manager` on `glazed`.
+- `get_snapshot` (present, past, supply, strategist, `GET /internal/v1/snapshot`) is the
+  specialists' first call; they do not re-fetch its data unless they need another window/SKU.
+- Budgets: `max_iterations` is 6 for the orchestrator and the four snapshot specialists, 8 for
+  sentinel; personas say "call each tool at most twice per question" and to use `get_kpis`
+  once with a date window. `get_issues` takes `category` (operational|integrity|all) and `kind`.
+- The auditor is askable by the orchestrator (integrity questions); personas carry the
+  arithmetic, status, scope, cause, rejection and unit rules and the Spanish-glitch list.
 
 ## One peer ask per step (known limitation)
 

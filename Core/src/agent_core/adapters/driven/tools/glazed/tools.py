@@ -61,6 +61,31 @@ async def get_kpis(ctx: Ctx, date_from: str, date_to: str) -> Any:
     )
 
 
+async def get_snapshot(ctx: Ctx) -> Any:
+    """Everything a specialist usually needs, in one call. Call it FIRST.
+
+    Returns store_display_name, as_of, window {from, to}, `kpis` (net_sales, transactions,
+    waste_usd, lost_sales_usd {low, mid, high}, tx_per_staff_hour), `top_issues` (up to 5
+    Issues with options), `integrity` (up to 3 {kind, exposure_usd, summary}), `order_plan`
+    {due_today, due_tomorrow, top_lines}, `suppliers` (on_time_pct, fill_pct,
+    next_delivery), pending_proposals, recent_decisions and cache_age_s.
+    A field may be absent; never estimate it yourself. Do not re-fetch this data.
+    """
+    return await call(ctx, "GET", f"{_API}/snapshot")
+
+
+async def get_briefing(ctx: Ctx) -> Any:
+    """The precomputed briefing of the case. Call it FIRST on every question.
+
+    Returns `snapshot` (kpis, top_issues with options, integrity, order_plan, suppliers,
+    pending_proposals, recent_decisions), `headline` (up to 5 facts computed by code, each
+    with value, unit and source) and `suggested_focus` (issue_ids worth the manager's
+    attention). Use the issue_id and option_id of `top_issues` to propose.
+    A field may be absent; never estimate it yourself.
+    """
+    return await call(ctx, "GET", f"{_API}/briefing")
+
+
 async def get_day_summary(ctx: Ctx, date: str) -> Any:
     """Summary of one day (ISO date) for the store: sales, traffic, waste, incidents."""
     return await call(ctx, "GET", f"{_API}/day-summary", params={"date": date})
@@ -298,13 +323,17 @@ def _toolset(*functions: Callable[..., Any]) -> FunctionToolset[Any]:
 
 # One literal builder per role. The packages `glazed_<role>/` re-export these.
 TOOLSETS: dict[str, Callable[[], FunctionToolset[Any]]] = {
-    "orchestrator": lambda: _toolset(propose_action, classify_text),
-    "present": lambda: _toolset(get_kpis, get_day_summary, get_issues, explain_metric),
-    "past": lambda: _toolset(get_history, evaluate_promo, recall_experiences),
-    "supply": lambda: _toolset(
-        get_order_plan, project_inventory, get_supplier_performance, get_issues
+    "orchestrator": lambda: _toolset(propose_action, classify_text, get_briefing),
+    "present": lambda: _toolset(
+        get_snapshot, get_kpis, get_day_summary, get_issues, explain_metric
     ),
-    "strategist": lambda: _toolset(get_kpis, get_day_summary, evaluate_promo, audit_promo),
+    "past": lambda: _toolset(get_snapshot, get_history, evaluate_promo, recall_experiences),
+    "supply": lambda: _toolset(
+        get_snapshot, get_order_plan, project_inventory, get_supplier_performance, get_issues
+    ),
+    "strategist": lambda: _toolset(
+        get_snapshot, get_kpis, get_day_summary, evaluate_promo, audit_promo
+    ),
     "sentinel": lambda: _toolset(get_history, record_event, check_compliance, classify_text),
     "auditor": lambda: _toolset(get_integrity_issues),
     "liaison": lambda: _toolset(offer_surplus, request_stock),

@@ -184,6 +184,30 @@ rules:
   # cannot read data directly. Absent constraint widens, so each row states both.
   # ======================================================================================
 
+  - rule_id: glazed-read-get-snapshot
+    tool_pattern: get_snapshot
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      The snapshot is one read of everything a specialist usually needs; the backend fixes
+      the store and the case and nothing is changed.
+
+  - rule_id: glazed-read-get-briefing
+    tool_pattern: get_briefing
+    effect: allow
+    subject_roles:
+      - glazed-manager
+    channels:
+      - glazed
+    reason: >-
+      The briefing is the precomputed read-only summary of the case that the orchestrator
+      starts every manager question from; nothing is changed.
+
   - rule_id: glazed-read-get-kpis
     tool_pattern: get_kpis
     effect: allow

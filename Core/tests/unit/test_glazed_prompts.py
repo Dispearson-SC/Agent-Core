@@ -244,3 +244,30 @@ def test_every_profile_lists_the_language_glitches_to_avoid(role: str) -> None:
     assert "language glitches to avoid" in flat
     for pattern in ("mixed-script words", '"both"', '"informed"', '"leak"'):
         assert pattern in flat
+
+
+def test_orchestrator_starts_from_the_briefing_and_asks_specialists_only_to_drill_down() -> None:
+    flat = _flat("orchestrator")
+    assert "call get_briefing first on every question" in flat
+    assert "answer directly without asking any specialist" in flat
+    assert "ask exactly one specialist only for drill-down the briefing lacks" in flat
+    assert "top_issues" in flat and "issue_id" in flat and "option_id" in flat
+    profile = load_profile_sync(PROFILES / "glazed_orchestrator.yaml")
+    assert profile.max_iterations <= 6
+
+
+@pytest.mark.parametrize("role", ["present", "past", "supply", "strategist"])
+def test_specialists_call_get_snapshot_first_and_do_not_refetch_its_data(role: str) -> None:
+    flat = _flat(role)
+    assert "call get_snapshot first" in flat
+    assert "do not re-fetch the same data" in flat
+    assert load_profile_sync(PROFILES / f"glazed_{role}.yaml").max_iterations <= 6
+
+
+def test_briefing_and_snapshot_docstrings_name_their_fields() -> None:
+    briefing = inspect.getdoc(gt.get_briefing) or ""
+    for term in ("snapshot", "headline", "suggested_focus", "top_issues"):
+        assert term in briefing
+    snapshot = inspect.getdoc(gt.get_snapshot) or ""
+    for term in ("kpis", "top_issues", "order_plan", "suppliers", "integrity", "may be absent"):
+        assert term in snapshot

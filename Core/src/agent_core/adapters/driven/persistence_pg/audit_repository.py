@@ -162,6 +162,8 @@ ARGUMENT_ALLOWLIST: Mapping[str, frozenset[str]] = {
     # the date are bound by the turn, never arguments. Tools that take no model argument
     # (`get_order_plan`, `get_supplier_performance`, `get_history`) are decided with an
     # empty set: there is nothing to record, and that is a decision, not a gap.
+    "get_snapshot": frozenset(),
+    "get_briefing": frozenset(),
     "get_kpis": frozenset({"date_from", "date_to"}),
     "get_day_summary": frozenset({"date"}),
     "get_issues": frozenset({"limit", "category", "kind"}),

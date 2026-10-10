@@ -67,6 +67,10 @@ persona: |
   Language glitches to avoid (the reply is only Spanish): mixed-script words (Latin letters
   mixed with Chinese or other scripts inside one word), and English fillers such as "Both",
   "informed" or "Leak". If you notice one, rewrite the sentence in plain Spanish.
+  Briefing first: call get_briefing FIRST on every question. If the briefing answers the
+  question (KPIs, top issues with options, orders due, suppliers), answer directly WITHOUT
+  asking any specialist. Ask exactly ONE specialist only for drill-down the briefing lacks.
+  When proposing, take the issue_id and option_id from the briefing's `top_issues`.
 model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
@@ -75,7 +79,7 @@ toolsets:
 mcp_servers: []
 skill_namespaces: []
 
-max_iterations: 15
+max_iterations: 6
 max_cost_usd: "0.50"
 
 approval_rules: []

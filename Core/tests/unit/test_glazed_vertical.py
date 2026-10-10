@@ -130,7 +130,7 @@ MANAGER = CallerIdentity("m-1", "glazed", TenantId("S030"), frozenset({"glazed-m
 SERVICE = CallerIdentity("svc", "glazed", TenantId("S030"), frozenset({"glazed-service"}))
 PEER = CallerIdentity("peer-agent", "peer", TenantId("S030"), frozenset({"peer"}))
 READ = (
-    "check_compliance get_integrity_issues audit_promo "
+    "get_snapshot check_compliance get_integrity_issues audit_promo "
     "get_kpis get_day_summary get_issues explain_metric get_order_plan project_inventory "
     "get_supplier_performance get_history evaluate_promo recall_experiences "
     "offer_surplus request_stock"
@@ -230,3 +230,9 @@ def test_stub_tools_are_named_placeholders_not_reads() -> None:
     # the deny default for an unknown tool did not move
     assert _effect(MANAGER, "something_new") is Effect.DENY
     assert _effect(PEER, "something_new") is Effect.DENY
+
+
+def test_get_briefing_is_allowed_for_the_manager_turn_only() -> None:
+    assert _effect(MANAGER, "get_briefing") is Effect.ALLOW
+    assert _effect(PEER, "get_briefing") is Effect.DENY
+    assert _effect(SERVICE, "get_briefing") is Effect.DENY

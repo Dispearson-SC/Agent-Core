@@ -54,3 +54,8 @@ def test_new_tools_decisions_record_ids_by_value_and_free_text_by_presence() -> 
     assert ar.ARGUMENT_PRESENCE_ONLY["classify_text"] == {"text"}
     assert ar.ARGUMENT_ALLOWLIST["audit_promo"] == {"department", "discount_pct"}
     assert ar.ARGUMENT_ALLOWLIST["get_integrity_issues"] == frozenset()
+
+
+def test_snapshot_and_briefing_have_an_argument_free_audit_decision() -> None:
+    assert ar.ARGUMENT_ALLOWLIST["get_snapshot"] == frozenset()
+    assert ar.ARGUMENT_ALLOWLIST["get_briefing"] == frozenset()

@@ -21,11 +21,23 @@ from agent_core.adapters.driven.tools.glazed import tools as gt
 from agent_core.domain.turn import CallerIdentity, SessionRef, TenantId
 
 ROLES = {
-    "orchestrator": {"propose_action", "classify_text"},
-    "present": {"get_kpis", "get_day_summary", "get_issues", "explain_metric"},
-    "past": {"get_history", "evaluate_promo", "recall_experiences"},
-    "supply": {"get_order_plan", "project_inventory", "get_supplier_performance", "get_issues"},
-    "strategist": {"get_kpis", "get_day_summary", "evaluate_promo", "audit_promo"},
+    "orchestrator": {"propose_action", "classify_text", "get_briefing"},
+    "present": {"get_snapshot", "get_kpis", "get_day_summary", "get_issues", "explain_metric"},
+    "past": {"get_snapshot", "get_history", "evaluate_promo", "recall_experiences"},
+    "supply": {
+        "get_snapshot",
+        "get_order_plan",
+        "project_inventory",
+        "get_supplier_performance",
+        "get_issues",
+    },
+    "strategist": {
+        "get_snapshot",
+        "get_kpis",
+        "get_day_summary",
+        "evaluate_promo",
+        "audit_promo",
+    },
     "sentinel": {"get_history", "record_event", "check_compliance", "classify_text"},
     "auditor": {"get_integrity_issues"},
     "liaison": {"offer_surplus", "request_stock"},
@@ -434,3 +446,15 @@ def test_get_issues_rejects_an_unknown_category_without_calling_the_backend(
 def test_get_kpis_docstring_says_it_takes_a_date_window() -> None:
     doc = inspect.getdoc(gt.get_kpis) or ""
     assert "date_from" in doc and "date_to" in doc and "window" in doc
+
+
+def test_get_snapshot_and_get_briefing_take_no_model_parameter(backend: Backend) -> None:
+    _run(gt.get_snapshot(_ctx()))
+    _run(gt.get_briefing(_ctx(agent="glazed_orchestrator")))
+
+    snapshot, briefing = backend.requests
+    assert snapshot.url.path == "/internal/v1/snapshot"
+    assert briefing.url.path == "/internal/v1/briefing"
+    assert dict(snapshot.url.params) == {} and dict(briefing.url.params) == {}
+    assert not set(inspect.signature(gt.get_snapshot).parameters) - {"ctx"}
+    assert not set(inspect.signature(gt.get_briefing).parameters) - {"ctx"}

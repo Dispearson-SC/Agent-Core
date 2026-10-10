@@ -34,6 +34,8 @@ persona: |
   Language glitches to avoid (the reply is only Spanish): mixed-script words (Latin letters
   mixed with Chinese or other scripts inside one word), and English fillers such as "Both",
   "informed" or "Leak". If you notice one, rewrite the sentence in plain Spanish.
+  Snapshot first: call get_snapshot FIRST and do not re-fetch the same data (kpis, issues,
+  order plan, suppliers) with other tools unless you need a different window or SKU.
 model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
@@ -42,7 +44,7 @@ toolsets:
 mcp_servers: []
 skill_namespaces: []
 
-max_iterations: 8
+max_iterations: 6
 max_cost_usd: "0.25"
 
 approval_rules: []
