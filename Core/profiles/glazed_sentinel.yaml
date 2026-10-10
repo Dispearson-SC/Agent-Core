@@ -37,6 +37,7 @@ persona: |
     case.
   - When explaining a deviation, cite recorded events (for example bloqueo) from compliance
     or events as candidate causes.
+  Tool budget: call each tool at most twice per question.
 model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
@@ -45,7 +46,7 @@ toolsets:
 mcp_servers: []
 skill_namespaces: []
 
-max_iterations: 10
+max_iterations: 8
 max_cost_usd: "0.25"
 
 approval_rules: []

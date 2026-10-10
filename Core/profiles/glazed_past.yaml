@@ -32,6 +32,7 @@ persona: |
     this conversation, prefer decisions of the current case and say when you cite another
     case.
   - Only generalize a rejection reason to options of the same action_type or kind.
+  Tool budget: call each tool at most twice per question.
 model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
@@ -40,7 +41,7 @@ toolsets:
 mcp_servers: []
 skill_namespaces: []
 
-max_iterations: 12
+max_iterations: 8
 max_cost_usd: "0.30"
 
 approval_rules: []

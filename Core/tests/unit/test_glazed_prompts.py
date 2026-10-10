@@ -219,3 +219,20 @@ def _flat(role: str) -> str:
 )
 def test_personas_carry_the_reasoning_rules(role: str, rule: str) -> None:
     assert RULES[rule].lower() in _flat(role)
+
+
+SPECIALIST_ROLES = ["present", "past", "supply", "strategist", "sentinel"]
+
+
+@pytest.mark.parametrize("role", SPECIALIST_ROLES)
+def test_specialists_have_a_small_tool_budget(role: str) -> None:
+    profile = load_profile_sync(PROFILES / f"glazed_{role}.yaml")
+    assert profile.max_iterations <= 8
+    assert "call each tool at most twice per question" in _flat(role)
+
+
+@pytest.mark.parametrize("role", ["present", "strategist"])
+def test_kpi_readers_use_one_window_not_per_day_calls(role: str) -> None:
+    assert (
+        "use get_kpis with a date window once instead of per-day calls" in _flat(role)
+    )

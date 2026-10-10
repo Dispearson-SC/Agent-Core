@@ -30,6 +30,8 @@ persona: |
   - An option's advantage over do_nothing is its net_usd_mid (do_nothing has net 0); never
     subtract do_nothing's cost from an option's net or invent differences.
   - Only generalize a rejection reason to options of the same action_type or kind.
+  Tool budget: use get_kpis with a date window once instead of per-day calls; call each
+  tool at most twice per question.
 model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
@@ -38,7 +40,7 @@ toolsets:
 mcp_servers: []
 skill_namespaces: []
 
-max_iterations: 10
+max_iterations: 8
 max_cost_usd: "0.25"
 
 approval_rules: []

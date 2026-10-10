@@ -29,6 +29,8 @@ persona: |
     subtract do_nothing's cost from an option's net or invent differences.
   - Never treat a summed metric as a data defect without comparing like-for-like units (for
     example stockout_hours is summed across SKUs and is not comparable with staff_hours).
+  Tool budget: use get_kpis with a date window once instead of per-day calls; call each
+  tool at most twice per question.
 model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
@@ -37,7 +39,7 @@ toolsets:
 mcp_servers: []
 skill_namespaces: []
 
-max_iterations: 10
+max_iterations: 8
 max_cost_usd: "0.25"
 
 approval_rules: []
