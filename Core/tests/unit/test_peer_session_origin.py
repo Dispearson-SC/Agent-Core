@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 
+import pytest
+
 from agent_core.adapters.driven.peers.mailbox import PeerAsk
 from agent_core.adapters.driving.peers.worker import answer_next_ask, new_peer_session
 from agent_core.domain.peers import AgentId
@@ -82,3 +84,48 @@ def test_the_worker_runs_the_answer_in_a_session_derived_from_the_asker() -> Non
     (request,) = runner.seen
     assert request.session.session_id.startswith("peer~case-77~")
     assert request.session.tenant_id == "S030"
+
+
+def _ask() -> PeerAsk:
+    return PeerAsk(
+        correlation_id="c2",
+        target=AgentId("glazed_supply"),
+        question="plan?",
+        from_session=ORIGIN,
+        turn_id=TurnId("t2"),
+        hop=1,
+        asker=AgentId("glazed_orchestrator"),
+    )
+
+
+def test_an_injected_session_minter_receives_the_asking_session() -> None:
+    """R3: the injected path used to drop the origin, so the peer lost its case."""
+    ask, runner = _ask(), _Runner()
+
+    asyncio.run(
+        answer_next_ask(
+            _Queue(ask),
+            runner,
+            target=ask.target,
+            mint_session=lambda tenant, origin: new_peer_session(tenant, origin),
+        )
+    )
+
+    (request,) = runner.seen
+    assert request.session.session_id.startswith("peer~case-77~")
+
+
+def test_an_injected_minter_that_drops_the_origin_is_refused() -> None:
+    ask, runner = _ask(), _Runner()
+
+    with pytest.raises(ValueError, match="peer~case-77~"):
+        asyncio.run(
+            answer_next_ask(
+                _Queue(ask),
+                runner,
+                target=ask.target,
+                mint_session=lambda tenant, origin: new_peer_session(tenant),
+            )
+        )
+
+    assert runner.seen == []

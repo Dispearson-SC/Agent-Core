@@ -370,7 +370,7 @@ async def answer_next_ask(
     target: AgentId,
     wake: PeerAnswerSignal | None = None,
     mint_turn_id: Callable[[], TurnId] = new_turn_id,
-    mint_session: Callable[[TenantId], SessionRef] | None = None,
+    mint_session: Callable[[TenantId, SessionRef], SessionRef] | None = None,
 ) -> PeerTurnReport | None:
     """Claim one ask for `target`, run it, answer it. `None` when the queue is empty.
 
@@ -401,8 +401,16 @@ async def answer_next_ask(
     session = (
         new_peer_session(ask.from_session.tenant_id, origin=ask.from_session)
         if mint_session is None
-        else mint_session(ask.from_session.tenant_id)
+        else mint_session(ask.from_session.tenant_id, ask.from_session)
     )
+    # EVERY PATH NAMES THE SESSION `peer~<asker>~<uuid>`: a minter that drops the origin
+    # would make the specialist lose its case, so it is refused before any turn runs.
+    expected_prefix = f"peer~{ask.from_session.session_id}~"
+    if not session.session_id.startswith(expected_prefix):
+        raise ValueError(
+            f"a minted peer session must be named {expected_prefix}<uuid>, "
+            "carrying the asking session"
+        )
     outcome = await runner.execute(
         mint_turn_id(), peer_turn_request(ask, session=session), hop=ask.hop
     )
