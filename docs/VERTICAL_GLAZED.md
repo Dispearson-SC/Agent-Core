@@ -8,14 +8,14 @@ Code computes (the Glazed backend), agents explain.
 
 | Profile | Toolset package | Tools |
 |---|---|---|
-| `glazed_orchestrator` | `glazed_orchestrator` (+ `peers`, added by the `peers:` block) | `get_briefing`, `propose_action`, `classify_text`, `ask_peer` |
+| `glazed_orchestrator` | `glazed_orchestrator` (+ `peers`, added by the `peers:` block) | `get_briefing`, `propose_action`, `classify_text`, `save_manager_note`, `ask_peer` |
 | `glazed_present` | `glazed_present` | `get_snapshot`, `get_kpis`, `get_day_summary`, `get_issues`, `explain_metric`, `get_expiring`, `get_outlook` |
 | `glazed_past` | `glazed_past` | `get_snapshot`, `get_history`, `evaluate_promo`, `recall_experiences` |
 | `glazed_supply` | `glazed_supply` | `get_snapshot`, `get_order_plan`, `project_inventory`, `get_supplier_performance`, `get_issues`, `forecast_demand`, `get_inventory_status`, `get_expiring`, `get_deliveries`, `get_issue_analysis` |
 | `glazed_strategist` | `glazed_strategist` | `get_snapshot`, `get_kpis`, `get_day_summary`, `evaluate_promo`, `audit_promo`, `forecast_daily_flow`, `get_staffing`, `get_promos`, `get_outlook` |
 | `glazed_sentinel` | `glazed_sentinel` | `get_history`, `record_event`, `check_compliance`, `classify_text` |
 | `glazed_auditor` | `glazed_auditor` | `get_integrity_issues` |
-| `glazed_liaison` | `glazed_liaison` | `offer_surplus`, `request_stock` (placeholders: "not available yet") |
+| `glazed_liaison` | `glazed_liaison` | `get_transfer_options`, `propose_transfer` |
 
 One toolset package per role because the contract test requires a profile to select exactly
 one package. Shared code lives in `adapters/driven/tools/glazed/` (`client.py`, `tools.py`);
@@ -47,14 +47,14 @@ resolved toolset (the Core appends it when `peers.enabled`), but it can never su
 
 | Identity | Channel | Role | Used for |
 |---|---|---|---|
-| Manager turn | `glazed` | `glazed-manager` | orchestrator: `propose_action`, `ask_peer` allowed; no data tools |
+| Manager turn | `glazed` | `glazed-manager` | orchestrator: `propose_action`, `save_manager_note`, `ask_peer` allowed; no data tools |
 | Service turn | `glazed` | `glazed-service` | scheduled sentinel / auditor turns: read tools + `record_event` |
 | Peer turn | `peer` | `peer` (set by the Core worker) | specialists answering: read tools + `record_event` |
 
 Peer-turn deny rows (`glazed-peer-turn-no-ask-peer`, `-no-propose-action`) are scoped to role
 `peer` on channel `peer`; every vertical's answering agent has that identity, so they are not
-Glazed-only (the default is deny anyway). `offer_surplus` / `request_stock` rows are named
-`glazed-placeholder-*`. Delivery: the composition registers a pull-mode channel `glazed`
+Glazed-only (the default is deny anyway). The placeholder liaison tools (`offer_surplus` / `request_stock`) are gone; `get_transfer_options` is a read row
+and `propose_transfer` (peer turn, liaison only) only creates a pending proposal the manager approves. Delivery: the composition registers a pull-mode channel `glazed`
 (like `http` and `cli`) so turns started by the backend or the peer worker finish delivery.
 
 Rules cannot name a profile, so the *profile's* `toolsets` decide which tools an agent holds
@@ -293,3 +293,25 @@ Persona rules added after live runs with a small model (asserted in `test_glazed
   with the `do_nothing` comparison; never `skip_order` when cover runs out before the next
   delivery.
 - Sentinel: a compliance `cause` or execution detail is quoted as the cause.
+
+## Manager notes, transfers and inventory reading
+
+`save_manager_note(text, category="eventos", date_from=None, date_to=None, impact=None)` is held by
+the orchestrator: a deliberate, narrow exception to "the manager turn has no data tools". It
+WRITES the manager's own words (backend code stores them) and reads nothing. Policy allows it
+for `glazed-manager` on `glazed` only; the audit trail keeps `text` by presence and the rest by
+value. The persona confirms in Spanish with the dates and never claims success unless
+`saved` is true; it cites the briefing's active `manager_notes` when relevant.
+
+Transfers: "mandar a otra sucursal / traslado / sobrante" routes to `glazed_liaison`, which
+presents the real options with confidence, cost assumptions and the do-nothing comparison.
+
+Zero stock is read through `closing_reason` / `display_status_es`: `discarded_perishable` means
+ordered daily and discarded at close; `sold_out` means a stockout. Supply, present, liaison and
+orchestrator personas carry this rule.
+
+| Tool | Method and URL (under `GLAZED_BACKEND_URL`) |
+|---|---|
+| `save_manager_note` | `POST /internal/v1/notes` body `{text, category, date_from?, date_to?, impact?}` |
+| `get_transfer_options` | `GET /internal/v1/transfers/options?sku&limit` |
+| `propose_transfer` | `POST /internal/v1/transfers/proposals` body `{option_id, rationale}` (Idempotency-Key) |

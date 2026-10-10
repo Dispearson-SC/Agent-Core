@@ -133,7 +133,7 @@ READ = (
     "get_snapshot check_compliance get_integrity_issues audit_promo "
     "get_kpis get_day_summary get_issues explain_metric get_order_plan project_inventory "
     "get_supplier_performance get_history evaluate_promo recall_experiences "
-    "offer_surplus request_stock forecast_demand forecast_daily_flow "
+    "get_transfer_options forecast_demand forecast_daily_flow "
     "get_inventory_status get_expiring get_deliveries get_issue_analysis "
     "get_staffing get_promos get_outlook"
 ).split()
@@ -224,14 +224,47 @@ def test_the_peer_turn_deny_rows_name_their_scope_and_stay_deny() -> None:
     assert _effect(PEER, "ask_peer") is Effect.DENY
 
 
-def test_stub_tools_are_named_placeholders_not_reads() -> None:
+def test_transfer_and_note_rows_exist_and_placeholders_are_gone() -> None:
     ids = {r.rule_id for r in RULES}
-    assert {"glazed-placeholder-offer-surplus", "glazed-placeholder-request-stock"} <= ids
-    assert not {"glazed-read-offer-surplus", "glazed-read-request-stock"} & ids
-    assert "not available" in _rule("glazed-placeholder-offer-surplus").reason.lower()
+    assert not {r for r in ids if "placeholder" in r}
+    assert {"glazed-read-get-transfer-options", "glazed-propose-transfer"} <= ids
     # the deny default for an unknown tool did not move
     assert _effect(MANAGER, "something_new") is Effect.DENY
     assert _effect(PEER, "something_new") is Effect.DENY
+    assert _effect(MANAGER, "offer_surplus") is Effect.DENY
+
+
+def test_propose_transfer_is_a_peer_proposal_and_never_the_service() -> None:
+    assert _effect(PEER, "propose_transfer") is Effect.ALLOW
+    assert _effect(SERVICE, "propose_transfer") is Effect.DENY
+    assert _effect(MANAGER, "propose_transfer") is Effect.DENY
+
+
+def test_save_manager_note_is_allowed_for_the_manager_turn_only() -> None:
+    assert _effect(MANAGER, "save_manager_note") is Effect.ALLOW
+    assert _effect(PEER, "save_manager_note") is Effect.DENY
+    assert _effect(SERVICE, "save_manager_note") is Effect.DENY
+
+
+def test_liaison_persona_offers_real_options_with_assumptions_and_do_nothing() -> None:
+    persona = " ".join(_profile("liaison").persona.split()).lower()
+    assert "get_transfer_options" in persona and "propose_transfer" in persona
+    assert "do-nothing" in persona and "assumptions" in persona
+    assert "not available yet" not in persona
+
+
+def test_orchestrator_routes_transfers_and_saves_notes() -> None:
+    persona = " ".join(_profile("orchestrator").persona.split())
+    assert "mandar a otra sucursal" in persona and "glazed_liaison" in persona
+    assert "save_manager_note" in persona and "saved is true" in persona
+    assert "manager_notes" in persona
+
+
+@pytest.mark.parametrize("role", ["present", "supply", "liaison", "orchestrator"])
+def test_zero_stock_is_read_through_closing_reason(role: str) -> None:
+    persona = " ".join(_profile(role).persona.split())
+    assert "closing_reason" in persona and "display_status_es" in persona
+    assert "discarded_perishable" in persona and "sold_out" in persona
 
 
 def test_get_briefing_is_allowed_for_the_manager_turn_only() -> None:
@@ -267,7 +300,9 @@ def test_the_orchestrator_toolset_stays_free_of_data_tools() -> None:
     from agent_core.adapters.driven.tools.glazed.tools import TOOLSETS
 
     tools = set(TOOLSETS["orchestrator"]().tools)
-    assert tools == {"propose_action", "classify_text", "get_briefing"}
+    # save_manager_note is a deliberate, narrow exception to "no data tools on the manager
+    # turn": it only WRITES the manager's own words (stored by backend code) and reads nothing.
+    assert tools == {"propose_action", "classify_text", "get_briefing", "save_manager_note"}
 
 
 def test_orchestrator_routes_staffing_promos_expiry_inventory_and_today_tomorrow() -> None:

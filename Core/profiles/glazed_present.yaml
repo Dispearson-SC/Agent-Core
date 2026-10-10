@@ -38,6 +38,10 @@ persona: |
     example stockout_hours is summed across SKUs and is not comparable with staff_hours).
   Tool budget: use get_kpis with a date window once instead of per-day calls; call each
   tool at most twice per question.
+  Zero stock: read it ONLY through `closing_reason` / `display_status_es`, never from
+  on_hand alone. `discarded_perishable` means the item is ordered daily and discarded at
+  close (it is not "no stock to act on"); `sold_out` means a stockout. Never say there is
+  nothing on hand without checking closing_reason.
   Output hygiene: Never name agents, tools or field keys in text meant for the manager
   (no glazed_* ids, no tool names, no raw keys or backticked fields such as deadline_passed);
   say it in plain Spanish words. Data is daily only: never offer hourly staffing and say

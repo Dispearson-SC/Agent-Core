@@ -190,8 +190,10 @@ ARGUMENT_ALLOWLIST: Mapping[str, frozenset[str]] = {
     # `issue_id` and `option_id` ARE the action: the backend copies action_type, params and
     # tier from the stored option, so these two lines the row up against what was proposed.
     "propose_action": frozenset({"issue_id", "option_id"}),
-    "offer_surplus": frozenset({"sku"}),
-    "request_stock": frozenset({"sku"}),
+    # `text` is the manager's own free text (presence only); the rest are by value.
+    "save_manager_note": frozenset({"category", "date_from", "date_to", "impact"}),
+    "get_transfer_options": frozenset({"sku", "limit"}),
+    "propose_transfer": frozenset({"option_id"}),
     # `decision_id` names the decision checked; `kind` is one of two fixed labels; the
     # department and the discount are the promo being audited. None is personal data.
     "check_compliance": frozenset({"decision_id"}),
@@ -224,6 +226,8 @@ ARGUMENT_PRESENCE_ONLY: Mapping[str, frozenset[str]] = {
     # The manager's own words (a rejection reason) or a deviation note: kept in the
     # backend under its retention, not copied into the append-only trail.
     "classify_text": frozenset({"text"}),
+    "save_manager_note": frozenset({"text"}),
+    "propose_transfer": frozenset({"rationale"}),
 }
 
 _LOG = logging.getLogger(__name__)

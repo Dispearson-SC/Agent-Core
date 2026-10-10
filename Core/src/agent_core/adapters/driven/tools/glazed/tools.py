@@ -22,10 +22,6 @@ from agent_core.adapters.driven.tools.glazed.client import call
 
 _API = "/internal/v1"
 _MAX_LIMIT = 20
-_NOT_AVAILABLE = {
-    "error": "Inter-store network actions are not available yet. Tell the manager so; "
-    "do not promise a transfer."
-}
 
 Ctx = RunContext[Any]
 
@@ -406,14 +402,62 @@ async def get_integrity_issues(ctx: Ctx) -> Any:
     return await call(ctx, "GET", f"{_API}/issues", params={"category": "integrity"})
 
 
-async def offer_surplus(ctx: Ctx, sku: str) -> Any:
-    """Offer surplus of a SKU to other stores. NOT AVAILABLE YET."""
-    return dict(_NOT_AVAILABLE)
+async def save_manager_note(
+    ctx: Ctx,
+    text: str,
+    category: str = "eventos",
+    date_from: str | None = None,
+    date_to: str | None = None,
+    impact: str | None = None,
+) -> Any:
+    """Save a note the manager asked to record (a closure, an event, supplier news...).
+
+    Call it when the manager asks to note, remember or record something, or states a fact
+    about future operations. `text` is the manager's own words; `category` defaults to
+    `eventos`; `date_from` / `date_to` (ISO dates) bound the period it applies to;
+    `impact` is a short free label when the manager gave one. Returns {saved, memory_id,
+    event_id, category, date_from, date_to}. Only say it was saved when `saved` is true.
+    A write of the manager's own words, done by backend code; it changes no store data.
+    """
+    body: dict[str, Any] = {"text": text, "category": category}
+    for key, value in (("date_from", date_from), ("date_to", date_to), ("impact", impact)):
+        if value is not None:
+            body[key] = value
+    return await call(ctx, "POST", f"{_API}/notes", body=body)
 
 
-async def request_stock(ctx: Ctx, sku: str) -> Any:
-    """Request stock of a SKU from other stores. NOT AVAILABLE YET."""
-    return dict(_NOT_AVAILABLE)
+async def get_transfer_options(ctx: Ctx, sku: str | None = None, limit: int = 5) -> Any:
+    """Transfer options between stores, computed by the backend (optionally for one `sku`).
+
+    Returns `options`: {option_id, sku, product_name, from_store, to_store, to_store_name,
+    qty, surplus_units, deficit_units, transfer_cost_usd, waste_avoided_usd,
+    lost_sales_avoided_usd, net_usd, confidence, expires_on, rationale_es}, plus
+    `do_nothing` and `assumptions` (the cost assumptions). Quote the confidence, the cost
+    assumptions and the do-nothing comparison. A field may be absent; never estimate it.
+    """
+    return await call(
+        ctx,
+        "GET",
+        f"{_API}/transfers/options",
+        params={"sku": sku or None, "limit": _bounded(limit)},
+    )
+
+
+async def propose_transfer(ctx: Ctx, option_id: str, rationale: str) -> Any:
+    """Propose one transfer option. NOTHING is executed: the manager approves or rejects.
+
+    Send only an `option_id` returned by get_transfer_options and a short `rationale`. The
+    backend copies the transfer from the stored option and creates a pending proposal. The
+    call carries an `Idempotency-Key` (case + option), so a retry after a timeout does not
+    create a second proposal.
+    """
+    return await call(
+        ctx,
+        "POST",
+        f"{_API}/transfers/proposals",
+        body={"option_id": option_id, "rationale": rationale},
+        idempotency_parts=(option_id,),
+    )
 
 
 # ---- manager views (inventory, expiring, deliveries, staffing, promos, outlook, analysis) ----
@@ -436,6 +480,8 @@ _INVENTORY_ITEM_KEYS = (
     "days_of_cover",
     "status",
     "status_reason",
+    "closing_reason",
+    "display_status_es",
     "next_delivery_date",
     "next_delivery_source",
     "scheduled_in_units",
@@ -715,7 +761,11 @@ def _toolset(*functions: Callable[..., Any]) -> FunctionToolset[Any]:
 
 # One literal builder per role. The packages `glazed_<role>/` re-export these.
 TOOLSETS: dict[str, Callable[[], FunctionToolset[Any]]] = {
-    "orchestrator": lambda: _toolset(propose_action, classify_text, get_briefing),
+    # save_manager_note is a deliberate, narrow exception to "the manager turn holds no data
+    # tool": it WRITES the manager's own words (backend code stores them) and reads nothing.
+    "orchestrator": lambda: _toolset(
+        propose_action, classify_text, get_briefing, save_manager_note
+    ),
     "present": lambda: _toolset(
         get_snapshot,
         get_kpis,
@@ -751,5 +801,5 @@ TOOLSETS: dict[str, Callable[[], FunctionToolset[Any]]] = {
     ),
     "sentinel": lambda: _toolset(get_history, record_event, check_compliance, classify_text),
     "auditor": lambda: _toolset(get_integrity_issues),
-    "liaison": lambda: _toolset(offer_surplus, request_stock),
+    "liaison": lambda: _toolset(get_transfer_options, propose_transfer),
 }

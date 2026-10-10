@@ -179,7 +179,7 @@ rules:
   #   glazed-service  channel `glazed`  scheduled sentinel/auditor turns (backend service)
   #   peer            channel `peer`    a specialist answering the orchestrator's ask_peer
   # Which tools an AGENT holds is its profile's `toolsets`; these rows narrow by IDENTITY
-  # (a rule cannot name a profile). The orchestrator holds no data tool at all, and the
+  # (a rule cannot name a profile). The orchestrator holds no data tool (only propose_action and save_manager_note, two writes), and the
   # manager identity matches none of the read rows below, so even a mis-edited profile
   # cannot read data directly. Absent constraint widens, so each row states both.
   # ======================================================================================
@@ -455,8 +455,8 @@ rules:
       Reading recall experiences changes nothing; the backend fixes the store, the case and the
       date, and returns only what this agent's role may see.
 
-  - rule_id: glazed-placeholder-offer-surplus
-    tool_pattern: offer_surplus
+  - rule_id: glazed-read-get-transfer-options
+    tool_pattern: get_transfer_options
     effect: allow
     subject_roles:
       - peer
@@ -465,21 +465,20 @@ rules:
       - peer
       - glazed
     reason: >-
-      Offer surplus is a placeholder: the inter-store network does not exist yet, so the tool only
-      returns "not available" and touches nothing. Allowed so the agent can say so.
+      Listing transfer options reads the backend's computation of surplus and deficit
+      between stores; nothing is created or changed. Only the liaison's toolset holds it.
 
-  - rule_id: glazed-placeholder-request-stock
-    tool_pattern: request_stock
+  - rule_id: glazed-propose-transfer
+    tool_pattern: propose_transfer
     effect: allow
     subject_roles:
       - peer
-      - glazed-service
     channels:
       - peer
-      - glazed
     reason: >-
-      Request stock is a placeholder: the inter-store network does not exist yet, so the tool only
-      returns "not available" and touches nothing. Allowed so the agent can say so.
+      Like propose_action, a transfer proposal only creates a pending item copied by the
+      backend from a stored option; the manager approves or rejects it (four eyes) and
+      nothing moves until then. Only the liaison's toolset holds it.
 
   - rule_id: glazed-read-check-compliance
     tool_pattern: check_compliance
@@ -557,6 +556,18 @@ rules:
     reason: >-
       A proposal only creates a pending item for the manager to approve or reject; nothing is
       executed by the agent.
+
+  - rule_id: glazed-save-manager-note
+    tool_pattern: save_manager_note
+    effect: allow
+    subject_roles:
+      - glazed-manager
+    channels:
+      - glazed
+    reason: >-
+      Saving a manager note is an append-only write of the manager's own words, done by
+      backend code. It is the one write the manager turn holds besides proposals, and it
+      reads no data and changes no store figure.
 
   # SCOPE OF THE TWO PEER-TURN DENIES. A rule cannot name a profile and every vertical's
   # answering agent is `peer` on channel `peer`, so these are stated on both dimensions and

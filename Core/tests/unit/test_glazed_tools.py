@@ -22,7 +22,7 @@ from agent_core.adapters.driven.tools.glazed import tools as gt
 from agent_core.domain.turn import CallerIdentity, SessionRef, TenantId
 
 ROLES = {
-    "orchestrator": {"propose_action", "classify_text", "get_briefing"},
+    "orchestrator": {"propose_action", "classify_text", "get_briefing", "save_manager_note"},
     "present": {
         "get_snapshot",
         "get_kpis",
@@ -58,7 +58,7 @@ ROLES = {
     },
     "sentinel": {"get_history", "record_event", "check_compliance", "classify_text"},
     "auditor": {"get_integrity_issues"},
-    "liaison": {"offer_surplus", "request_stock"},
+    "liaison": {"get_transfer_options", "propose_transfer"},
 }
 FORBIDDEN_PARAMS = {"store_id", "store", "as_of", "case", "case_id", "tenant", "tenant_id"}
 
@@ -290,13 +290,6 @@ def test_a_non_numeric_limit_is_bounded_not_raised(backend: Backend, limit: Any)
     assert "error" not in _run(gt.recall_experiences(_ctx(), "q", limit))
 
 
-def test_not_available_results_are_not_shared_mutable_state() -> None:
-    first = _run(gt.offer_surplus(_ctx(), "SKU-1"))
-    first["error"] = "tampered"
-
-    assert "not available" in _run(gt.request_stock(_ctx(), "SKU-1"))["error"]
-
-
 def test_no_turn_context_is_refused_without_a_request(backend: Backend) -> None:
     result = _run(gt.get_order_plan(SimpleNamespace(deps=None)))  # type: ignore[arg-type]
 
@@ -304,10 +297,61 @@ def test_no_turn_context_is_refused_without_a_request(backend: Backend) -> None:
     assert backend.requests == []
 
 
-def test_liaison_placeholders_say_not_available(backend: Backend) -> None:
-    assert "not available" in _run(gt.offer_surplus(_ctx(), "SKU-1"))["error"]
-    assert "not available" in _run(gt.request_stock(_ctx(), "SKU-1"))["error"]
-    assert backend.requests == []
+def test_save_manager_note_posts_the_note_without_store_or_date(backend: Backend) -> None:
+    backend.body = {"saved": True, "memory_id": "m1", "event_id": "e1", "category": "eventos"}
+    result = _run(
+        gt.save_manager_note(
+            _ctx(agent="glazed_orchestrator"),
+            "Cerramos el 19",
+            date_from="2026-07-19",
+            date_to="2026-07-19",
+        )
+    )
+
+    (req,) = backend.requests
+    assert (req.method, req.url.path) == ("POST", "/internal/v1/notes")
+    assert json.loads(req.content) == {
+        "text": "Cerramos el 19",
+        "category": "eventos",
+        "date_from": "2026-07-19",
+        "date_to": "2026-07-19",
+    }
+    assert req.headers["X-Glazed-Store"] == "S030"
+    assert result["saved"] is True
+
+
+def test_save_manager_note_omits_unset_optional_fields(backend: Backend) -> None:
+    _run(gt.save_manager_note(_ctx(agent="glazed_orchestrator"), "hola"))
+
+    assert json.loads(backend.requests[0].content) == {"text": "hola", "category": "eventos"}
+
+
+def test_get_transfer_options_gets_options_with_sku_and_limit(backend: Backend) -> None:
+    backend.body = {"options": [], "do_nothing": {}, "assumptions": {}}
+    _run(gt.get_transfer_options(_ctx(agent="glazed_liaison"), sku="SKU-1", limit=3))
+    _run(gt.get_transfer_options(_ctx(agent="glazed_liaison")))
+
+    first, second = backend.requests
+    assert (first.method, first.url.path) == ("GET", "/internal/v1/transfers/options")
+    assert dict(first.url.params) == {"sku": "SKU-1", "limit": "3"}
+    assert dict(second.url.params) == {"limit": "5"}
+
+
+def test_propose_transfer_posts_ids_with_a_stable_idempotency_key(backend: Backend) -> None:
+    for _ in range(2):
+        _run(gt.propose_transfer(_ctx(agent="glazed_liaison"), "T1", "sobra aqui"))
+    _run(gt.propose_transfer(_ctx(agent="glazed_liaison"), "T2", "sobra aqui"))
+
+    first, again, other = backend.requests
+    assert (first.method, first.url.path) == ("POST", "/internal/v1/transfers/proposals")
+    assert json.loads(first.content) == {"option_id": "T1", "rationale": "sobra aqui"}
+    assert first.headers["Idempotency-Key"] == again.headers["Idempotency-Key"]
+    assert first.headers["Idempotency-Key"] != other.headers["Idempotency-Key"]
+
+
+def test_placeholder_liaison_tools_are_gone() -> None:
+    assert not hasattr(gt, "offer_surplus")
+    assert not hasattr(gt, "request_stock")
 
 
 def test_registered_in_the_composition_root() -> None:

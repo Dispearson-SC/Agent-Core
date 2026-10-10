@@ -69,3 +69,18 @@ def test_redacted_date_arguments_are_json_serializable() -> None:
     sink = ar.PgAuditSink(lambda: None)  # type: ignore[arg-type, return-value]
     redacted = sink._redact("forecast_demand", {"sku": "SKU-1", "target_date": date(2026, 7, 25)})
     assert json.loads(json.dumps(redacted)) == {"sku": "SKU-1", "target_date": "2026-07-25"}
+
+
+def test_note_and_transfer_tools_audit_free_text_by_presence_and_the_rest_by_value() -> None:
+    assert ar.ARGUMENT_PRESENCE_ONLY["save_manager_note"] == {"text"}
+    assert "text" not in ar.ARGUMENT_ALLOWLIST["save_manager_note"]
+    assert ar.ARGUMENT_ALLOWLIST["save_manager_note"] == {
+        "category",
+        "date_from",
+        "date_to",
+        "impact",
+    }
+    assert ar.ARGUMENT_ALLOWLIST["get_transfer_options"] == {"sku", "limit"}
+    assert ar.ARGUMENT_ALLOWLIST["propose_transfer"] == {"option_id"}
+    assert ar.ARGUMENT_PRESENCE_ONLY["propose_transfer"] == {"rationale"}
+    assert "offer_surplus" not in ar.ARGUMENT_ALLOWLIST
