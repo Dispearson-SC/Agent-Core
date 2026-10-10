@@ -326,3 +326,24 @@ def test_sentinel_quotes_compliance_cause_as_the_cause() -> None:
     persona = _persona("sentinel")
     assert "`cause`" in persona
     assert "quote it as the cause" in persona
+
+
+def test_orchestrator_has_the_manager_communication_section() -> None:
+    """The manager may be non-technical and may hear the answer through text-to-speech."""
+    persona = _persona("orchestrator")
+    lowered = persona.lower()
+    assert "How to talk to the manager" in persona
+    # voice channel
+    assert '"[canal: voz]"' in persona
+    assert "never mention or repeat the tag" in lowered
+    assert "no markdown at all" in lowered
+    # plain language, no tables by default, adaptive depth
+    assert "plain register by default" in lowered
+    assert "no markdown tables by default" in lowered
+    assert "adaptive depth" in lowered
+    assert "¿Quieres el detalle?" in persona
+    for jargon in ("SKU", "WAPE", "newsvendor", "backtest", "elasticidad"):
+        assert jargon in persona  # listed as terms to avoid
+    # proposals and the Spanish-only rule stay intact
+    assert "Decision buttons and proposals work exactly as described above" in persona
+    assert "Respond only in Spanish" in persona
