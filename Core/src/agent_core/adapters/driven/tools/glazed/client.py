@@ -83,6 +83,8 @@ async def call(
         return {"error": "The Glazed backend timed out. Say the data could not be fetched."}
     except httpx.HTTPError as exc:
         return {"error": f"The Glazed backend is unreachable ({type(exc).__name__})."}
+    except Exception as exc:  # noqa: BLE001 - a raising tool strands the whole turn as running
+        return {"error": f"The Glazed backend call failed ({type(exc).__name__})."}
     if response.status_code >= 400:
         return {
             "error": f"The Glazed backend refused the request: HTTP {response.status_code} "

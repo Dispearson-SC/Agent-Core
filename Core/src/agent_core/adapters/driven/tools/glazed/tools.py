@@ -30,7 +30,10 @@ Ctx = RunContext[Any]
 
 
 def _bounded(limit: int) -> int:
-    return max(1, min(int(limit), _MAX_LIMIT))
+    try:
+        return max(1, min(int(limit), _MAX_LIMIT))
+    except (TypeError, ValueError):  # a model-supplied junk limit must not raise
+        return _MAX_LIMIT
 
 
 async def get_kpis(ctx: Ctx, date_from: str, date_to: str) -> Any:
@@ -147,12 +150,12 @@ async def propose_action(
 
 async def offer_surplus(ctx: Ctx, sku: str) -> Any:
     """Offer surplus of a SKU to other stores. NOT AVAILABLE YET."""
-    return _NOT_AVAILABLE
+    return dict(_NOT_AVAILABLE)
 
 
 async def request_stock(ctx: Ctx, sku: str) -> Any:
     """Request stock of a SKU from other stores. NOT AVAILABLE YET."""
-    return _NOT_AVAILABLE
+    return dict(_NOT_AVAILABLE)
 
 
 def _toolset(*functions: Callable[..., Any]) -> FunctionToolset[Any]:

@@ -220,6 +220,51 @@ def test_timeout_becomes_an_error_result(backend: Backend) -> None:
     assert "timed out" in _run(gt.get_order_plan(_ctx()))["error"]
 
 
+def test_a_non_json_response_becomes_an_error_result(backend: Backend) -> None:
+    def text_response(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>not json</html>")
+
+    glazed_client.TRANSPORT = httpx.MockTransport(text_response)
+
+    assert "non-JSON" in _run(gt.get_order_plan(_ctx()))["error"]
+
+
+def test_an_unexpected_exception_never_escapes_a_tool(backend: Backend) -> None:
+    """A tool that raises strands the whole turn as 'running'; every class must come back
+    as an error result: transport bugs, invalid URLs, anything not an httpx error."""
+    for error in (
+        RuntimeError("boom"),
+        ValueError("odd"),
+        httpx.InvalidURL("bad url"),
+        UnicodeError("bytes"),
+    ):
+        backend.error = error
+        result = _run(gt.get_order_plan(_ctx()))
+        assert "error" in result, type(error).__name__
+
+
+def test_a_body_that_cannot_be_serialised_becomes_an_error_result(backend: Backend) -> None:
+    result = _run(
+        gt.propose_action(_ctx(), "I1", "O1", "reorder", {"bad": object()}, "because")
+    )
+
+    assert "error" in result
+    assert backend.requests == []
+
+
+@pytest.mark.parametrize("limit", ["many", None, [3]])
+def test_a_non_numeric_limit_is_bounded_not_raised(backend: Backend, limit: Any) -> None:
+    assert "error" not in _run(gt.get_issues(_ctx(), limit))
+    assert "error" not in _run(gt.recall_experiences(_ctx(), "q", limit))
+
+
+def test_not_available_results_are_not_shared_mutable_state() -> None:
+    first = _run(gt.offer_surplus(_ctx(), "SKU-1"))
+    first["error"] = "tampered"
+
+    assert "not available" in _run(gt.request_stock(_ctx(), "SKU-1"))["error"]
+
+
 def test_no_turn_context_is_refused_without_a_request(backend: Backend) -> None:
     result = _run(gt.get_order_plan(SimpleNamespace(deps=None)))  # type: ignore[arg-type]
 
