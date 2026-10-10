@@ -58,7 +58,9 @@ THE LIBRARY-MODE GOTCHA THAT DOES *NOT* APPLY HERE, AND WHEN IT WOULD
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, cast
+import os
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 if TYPE_CHECKING:
     from pydantic_ai.models.openai import OpenAIChatModel
@@ -77,6 +79,36 @@ class ProviderChatConfig(Protocol):
     def get_api_base(self, api_base: str | None = None) -> str | None: ...
 
     def get_api_key(self, api_key: str | None = None) -> str | None: ...
+
+
+# Providers whose litellm chat config does not expose `get_api_base`/`get_api_key` (Gemini's
+# does neither) but which publish an OpenAI-compatible endpoint, which is what the client
+# below speaks. Only providers listed here get a fallback base: any other provider with no
+# resolvable base is still refused, so the check keeps its teeth.
+_OPENAI_COMPATIBLE_BASES: Final[Mapping[str, str]] = {
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+}
+
+# Credential names accepted besides `<PROVIDER>_API_KEY`, which is documented and wins.
+# `MINIMAX_API` is this repository's own spelling (`.env`); accepting it here means a process
+# that only has that name still works. Names only - values are never logged.
+_CREDENTIAL_ALIASES: Final[Mapping[str, tuple[str, ...]]] = {
+    "MINIMAX_API_KEY": ("MINIMAX_API",),
+}
+
+
+def credential_present(variable: str, environ: Mapping[str, str]) -> bool:
+    """Does `variable`, or an accepted alias of it, hold a non-empty value in `environ`?"""
+    return any(environ.get(name) for name in (variable, *_CREDENTIAL_ALIASES.get(variable, ())))
+
+
+def _env_credential(provider: str) -> str | None:
+    variable = f"{provider.upper()}_API_KEY"
+    for name in (variable, *_CREDENTIAL_ALIASES.get(variable, ())):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
 
 
 class ModelEndpointUnavailableError(RuntimeError):
@@ -133,8 +165,14 @@ def library_mode_model(
 
     # litellm's own resolution, so `MINIMAX_API_BASE` and its registered default both work
     # without this file knowing either one.
-    api_base = config.get_api_base()
-    api_key = config.get_api_key()
+    # A provider whose config lacks these methods (Gemini) falls back to its environment
+    # and, for the providers listed in `_OPENAI_COMPATIBLE_BASES`, a known compatible base.
+    api_base = (
+        config.get_api_base() if config is not None and hasattr(config, "get_api_base") else None
+    ) or os.environ.get(f"{provider.upper()}_API_BASE") or _OPENAI_COMPATIBLE_BASES.get(provider)
+    api_key = (
+        config.get_api_key() if config is not None and hasattr(config, "get_api_key") else None
+    ) or _env_credential(provider)
 
     if not api_base:
         raise ModelEndpointUnavailableError(
@@ -194,8 +232,12 @@ def model_for(
     return proxy_model(model_id, base_url, settings=settings)
 
 
-def _chat_config(wire_model: str, provider: str) -> ProviderChatConfig:
-    """litellm's config object for one provider, or refuse. See `ProviderChatConfig`."""
+def _chat_config(wire_model: str, provider: str) -> ProviderChatConfig | None:
+    """litellm's config object for one provider, or refuse. See `ProviderChatConfig`.
+
+    `None` when litellm has a config that cannot resolve an endpoint or credential itself
+    (Gemini): the caller then uses the environment and `_OPENAI_COMPATIBLE_BASES`.
+    """
     from litellm.types.utils import LlmProviders
     from litellm.utils import ProviderConfigManager
 
@@ -209,11 +251,6 @@ def _chat_config(wire_model: str, provider: str) -> ProviderChatConfig:
             "docs/TASKS.md#t-f0-04"
         ) from unresolved
 
-    if config is None or not hasattr(config, "get_api_base") or not hasattr(config, "get_api_key"):
-        raise ModelEndpointUnavailableError(
-            f"litellm's configuration for provider {provider!r} does not resolve an "
-            "endpoint and a credential on its own. Point the day-2 proxy at it instead, or "
-            f"set {provider.upper()}_API_BASE and {provider.upper()}_API_KEY. "
-            "docs/TASKS.md#t-f0-04"
-        )
+    if config is None:
+        return None
     return cast("ProviderChatConfig", config)
