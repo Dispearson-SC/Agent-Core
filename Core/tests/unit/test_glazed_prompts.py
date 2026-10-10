@@ -74,7 +74,7 @@ def test_thin_personas_claim_nothing_beyond_their_tools() -> None:
     assert "only what" in sentinel and "get_history" in sentinel
     assert "verify whether past decisions worked" not in sentinel
     auditor = _persona("auditor").lower()
-    assert "only what" in auditor and "get_issues" in auditor
+    assert "only what" in auditor and "get_integrity_issues" in auditor
     assert "anomalies (inventory, prices, sensors" not in auditor
 
 
@@ -127,3 +127,45 @@ def test_orchestrator_asks_exactly_one_specialist_per_step() -> None:
     persona = _persona("orchestrator")
     assert "Ask exactly ONE specialist per step" in persona
     assert "Never issue two ask_peer calls in the same step" in persona
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_every_profile_answers_only_in_spanish(role: str) -> None:
+    """Live replies once carried stray tokens in Chinese and invented Spanish-looking words."""
+    persona = _persona(role)
+    assert "Respond only in Spanish; never output words from other languages or scripts" in persona
+
+
+def test_orchestrator_never_claims_a_capability_is_unavailable_without_a_tool_result() -> None:
+    persona = _persona("orchestrator").lower()
+    assert "never claim a capability is unavailable" in persona
+    assert "verbatim" in persona
+
+
+def test_orchestrator_classifies_a_rejection_and_mentions_the_category() -> None:
+    persona = _persona("orchestrator")
+    assert "classify_text" in persona and "rejection_reason" in persona
+    assert "category" in persona.lower()
+
+
+def test_sentinel_explains_deviations_with_compliance_and_classification() -> None:
+    persona = _persona("sentinel")
+    for term in ("check_compliance", "classify_text", "deviation_cause", "execution_status"):
+        assert term in persona
+
+
+def test_strategist_audits_every_promo_and_does_nothing_on_block() -> None:
+    persona = _persona("strategist")
+    assert "audit_promo" in persona and "before" in persona.lower()
+    assert "block" in persona and "do_nothing" in persona
+
+
+def test_auditor_reports_integrity_issues_with_their_exposure() -> None:
+    persona = _persona("auditor")
+    assert "get_integrity_issues" in persona and "exposure_usd" in persona
+
+
+def test_past_follows_the_verify_hint_of_a_recalled_experience() -> None:
+    persona = _persona("past")
+    assert "verify" in persona and "ref" in persona
+    assert "evaluate_promo" in persona and "get_history" in persona
