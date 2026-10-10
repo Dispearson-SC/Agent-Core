@@ -198,6 +198,14 @@ from agent_core.adapters.driven.profiles_fs.loader import load_profile_sync
 from agent_core.adapters.driven.skills_fs.registry import FilesystemSkillRegistry
 from agent_core.adapters.driven.tools import peers as peer_tools
 from agent_core.adapters.driven.tools.fraud import tools as fraud_tools
+from agent_core.adapters.driven.tools.glazed_auditor import tools as glazed_auditor_tools
+from agent_core.adapters.driven.tools.glazed_liaison import tools as glazed_liaison_tools
+from agent_core.adapters.driven.tools.glazed_orchestrator import tools as glazed_orchestrator_tools
+from agent_core.adapters.driven.tools.glazed_past import tools as glazed_past_tools
+from agent_core.adapters.driven.tools.glazed_present import tools as glazed_present_tools
+from agent_core.adapters.driven.tools.glazed_sentinel import tools as glazed_sentinel_tools
+from agent_core.adapters.driven.tools.glazed_strategist import tools as glazed_strategist_tools
+from agent_core.adapters.driven.tools.glazed_supply import tools as glazed_supply_tools
 from agent_core.adapters.driven.tools.provider import (
     DEFAULT_TOOL_PACKAGES,
     LocalToolProvider,
@@ -332,6 +340,14 @@ PEER_TOOLSET: Final[str] = "peers"
 TOOL_PACKAGES: Mapping[str, ToolsetBuilder] = {
     **DEFAULT_TOOL_PACKAGES,
     "fraud": fraud_tools.build_toolset,
+    "glazed_orchestrator": glazed_orchestrator_tools.build_toolset,
+    "glazed_present": glazed_present_tools.build_toolset,
+    "glazed_past": glazed_past_tools.build_toolset,
+    "glazed_supply": glazed_supply_tools.build_toolset,
+    "glazed_strategist": glazed_strategist_tools.build_toolset,
+    "glazed_sentinel": glazed_sentinel_tools.build_toolset,
+    "glazed_auditor": glazed_auditor_tools.build_toolset,
+    "glazed_liaison": glazed_liaison_tools.build_toolset,
     PEER_TOOLSET: peer_tools.build_toolset,
 }
 
