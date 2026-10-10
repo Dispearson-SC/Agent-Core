@@ -345,6 +345,26 @@ def test_every_http_started_turn_has_a_channel_to_leave_on() -> None:
     asyncio.run(container.channels.deliver(caller, OutboundMessage(text="the answer")))
 
 
+@pytest.mark.phase("F3")
+def test_a_glazed_started_turn_has_a_channel_to_leave_on() -> None:
+    """The Glazed backend starts turns on channel `glazed` and polls `GET /turns/{id}`.
+
+    Without a registration the peer-worker's turns died at `_step_deliver` with
+    `UnknownChannelError: no channel registered under 'glazed'`.
+    """
+    composition = _composition()
+    container = composition.build_container(pool_factory=cast(Any, _RecordingPool))
+
+    assert "glazed" in container.channels
+    caller = CallerIdentity(
+        subject_id="m-1",
+        channel="glazed",
+        tenant_id=TenantId("S030"),
+        roles=frozenset({"glazed-manager"}),
+    )
+    asyncio.run(container.channels.deliver(caller, OutboundMessage(text="la respuesta")))
+
+
 @pytest.mark.phase("F2")
 def test_building_the_container_binds_the_dbos_workflow_to_it(
     monkeypatch: pytest.MonkeyPatch,

@@ -294,6 +294,11 @@ _HTTP_CHANNEL_ID = "http"
 # restatement cannot drift without a red test.
 _CLI_CHANNEL_ID = "cli"
 
+# The Glazed vertical's backend (and its peer-worker turns) start turns on this channel and
+# poll `GET /turns/{turn_id}` for the answer, exactly like `http`: nothing to push to.
+# `tests/unit/test_composition.py` asserts a glazed turn has somewhere to leave on.
+_GLAZED_CHANNEL_ID = "glazed"
+
 # The repository layout is `Core/src/agent_core/composition.py`, so `Core/` is three
 # parents up and `Core/profiles/` is the directory the profile files live in. Overridable
 # by environment because an installed wheel has no `Core/` above it.
@@ -1087,6 +1092,17 @@ def _cli_channel() -> tuple[str, Channel]:
     return (_CLI_CHANNEL_ID, PullModeChannel())
 
 
+def _glazed_channel() -> tuple[str, Channel]:
+    """Always registered, pull-mode, for the same reason `http` and `cli` are.
+
+    The Glazed backend enqueues a turn and polls the stored row; there is no socket to
+    push the answer down, and `PullModeChannel` is exactly "already where the reader will
+    look". Without an entry, `_step_deliver` fails every Glazed turn after the model has
+    been paid for.
+    """
+    return (_GLAZED_CHANNEL_ID, PullModeChannel())
+
+
 def _telegram_channel(settings: Settings) -> tuple[str, Channel] | None:
     """`None` when no bot token or no bound profile is configured.
 
@@ -1136,7 +1152,7 @@ def build_channel_registry(settings: Settings) -> ChannelRegistry:
     was configured for still raises `UnknownChannelError` on `get` - loudly, at the
     lookup, never a silent `None` for a caller three layers up to mistake for delivered.
 
-    `http` and `cli` are always here and the two push channels are conditional. That
+    `http`, `cli` and `glazed` are always here and the two push channels are conditional. That
     asymmetry is the difference between a channel that needs a credential to reach a
     platform and one whose delivery is the caller coming back for the stored result - see
     `PullModeChannel`, and `_cli_channel` for why the console is the second of those.
@@ -1146,6 +1162,7 @@ def build_channel_registry(settings: Settings) -> ChannelRegistry:
         for pair in (
             _http_channel(),
             _cli_channel(),
+            _glazed_channel(),
             _telegram_channel(settings),
             _whatsapp_channel(settings),
         )
