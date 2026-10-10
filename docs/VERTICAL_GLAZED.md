@@ -8,13 +8,13 @@ Code computes (the Glazed backend), agents explain.
 
 | Profile | Toolset package | Tools |
 |---|---|---|
-| `glazed_orchestrator` | `glazed_orchestrator` (+ `peers`, added by the `peers:` block) | `propose_action`, `ask_peer` |
+| `glazed_orchestrator` | `glazed_orchestrator` (+ `peers`, added by the `peers:` block) | `propose_action`, `classify_text`, `ask_peer` |
 | `glazed_present` | `glazed_present` | `get_kpis`, `get_day_summary`, `get_issues`, `explain_metric` |
 | `glazed_past` | `glazed_past` | `get_history`, `evaluate_promo`, `recall_experiences` |
 | `glazed_supply` | `glazed_supply` | `get_order_plan`, `project_inventory`, `get_supplier_performance`, `get_issues` |
-| `glazed_strategist` | `glazed_strategist` | `get_kpis`, `get_day_summary`, `evaluate_promo` |
-| `glazed_sentinel` | `glazed_sentinel` | `get_history`, `record_event` |
-| `glazed_auditor` | `glazed_auditor` | `get_issues` (integrity kinds; the backend may return none) |
+| `glazed_strategist` | `glazed_strategist` | `get_kpis`, `get_day_summary`, `evaluate_promo`, `audit_promo` |
+| `glazed_sentinel` | `glazed_sentinel` | `get_history`, `record_event`, `check_compliance`, `classify_text` |
+| `glazed_auditor` | `glazed_auditor` | `get_integrity_issues` |
 | `glazed_liaison` | `glazed_liaison` | `offer_surplus`, `request_stock` (placeholders: "not available yet") |
 
 One toolset package per role because the contract test requires a profile to select exactly
@@ -51,6 +51,12 @@ resolved toolset (the Core appends it when `peers.enabled`), but it can never su
 | Service turn | `glazed` | `glazed-service` | scheduled sentinel / auditor turns: read tools + `record_event` |
 | Peer turn | `peer` | `peer` (set by the Core worker) | specialists answering: read tools + `record_event` |
 
+Peer-turn deny rows (`glazed-peer-turn-no-ask-peer`, `-no-propose-action`) are scoped to role
+`peer` on channel `peer`; every vertical's answering agent has that identity, so they are not
+Glazed-only (the default is deny anyway). `offer_surplus` / `request_stock` rows are named
+`glazed-placeholder-*`. Delivery: the composition registers a pull-mode channel `glazed`
+(like `http` and `cli`) so turns started by the backend or the peer worker finish delivery.
+
 Rules cannot name a profile, so the *profile's* `toolsets` decide which tools an agent holds
 and the rules narrow by identity. `propose_action` only creates a pending proposal; nothing
 is ever executed by an agent. A backend calling `POST /turns` must send
@@ -86,6 +92,30 @@ original contract); `get_order_plan` GET `/order-plan`; `project_inventory` GET
 `{issue_id,option_id,rationale}`. Timeouts: 3 s connect, 10 s total. HTTP
 and network failures come back as `{"error": ...}` the agent can explain; they never raise.
 
+### Jev, compliance, promo audit and integrity tools (Wave 6/7)
+
+| Tool (roles) | Backend call | Returns |
+|---|---|---|
+| `check_compliance(decision_id?)` (sentinel) | GET `/compliance[?decision_id]` | per approved decision: `execution_status` (executed, not_executed, partial) and, after the horizon, a `diagnosis` (not_executed, within_range, external_event, forecast_error) |
+| `classify_text(kind, text)` (orchestrator, sentinel) | POST `/classify {kind, text}` | `{label, confidence, model, calibrated, adapter, warning?}`; `kind` is `rejection_reason` or `deviation_cause` (validated in the tool); escape labels `needs_review` / `no_match` |
+| `audit_promo(department, discount_pct)` (strategist) | POST `/promos/audit` | `{verdict: block\|allow\|insufficient_evidence, recommendation, similar[], alternative, reasons[], noise_floor_pct}`; discount_pct is validated 0-100 in the tool |
+| `get_integrity_issues()` (auditor) | GET `/issues?category=integrity` | Issues with `exposure_usd`, option `data_fix_task` (never automatic) and `do_nothing` |
+
+Audit trail: ids, `kind`, `department` and `discount_pct` by value; the `text` of `classify_text`
+by presence only. Personas: the strategist calls `audit_promo` before recommending any promo and
+must recommend `do_nothing` on `block`; the orchestrator calls `classify_text` when the manager
+rejects something and mentions the category; the past analyst follows an experience's `verify`
+hint (`evaluate_promo` for a promo `ref`, `history` for a decision id). Every persona carries
+"Respond only in Spanish; never output words from other languages or scripts", and the
+orchestrator never claims a capability is unavailable unless a tool result says so.
+
+### Idempotent proposals
+
+`propose_action` sends `Idempotency-Key` = first 32 hex of sha256(case, issue_id, option_id). A
+timeout after the backend stored the row would otherwise let a retry create a second proposal.
+**The backend should answer a repeated key (same case) with the original proposal instead of
+creating another.** `project_inventory` clamps `horizon` to 1-30 (7 on junk input).
+
 ## Backend contract the tools rely on (Wave 5)
 
 The prompts and docstrings promise only what the backend returns; anything else is "not
@@ -120,7 +150,7 @@ The turn workflow resumes the orchestrator with one peer answer at a time, while
 needs results for all deferred calls, so two `ask_peer` calls in one model step hang the turn.
 Mitigations: the orchestrator persona says "Ask exactly ONE specialist per step", and the
 shared `ask_peer` tool (`adapters/driven/tools/peers.py`) defers only the first call of a
-response and returns a retry prompt for the others. The full fix (collecting all answers before
+response and returns a deterministic "Not sent: wait for the answer" result for the others (no model retry is consumed). The full fix (collecting all answers before
 resuming) belongs to `application/workflow` and is a separate task.
 
 Audit: every glazed tool has an argument decision in `audit_repository.py` (ids, dates and
