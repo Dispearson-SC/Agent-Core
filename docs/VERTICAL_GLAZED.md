@@ -83,8 +83,36 @@ original contract); `get_order_plan` GET `/order-plan`; `project_inventory` GET
 `recall_experiences` GET `/experiences?query&limit` (plain JSON list; `[]` plus
 `X-Glazed-Warning` when memory is degraded); `record_event` POST `/events`
 `{type,date_from,date_to,note}`; `propose_action` POST `/proposals`
-`{issue_id,option_id,action_type,params,rationale}`. Timeouts: 3 s connect, 10 s total. HTTP
+`{issue_id,option_id,rationale}`. Timeouts: 3 s connect, 10 s total. HTTP
 and network failures come back as `{"error": ...}` the agent can explain; they never raise.
+
+## Backend contract the tools rely on (Wave 5)
+
+The prompts and docstrings promise only what the backend returns; anything else is "not
+available", never estimated by the LLM.
+
+| Tool | Returns |
+|---|---|
+| `get_issues` | `Issue { issue_id, kind, sku?, supplier_id?, store_display_name, as_of, severity_usd, evidence[{metric,value,unit,period,source}], data_caveats[], options[] }` |
+| (option) | `Option { option_id, action_type, params, expected_benefit_usd{low,mid,high}, cost_usd, net_usd_mid, loss_impact{waste_usd_delta,lost_sales_usd_delta}, confidence{score,n_backtest,method}, tier N0-N3, tier_reasons[], urgency{deadline_date?,reason}, risk[], if_act, if_not }`; up to 4 per issue, always including `do_nothing` with its cost |
+| `get_order_plan` | per line: `service_level_target`, `order_deadline`, `projected_stockout_date`, `stockout_risk_without_order`, `vs_current_practice{received_to_sold,qty_delta}`, `min_order_warning` |
+| `get_kpis` | `waste_usd` and `lost_sales_usd {low,mid,high}` |
+
+Optional fields may be absent; the docstrings say "may be absent; never estimate it
+yourself". Tool results carry `store_display_name`; personas refer to the store by it,
+never by code.
+
+**`propose_action(issue_id, option_id, rationale)`** sends only those three fields. The
+LLM no longer supplies `action_type`, `params` or `tier`: the backend copies them from the
+stored option (`option_id` is a deterministic hash of issue_id + action_type + params), so an
+agent can neither alter an action nor under-state its tier.
+
+Personas enforce: every number verbatim from a tool result; options only from
+`Issue.options` (including `do_nothing`); recommendation justified with `net_usd_mid`,
+`loss_impact`, `confidence.score`, `tier`, `urgency` plus an if-act / if-not narrative;
+confidence and tier always stated, low confidence flagged. The Sentinel and Auditor say what
+their thin tools do today and nothing more. `tests/unit/test_glazed_prompts.py` scans all
+eight profiles for these rules and checks the docstrings.
 
 ## Environment
 
