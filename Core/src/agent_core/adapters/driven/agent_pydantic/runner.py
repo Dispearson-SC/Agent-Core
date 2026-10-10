@@ -119,6 +119,7 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from agent_core.adapters.driven.mcp.toolsets import result_budget_for
+from agent_core.adapters.driven.tools.context import TurnContext
 from agent_core.application.ingest_media import sniff_media
 from agent_core.domain.compaction import CompactionPolicy, ContextState
 from agent_core.domain.knowledge import KnowledgeHit, TenantKnowledgePolicy
@@ -1460,6 +1461,13 @@ class PydanticAgentRunner:
                 message_history=message_history,
                 capabilities=capabilities,
                 toolsets=self._per_turn_toolsets(request.caller, profile),
+                # The turn's identity for tools that need it (tools/context.py). Per turn,
+                # never on the cached agent: the agent is shared across tenants.
+                deps=TurnContext(
+                    caller=request.caller,
+                    session=request.session,
+                    agent_id=request.profile_id,
+                ),
                 usage_limits=self.usage_limits_for(profile),
             )
         except UsageLimitExceeded as exhausted:
@@ -1596,6 +1604,7 @@ class PydanticAgentRunner:
                 deferred_tool_results=_deferred_results(resolutions, profile.media.delivery),
                 capabilities=capabilities,
                 toolsets=self._per_turn_toolsets(caller, profile),
+                deps=TurnContext(caller=caller, session=session, agent_id=profile.id),
                 usage_limits=self.usage_limits_for(profile),
             )
         except UsageLimitExceeded as exhausted:

@@ -302,15 +302,25 @@ def new_turn_id() -> TurnId:
     return TurnId(str(uuid4()))
 
 
-def new_peer_session(tenant_id: TenantId) -> SessionRef:
+def new_peer_session(tenant_id: TenantId, origin: SessionRef | None = None) -> SessionRef:
     """A brand new session for one answered ask, in the ASKING side's tenant.
 
     Never a session id supplied by a caller and never one reused between asks - see A FRESH
     SESSION PER ANSWERED ASK above. The `peer-` prefix is for whoever reads `:sessions`
     later: a conversation with no human in it is worth being able to tell apart at a
     glance.
+
+    `origin` is the session that asked, taken from the claimed row by CODE (never from the
+    question text, which the asking model wrote). When given, its id travels inside the new
+    one as `peer~<origin id>~<uuid>`, so a vertical's tools can act on behalf of the asking
+    conversation (Glazed: the case) without the model naming it. The history is still
+    fresh - only the NAME carries the origin. Origin ids must not contain `~`.
     """
-    return SessionRef(session_id=SessionId(f"peer-{uuid4()}"), tenant_id=tenant_id)
+    if origin is None:
+        return SessionRef(session_id=SessionId(f"peer-{uuid4()}"), tenant_id=tenant_id)
+    return SessionRef(
+        session_id=SessionId(f"peer~{origin.session_id}~{uuid4()}"), tenant_id=tenant_id
+    )
 
 
 def build_peer_identity(tenant_id: TenantId) -> CallerIdentity:
@@ -360,7 +370,7 @@ async def answer_next_ask(
     target: AgentId,
     wake: PeerAnswerSignal | None = None,
     mint_turn_id: Callable[[], TurnId] = new_turn_id,
-    mint_session: Callable[[TenantId], SessionRef] = new_peer_session,
+    mint_session: Callable[[TenantId], SessionRef] | None = None,
 ) -> PeerTurnReport | None:
     """Claim one ask for `target`, run it, answer it. `None` when the queue is empty.
 
@@ -388,7 +398,11 @@ async def answer_next_ask(
     if ask is None:
         return None
 
-    session = mint_session(ask.from_session.tenant_id)
+    session = (
+        new_peer_session(ask.from_session.tenant_id, origin=ask.from_session)
+        if mint_session is None
+        else mint_session(ask.from_session.tenant_id)
+    )
     outcome = await runner.execute(
         mint_turn_id(), peer_turn_request(ask, session=session), hop=ask.hop
     )
