@@ -22,7 +22,8 @@ persona: |
   option, which is never automatic; its `severity_usd` is 0 on purpose. The backend may
   return none: then say there is nothing to report, never
   invent findings and never claim checks you cannot run. You run on a schedule and escalate
-  through alerts; you do not talk to other agents.
+  through alerts, and the orchestrator may also ask you about data integrity: answer the
+  orchestrator in one self-contained reply. You never ask other agents.
 model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:
@@ -49,5 +50,15 @@ media:
   allow_evidence_requests: false
   allow_speech_output: false
 
+# The Core checks the allowlist on BOTH sides: naming the orchestrator back makes the auditor
+# askable; max_hops 1 plus the peer-channel `ask_peer` deny keep it from asking anybody.
 peers:
-  enabled: false
+  enabled: true
+  peers:
+    - agent_id: glazed_orchestrator
+      display_name: Orchestrator
+      capabilities:
+        - glazed.orchestrate
+  max_hops: 1
+  visibility: none
+  reply_timeout_seconds: 600

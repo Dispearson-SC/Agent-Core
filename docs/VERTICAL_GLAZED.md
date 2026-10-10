@@ -33,9 +33,9 @@ before citing it, and falling back to history only when memory is unavailable.
 
 | From \ To | Orchestrator | Specialists | Others |
 |---|---|---|---|
-| Orchestrator | - | yes (present, past, supply, strategist, sentinel, liaison) | - |
+| Orchestrator | - | yes (present, past, supply, strategist, sentinel, auditor, liaison) | - |
 | Specialists | answer only | no | no |
-| Auditor | no peers (scheduled; escalates via alert in the backend) | no | no |
+| Auditor | answers the orchestrator when asked about data integrity (also runs on a schedule and escalates via alert) | no | no |
 
 Enforced three ways: (1) the orchestrator's `peers:` allowlist; (2) every specialist names
 **only** the orchestrator back, because the Core checks the allowlist on both sides, with

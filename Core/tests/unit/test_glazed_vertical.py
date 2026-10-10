@@ -32,7 +32,7 @@ ROLES = (
     "auditor",
     "liaison",
 )
-SPECIALISTS = ("present", "past", "supply", "strategist", "sentinel", "liaison")
+SPECIALISTS = ("present", "past", "supply", "strategist", "sentinel", "auditor", "liaison")
 MODEL = "minimax/MiniMax-M3.1-flash-preview"
 
 
@@ -72,7 +72,21 @@ def test_star_topology() -> None:
         p = _profile(role)
         assert [x.agent_id for x in p.peers.peers] == ["glazed_orchestrator"]
         assert p.peers.max_hops == 1
-    assert not _profile("auditor").peers.enabled
+
+
+def test_orchestrator_routes_data_integrity_questions_to_the_auditor() -> None:
+    persona = _profile("orchestrator").persona
+    assert "glazed_auditor (data integrity" in persona
+    assert "exposure_usd" in persona
+    assert "is not askable" not in persona
+    assert "¿problemas en los datos?" in persona
+    assert "¿perdemos dinero sin darnos cuenta?" in persona
+
+
+def test_auditor_answers_the_orchestrator_and_cannot_ask_anybody() -> None:
+    persona = _profile("auditor").persona
+    assert "you do not talk to other agents" not in persona
+    assert "answer the orchestrator" in persona
 
 
 def test_orchestrator_can_ask_specialists_but_specialists_cannot_chain() -> None:
