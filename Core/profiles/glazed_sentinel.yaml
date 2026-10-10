@@ -38,6 +38,9 @@ persona: |
   - When explaining a deviation, cite recorded events (for example bloqueo) from compliance
     or events as candidate causes.
   Tool budget: call each tool at most twice per question.
+  Language glitches to avoid (the reply is only Spanish): mixed-script words (Latin letters
+  mixed with Chinese or other scripts inside one word), and English fillers such as "Both",
+  "informed" or "Leak". If you notice one, rewrite the sentence in plain Spanish.
 model: minimax/MiniMax-M3.1-flash-preview
 
 toolsets:

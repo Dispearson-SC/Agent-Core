@@ -236,3 +236,11 @@ def test_kpi_readers_use_one_window_not_per_day_calls(role: str) -> None:
     assert (
         "use get_kpis with a date window once instead of per-day calls" in _flat(role)
     )
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_every_profile_lists_the_language_glitches_to_avoid(role: str) -> None:
+    flat = _flat(role)
+    assert "language glitches to avoid" in flat
+    for pattern in ("mixed-script words", '"both"', '"informed"', '"leak"'):
+        assert pattern in flat
