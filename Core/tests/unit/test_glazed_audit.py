@@ -59,3 +59,13 @@ def test_new_tools_decisions_record_ids_by_value_and_free_text_by_presence() -> 
 def test_snapshot_and_briefing_have_an_argument_free_audit_decision() -> None:
     assert ar.ARGUMENT_ALLOWLIST["get_snapshot"] == frozenset()
     assert ar.ARGUMENT_ALLOWLIST["get_briefing"] == frozenset()
+
+
+def test_redacted_date_arguments_are_json_serializable() -> None:
+    """A typed `date` argument must not crash the audit INSERT (json.dumps)."""
+    import json
+    from datetime import date
+
+    sink = ar.PgAuditSink(lambda: None)  # type: ignore[arg-type, return-value]
+    redacted = sink._redact("forecast_demand", {"sku": "SKU-1", "target_date": date(2026, 7, 25)})
+    assert json.loads(json.dumps(redacted)) == {"sku": "SKU-1", "target_date": "2026-07-25"}

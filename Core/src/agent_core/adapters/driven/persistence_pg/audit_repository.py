@@ -69,6 +69,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -445,7 +446,8 @@ class PgAuditSink:
         redacted: dict[str, object] = {}
         for name, value in arguments.items():
             if name in allowed:
-                redacted[name] = value
+                # Typed tool params (e.g. `date`) must survive the JSON column dump.
+                redacted[name] = value.isoformat() if isinstance(value, (date, datetime)) else value
             elif name in presence:
                 redacted[name] = PRESENCE_RECORDED
         return redacted
