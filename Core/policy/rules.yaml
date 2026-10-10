@@ -169,3 +169,230 @@ rules:
       An account freeze is not started by one agent asking another. Report what the ledger
       shows and say a freeze is warranted; a person asks for it on a channel where a human
       can approve it.
+
+  # ======================================================================================
+  # Glazed store copilot (docs/VERTICAL_GLAZED.md)
+  #
+  # THREE IDENTITIES, THREE SETS OF ROWS
+  #   glazed-manager  channel `glazed`  the orchestrator's turn, started by the backend for a
+  #                                     store manager (X-Roles: glazed-manager)
+  #   glazed-service  channel `glazed`  scheduled sentinel/auditor turns (backend service)
+  #   peer            channel `peer`    a specialist answering the orchestrator's ask_peer
+  # Which tools an AGENT holds is its profile's `toolsets`; these rows narrow by IDENTITY
+  # (a rule cannot name a profile). The orchestrator holds no data tool at all, and the
+  # manager identity matches none of the read rows below, so even a mis-edited profile
+  # cannot read data directly. Absent constraint widens, so each row states both.
+  # ======================================================================================
+
+  - rule_id: glazed-read-get-kpis
+    tool_pattern: get_kpis
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get kpis changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-get-day-summary
+    tool_pattern: get_day_summary
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get day summary changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-get-issues
+    tool_pattern: get_issues
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get issues changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-explain-metric
+    tool_pattern: explain_metric
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading explain metric changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-get-order-plan
+    tool_pattern: get_order_plan
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get order plan changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-project-inventory
+    tool_pattern: project_inventory
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading project inventory changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-get-supplier-performance
+    tool_pattern: get_supplier_performance
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get supplier performance changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-get-history
+    tool_pattern: get_history
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get history changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-evaluate-promo
+    tool_pattern: evaluate_promo
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading evaluate promo changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-recall-experiences
+    tool_pattern: recall_experiences
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading recall experiences changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-offer-surplus
+    tool_pattern: offer_surplus
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading offer surplus changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-request-stock
+    tool_pattern: request_stock
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading request stock changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-record-event
+    tool_pattern: record_event
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Recording an operational event is an append-only note in the case, not an action on
+      the store. The sentinel is the only agent whose toolset holds it.
+
+  - rule_id: glazed-propose-action
+    tool_pattern: propose_action
+    effect: allow
+    subject_roles:
+      - glazed-manager
+    channels:
+      - glazed
+    reason: >-
+      A proposal only creates a pending item for the manager to approve or reject; nothing is
+      executed by the agent.
+
+  - rule_id: glazed-no-proposals-from-specialists
+    tool_pattern: propose_action
+    effect: deny
+    channels:
+      - peer
+    reason: >-
+      Only the orchestrator proposes actions. A specialist reports findings to it.
+
+  - rule_id: glazed-orchestrator-asks-specialists
+    tool_pattern: ask_peer
+    effect: allow
+    subject_roles:
+      - glazed-manager
+    channels:
+      - glazed
+    reason: >-
+      The orchestrator delegates to its specialists. The two-sided allowlist and the hop
+      limit still decide which peer.
+
+  - rule_id: glazed-specialists-do-not-ask-peers
+    tool_pattern: ask_peer
+    effect: deny
+    channels:
+      - peer
+    reason: >-
+      Star topology: specialists answer the orchestrator and never ask another agent.
+
+  - rule_id: glazed-deny-everything-else
+    tool_pattern: glazed_*
+    effect: deny
+    reason: >-
+      No tool in the Glazed vertical is named glazed_*; any that appears was not reviewed.

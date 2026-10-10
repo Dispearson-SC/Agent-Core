@@ -1,0 +1,108 @@
+# Vertical: Glazed store copilot
+
+Eight agents for one store, following the contract "one profile per agent plus tools
+packages plus policy rows" with no change to `domain/`, `application/` or `ports/`.
+Code computes (the Glazed backend), agents explain.
+
+## Agents and tools
+
+| Profile | Toolset package | Tools |
+|---|---|---|
+| `glazed_orchestrator` | `glazed_orchestrator` (+ `peers`, added by the `peers:` block) | `propose_action`, `ask_peer` |
+| `glazed_present` | `glazed_present` | `get_kpis`, `get_day_summary`, `get_issues`, `explain_metric` |
+| `glazed_past` | `glazed_past` | `get_history`, `evaluate_promo`, `recall_experiences` |
+| `glazed_supply` | `glazed_supply` | `get_order_plan`, `project_inventory`, `get_supplier_performance`, `get_issues` |
+| `glazed_strategist` | `glazed_strategist` | `get_kpis`, `get_day_summary`, `evaluate_promo` |
+| `glazed_sentinel` | `glazed_sentinel` | `get_history`, `record_event` |
+| `glazed_auditor` | `glazed_auditor` | `get_issues` (integrity kinds; the backend may return none) |
+| `glazed_liaison` | `glazed_liaison` | `offer_surplus`, `request_stock` (placeholders: "not available yet") |
+
+One toolset package per role because the contract test requires a profile to select exactly
+one package. Shared code lives in `adapters/driven/tools/glazed/` (`client.py`, `tools.py`);
+the `glazed_<role>/tools.py` modules only expose `build_toolset`, registered in
+`composition.TOOL_PACKAGES`. Model: `gemini/gemini-3-flash-preview`. Budgets are small
+(`max_iterations` 5-15, `max_cost_usd` 0.10-0.50 per turn).
+
+`recall_experiences(query, limit=5)` reads the store's long-term memory (Backboard). Its
+result is `{"experiences": [...], "warning"?}`; a `warning` (from the backend's
+`X-Glazed-Warning` header) means memory is unavailable. The `glazed_past` persona requires
+re-verifying any recalled number with `get_history` / `evaluate_promo` (via `decision_id`)
+before citing it, and falling back to history only when memory is unavailable.
+
+## Who can ask whom (star topology)
+
+| From \ To | Orchestrator | Specialists | Others |
+|---|---|---|---|
+| Orchestrator | - | yes (present, past, supply, strategist, sentinel, liaison) | - |
+| Specialists | answer only | no | no |
+| Auditor | no peers (scheduled; escalates via alert in the backend) | no | no |
+
+Enforced three ways: (1) the orchestrator's `peers:` allowlist; (2) every specialist names
+**only** the orchestrator back, because the Core checks the allowlist on both sides, with
+`max_hops: 1` so the answering turn (hop 1) is refused if it tries to ask; (3) policy rows
+deny `ask_peer` on the `peer` channel. Specialists therefore do carry `ask_peer` in their
+resolved toolset (the Core appends it when `peers.enabled`), but it can never succeed.
+
+## Identities and policy (`Core/policy/rules.yaml`, "Glazed" section)
+
+| Identity | Channel | Role | Used for |
+|---|---|---|---|
+| Manager turn | `glazed` | `glazed-manager` | orchestrator: `propose_action`, `ask_peer` allowed; no data tools |
+| Service turn | `glazed` | `glazed-service` | scheduled sentinel / auditor turns: read tools + `record_event` |
+| Peer turn | `peer` | `peer` (set by the Core worker) | specialists answering: read tools + `record_event` |
+
+Rules cannot name a profile, so the *profile's* `toolsets` decide which tools an agent holds
+and the rules narrow by identity. `propose_action` only creates a pending proposal; nothing
+is ever executed by an agent. A backend calling `POST /turns` must send
+`X-Channel: glazed`, `X-Roles: glazed-manager` (or `glazed-service`), `X-Tenant-Id: <store_id>`,
+`X-Subject-Id: <manager>` and use the **case id as `session_id`**.
+
+## How case, store and as_of are bound (not LLM parameters)
+
+No tool declares `store_id`, `case`, or `as_of`. The runner passes the turn's identity as
+Pydantic AI deps (`TurnContext`: caller, session, running profile id; `runner.py`
+`deps=TurnContext(...)`), and `glazed/client.py` derives the headers:
+
+| Header | Source |
+|---|---|
+| `X-Glazed-Case` | session id; for a specialist's peer turn (`peer~<asker session id>~<uuid>`, built by the peer worker from the claimed row) the asking session id, i.e. the case |
+| `X-Glazed-Store` | `caller.tenant_id` (= `X-Tenant-Id` = store id) |
+| `X-Glazed-Agent` | running profile id (`glazed_supply`, ...) |
+
+The backend resolves store and `as_of` from the case; the tools never send them. Case ids
+(= Core session ids) must not contain `~`. Date arguments the model passes (`date_from`,
+`date_to`, `date`) are ranges: the backend should clamp them to the case's `as_of`.
+
+## Backend calls (base URL `GLAZED_BACKEND_URL`, default `http://backend:8080`)
+
+`get_kpis` GET `/internal/v1/kpis?date_from&date_to`; `get_day_summary` GET `/day-summary?date`;
+`get_issues` GET `/issues?limit`; `explain_metric` GET `/metrics/explain?metric` (not in the
+original contract); `get_order_plan` GET `/order-plan`; `project_inventory` GET
+`/inventory/projection?sku&horizon`; `get_supplier_performance` GET `/suppliers/performance`;
+`get_history` GET `/history`; `evaluate_promo` GET `/promos/{promo_id}/evaluation`;
+`recall_experiences` GET `/experiences?query&limit` (plain JSON list; `[]` plus
+`X-Glazed-Warning` when memory is degraded); `record_event` POST `/events`
+`{type,date_from,date_to,note}`; `propose_action` POST `/proposals`
+`{issue_id,option_id,action_type,params,rationale}`. Timeouts: 3 s connect, 10 s total. HTTP
+and network failures come back as `{"error": ...}` the agent can explain; they never raise.
+
+## Environment
+
+| Variable | Purpose |
+|---|---|
+| `GLAZED_BACKEND_URL` | Backend internal API base (default `http://backend:8080`) |
+| `GEMINI_API_KEY` | Gemini credential. `preflight` checks it by name; never faked |
+| `AGENT_CORE_LITELLM_BASE_URL` | LiteLLM proxy. **Needed for Gemini today**: in library mode `preflight` fails with "no endpoint and credential resolve" for `gemini/...` (litellm's Gemini config exposes no `get_api_base`); the proxy route passes |
+
+## Running the console against the orchestrator
+
+```
+python -m agent_core preflight
+python -m agent_core peer-worker                                 # terminal 1
+python -m agent_core console --durable --profile glazed_orchestrator \
+    --tenant S030 --channel glazed --role glazed-manager --subject manager-1 \
+    --session <case_id>                                          # terminal 2
+```
+
+`--durable` is required for delegation (see CONSOLE.md). The backend must be reachable at
+`GLAZED_BACKEND_URL` and know the case id used as `--session`.

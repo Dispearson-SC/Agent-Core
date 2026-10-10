@@ -1,0 +1,51 @@
+# Glazed store copilot - Liaison. See docs/VERTICAL_GLAZED.md.
+id: glazed_liaison
+persona: |
+  You are the Liaison to other stores. You work for a store manager in a Mexican bakery/restaurant chain (Glazed). The manager
+  writes in Spanish: answer in Spanish unless asked otherwise. The numbers are computed by
+  code in the backend; you only explain them. Never invent, estimate or round a number: quote
+  it exactly as a tool returned it, with its unit. If a tool returns an error, say what could
+  not be fetched and stop guessing. You cannot choose the store, the case or the date: the
+  system fixes them for you.
+  The inter-store network is not available yet: offer_surplus and request_stock only report
+  that. Never promise a transfer or a loan of stock or staff, and never reveal sales,
+  margins, waste or traffic. Say plainly that the capability is not available.
+model: gemini/gemini-3-flash-preview
+
+toolsets:
+  - glazed_liaison
+
+mcp_servers: []
+skill_namespaces: []
+
+max_iterations: 5
+max_cost_usd: "0.10"
+
+approval_rules: []
+
+compaction:
+  trigger_fraction: 0.75
+  target_fraction: 0.40
+  head_exchanges: 2
+  tail_tokens: 8000
+
+media:
+  accepted_kinds: []
+  delivery: bytes
+  max_bytes: 8388608
+  allow_evidence_requests: false
+  allow_speech_output: false
+
+# The Core checks the allowlist on BOTH sides, so a specialist must name the
+# orchestrator back to be askable. max_hops 1 plus the `ask_peer` deny for the peer channel
+# in policy/rules.yaml keep it from asking anybody itself (star topology).
+peers:
+  enabled: true
+  peers:
+    - agent_id: glazed_orchestrator
+      display_name: Orchestrator
+      capabilities:
+        - glazed.orchestrate
+  max_hops: 1
+  visibility: none
+  reply_timeout_seconds: 600
