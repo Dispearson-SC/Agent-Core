@@ -16,6 +16,7 @@ HOW THE CASE AND THE STORE REACH A CALL WITHOUT THE MODEL CHOOSING THEM
 
 from __future__ import annotations
 
+import hashlib
 import os
 from typing import Any
 
@@ -57,6 +58,7 @@ async def call(
     params: dict[str, Any] | None = None,
     body: dict[str, Any] | None = None,
     warning_header: bool = False,
+    idempotency_parts: tuple[str, ...] | None = None,
 ) -> Any:
     """One backend call. Always returns data or `{"error": ..., "status"?: ...}`; never raises.
 
@@ -71,6 +73,14 @@ async def call(
         "X-Glazed-Agent": turn.agent_id,
         "X-Glazed-Store": str(turn.caller.tenant_id),
     }
+    if idempotency_parts is not None:
+        # The POST may time out AFTER the backend stored the row; a retried identical call
+        # must not create a second one. Same case + same parts => same key; the backend
+        # should answer a repeated key with the original result.
+        digest = hashlib.sha256(
+            "\x1f".join((headers["X-Glazed-Case"], *idempotency_parts)).encode()
+        ).hexdigest()
+        headers["Idempotency-Key"] = digest[:32]
     clean = {k: v for k, v in (params or {}).items() if v is not None}
     try:
         async with httpx.AsyncClient(

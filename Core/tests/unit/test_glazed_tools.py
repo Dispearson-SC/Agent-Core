@@ -352,3 +352,51 @@ def test_get_integrity_issues_filters_by_category(backend: Backend) -> None:
     req = backend.requests[0]
     assert (req.method, req.url.path) == ("GET", "/internal/v1/issues")
     assert dict(req.url.params) == {"category": "integrity"}
+@pytest.mark.parametrize("horizon", ["abc", None, 0, -4, 10_000, float("nan")])
+def test_project_inventory_clamps_a_junk_horizon_instead_of_raising(
+    backend: Backend, horizon: Any
+) -> None:
+    _run(gt.project_inventory(_ctx(), "SKU-1", horizon))
+
+    assert 1 <= int(dict(backend.requests[0].url.params)["horizon"]) <= 30
+
+
+def test_propose_action_sends_a_stable_idempotency_key(backend: Backend) -> None:
+    for _ in range(2):
+        _run(gt.propose_action(_ctx(agent="glazed_orchestrator"), "I1", "O2", "why"))
+    _run(gt.propose_action(_ctx(agent="glazed_orchestrator"), "I1", "O3", "why"))
+    _run(gt.propose_action(_ctx("case-78", "glazed_orchestrator"), "I1", "O2", "why"))
+
+    keys = [r.headers["Idempotency-Key"] for r in backend.requests]
+    assert keys[0] == keys[1]
+    assert len(set(keys)) == 3  # a different option or case is a different proposal
+    assert "case-77" not in keys[0]
+
+
+def test_read_calls_send_no_idempotency_key(backend: Backend) -> None:
+    _run(gt.get_history(_ctx()))
+
+    assert "Idempotency-Key" not in backend.requests[0].headers
+
+
+def _two_asks_ctx(call_id: str) -> Any:
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+
+    parts = [
+        ToolCallPart("ask_peer", {"target": "glazed_past", "question": "a"}, tool_call_id="c1"),
+        ToolCallPart("ask_peer", {"target": "glazed_supply", "question": "b"}, tool_call_id="c2"),
+    ]
+    return SimpleNamespace(messages=[ModelResponse(parts=parts)], tool_call_id=call_id)
+
+
+def test_second_ask_peer_of_a_step_is_a_deterministic_result_not_a_retry() -> None:
+    from pydantic_ai.exceptions import CallDeferred
+
+    from agent_core.adapters.driven.tools import peers
+
+    result = peers._guarded_ask_peer(_two_asks_ctx("c2"), "glazed_supply", "b")  # no raise
+
+    assert "wait" in result.lower()
+    assert "not sent" in result.lower()
+    with pytest.raises(CallDeferred):  # the first one still defers
+        peers._guarded_ask_peer(_two_asks_ctx("c1"), "glazed_past", "a")

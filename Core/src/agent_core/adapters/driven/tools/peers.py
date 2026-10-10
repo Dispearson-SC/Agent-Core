@@ -105,7 +105,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic_ai import RunContext
-from pydantic_ai.exceptions import CallDeferred, ModelRetry
+from pydantic_ai.exceptions import CallDeferred
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.tools import Tool
 from pydantic_ai.toolsets import FunctionToolset
@@ -128,7 +128,8 @@ def _guarded_ask_peer(ctx: RunContext[Any], target: str, question: str) -> str:
     The workflow resumes a turn with one peer answer at a time, while Pydantic AI needs the
     results of every deferred call at once, so a second ask_peer in the same model response
     would hang the turn. Only the first ask_peer of a response defers; the others get a
-    retry prompt telling the model to ask one agent per step. This is a guard in the tool,
+    deterministic result telling the model to wait (a retry would burn the model's
+    retry budget on every repeat). This is a guard in the tool,
     not the full fix (collecting every answer before resuming), which belongs to the
     workflow.
     """
@@ -136,9 +137,9 @@ def _guarded_ask_peer(ctx: RunContext[Any], target: str, question: str) -> str:
     if isinstance(last, ModelResponse):
         asks = [p for p in last.parts if isinstance(p, ToolCallPart) and p.tool_name == "ask_peer"]
         if len(asks) > 1 and ctx.tool_call_id != asks[0].tool_call_id:
-            raise ModelRetry(
-                "Ask exactly one specialist per step: wait for the answer to your first "
-                "ask_peer before asking another."
+            return (
+                "Not sent: only one ask_peer per step. Wait for the answer to your first "
+                "ask_peer, then ask this again in a later step if you still need it."
             )
     return ask_peer(target, question)
 

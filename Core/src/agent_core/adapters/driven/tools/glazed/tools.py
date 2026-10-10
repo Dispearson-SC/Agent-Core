@@ -36,6 +36,13 @@ def _bounded(limit: int) -> int:
         return _MAX_LIMIT
 
 
+def _clamped(value: Any, low: int, high: int, default: int) -> int:
+    try:
+        return max(low, min(int(value), high))
+    except (TypeError, ValueError, OverflowError):  # junk or NaN from the model must not raise
+        return default
+
+
 async def get_kpis(ctx: Ctx, date_from: str, date_to: str) -> Any:
     """KPIs for the store between two ISO dates, computed by the backend.
 
@@ -98,7 +105,7 @@ async def project_inventory(ctx: Ctx, sku: str, horizon: int = 7) -> Any:
         ctx,
         "GET",
         f"{_API}/inventory/projection",
-        params={"sku": sku, "horizon": max(1, min(int(horizon), 30))},
+        params={"sku": sku, "horizon": _clamped(horizon, 1, 30, 7)},
     )
 
 
@@ -169,7 +176,9 @@ async def propose_action(ctx: Ctx, issue_id: str, option_id: str, rationale: str
 
     Send only the `issue_id` and `option_id` returned by get_issues, and a short
     `rationale` in prose. The backend copies action_type, params and tier from the stored
-    option; you cannot set or change them. Returns the pending proposal (or an error).
+    option; you cannot set or change them. Returns the pending proposal (or an error). The
+    call carries an `Idempotency-Key` (case + issue + option), so repeating it after a
+    timeout does not create a second proposal.
     """
     return await call(
         ctx,
@@ -180,6 +189,7 @@ async def propose_action(ctx: Ctx, issue_id: str, option_id: str, rationale: str
             "option_id": option_id,
             "rationale": rationale,
         },
+        idempotency_parts=(issue_id, option_id),
     )
 
 
