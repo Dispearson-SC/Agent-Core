@@ -164,7 +164,7 @@ ARGUMENT_ALLOWLIST: Mapping[str, frozenset[str]] = {
     # empty set: there is nothing to record, and that is a decision, not a gap.
     "get_kpis": frozenset({"date_from", "date_to"}),
     "get_day_summary": frozenset({"date"}),
-    "get_issues": frozenset({"limit"}),
+    "get_issues": frozenset({"limit", "category", "kind"}),
     "explain_metric": frozenset({"metric"}),
     "get_order_plan": frozenset(),
     "project_inventory": frozenset({"sku", "horizon"}),
