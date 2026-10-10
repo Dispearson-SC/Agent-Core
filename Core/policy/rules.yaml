@@ -314,7 +314,7 @@ rules:
       Reading recall experiences changes nothing; the backend fixes the store, the case and the
       date, and returns only what this agent's role may see.
 
-  - rule_id: glazed-read-offer-surplus
+  - rule_id: glazed-placeholder-offer-surplus
     tool_pattern: offer_surplus
     effect: allow
     subject_roles:
@@ -324,10 +324,10 @@ rules:
       - peer
       - glazed
     reason: >-
-      Reading offer surplus changes nothing; the backend fixes the store, the case and the
-      date, and returns only what this agent's role may see.
+      Offer surplus is a placeholder: the inter-store network does not exist yet, so the tool only
+      returns "not available" and touches nothing. Allowed so the agent can say so.
 
-  - rule_id: glazed-read-request-stock
+  - rule_id: glazed-placeholder-request-stock
     tool_pattern: request_stock
     effect: allow
     subject_roles:
@@ -337,8 +337,8 @@ rules:
       - peer
       - glazed
     reason: >-
-      Reading request stock changes nothing; the backend fixes the store, the case and the
-      date, and returns only what this agent's role may see.
+      Request stock is a placeholder: the inter-store network does not exist yet, so the tool only
+      returns "not available" and touches nothing. Allowed so the agent can say so.
 
   - rule_id: glazed-read-check-compliance
     tool_pattern: check_compliance
@@ -417,9 +417,17 @@ rules:
       A proposal only creates a pending item for the manager to approve or reject; nothing is
       executed by the agent.
 
-  - rule_id: glazed-no-proposals-from-specialists
+  # SCOPE OF THE TWO PEER-TURN DENIES. A rule cannot name a profile and every vertical's
+  # answering agent is `peer` on channel `peer`, so these are stated on both dimensions and
+  # are not Glazed-only. They add nothing a missing allow would not already refuse (the
+  # default is deny); they exist so the model reads the Glazed-specific reason. A vertical
+  # that later lets a peer turn propose or ask must grant it with a narrower row and
+  # remove the matching deny here.
+  - rule_id: glazed-peer-turn-no-propose-action
     tool_pattern: propose_action
     effect: deny
+    subject_roles:
+      - peer
     channels:
       - peer
     reason: >-
@@ -436,9 +444,11 @@ rules:
       The orchestrator delegates to its specialists. The two-sided allowlist and the hop
       limit still decide which peer.
 
-  - rule_id: glazed-specialists-do-not-ask-peers
+  - rule_id: glazed-peer-turn-no-ask-peer
     tool_pattern: ask_peer
     effect: deny
+    subject_roles:
+      - peer
     channels:
       - peer
     reason: >-

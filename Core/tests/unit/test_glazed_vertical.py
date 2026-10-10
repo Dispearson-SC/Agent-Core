@@ -182,7 +182,7 @@ def test_the_peer_channel_is_denied_by_the_specific_glazed_row() -> None:
     decision = _decision(PEER, "ask_peer")
 
     assert decision.effect is Effect.DENY
-    assert decision.rule_id == "glazed-specialists-do-not-ask-peers"
+    assert decision.rule_id == "glazed-peer-turn-no-ask-peer"
 
 
 def test_classify_text_is_allowed_for_manager_service_and_peer_turns_only_on_glazed_channels() -> (
@@ -192,3 +192,27 @@ def test_classify_text_is_allowed_for_manager_service_and_peer_turns_only_on_gla
         assert _effect(caller, "classify_text") is Effect.ALLOW
     stranger = CallerIdentity("x", "http", TenantId("S030"), frozenset({"glazed-manager"}))
     assert _effect(stranger, "classify_text") is not Effect.ALLOW
+
+
+def _rule(rule_id: str):  # type: ignore[no-untyped-def]
+    return next(r for r in RULES if r.rule_id == rule_id)
+
+
+def test_the_peer_turn_deny_rows_name_their_scope_and_stay_deny() -> None:
+    for rule_id in ("glazed-peer-turn-no-ask-peer", "glazed-peer-turn-no-propose-action"):
+        rule = _rule(rule_id)
+        assert rule.effect is Effect.DENY
+        assert rule.channels == frozenset({"peer"})
+        assert rule.subject_roles == frozenset({"peer"})  # not "any role on the peer channel"
+    assert _effect(PEER, "propose_action") is Effect.DENY
+    assert _effect(PEER, "ask_peer") is Effect.DENY
+
+
+def test_stub_tools_are_named_placeholders_not_reads() -> None:
+    ids = {r.rule_id for r in RULES}
+    assert {"glazed-placeholder-offer-surplus", "glazed-placeholder-request-stock"} <= ids
+    assert not {"glazed-read-offer-surplus", "glazed-read-request-stock"} & ids
+    assert "not available" in _rule("glazed-placeholder-offer-surplus").reason.lower()
+    # the deny default for an unknown tool did not move
+    assert _effect(MANAGER, "something_new") is Effect.DENY
+    assert _effect(PEER, "something_new") is Effect.DENY
