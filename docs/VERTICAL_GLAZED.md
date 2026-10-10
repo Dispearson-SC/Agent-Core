@@ -114,6 +114,18 @@ confidence and tier always stated, low confidence flagged. The Sentinel and Audi
 their thin tools do today and nothing more. `tests/unit/test_glazed_prompts.py` scans all
 eight profiles for these rules and checks the docstrings.
 
+## One peer ask per step (known limitation)
+
+The turn workflow resumes the orchestrator with one peer answer at a time, while Pydantic AI
+needs results for all deferred calls, so two `ask_peer` calls in one model step hang the turn.
+Mitigations: the orchestrator persona says "Ask exactly ONE specialist per step", and the
+shared `ask_peer` tool (`adapters/driven/tools/peers.py`) defers only the first call of a
+response and returns a retry prompt for the others. The full fix (collecting all answers before
+resuming) belongs to `application/workflow` and is a separate task.
+
+Audit: every glazed tool has an argument decision in `audit_repository.py` (ids, dates and
+bounded numbers by value; `rationale`, `note` and the memory `query` by presence only).
+
 ## Environment
 
 | Variable | Purpose |

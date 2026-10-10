@@ -109,3 +109,10 @@ def test_tool_docstrings_describe_the_wave5_contract(tool: str) -> None:
 def test_optional_fields_are_flagged_as_never_to_estimate(tool: str) -> None:
     doc = inspect.getdoc(getattr(gt, tool)) or ""
     assert "may be absent; never estimate it yourself" in doc
+
+
+def test_orchestrator_asks_exactly_one_specialist_per_step() -> None:
+    """Resuming with one peer answer while two ask_peer calls are deferred hangs the turn."""
+    persona = _persona("orchestrator")
+    assert "Ask exactly ONE specialist per step" in persona
+    assert "Never issue two ask_peer calls in the same step" in persona
