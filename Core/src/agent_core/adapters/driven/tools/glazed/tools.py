@@ -71,8 +71,8 @@ async def get_issues(
 ) -> Any:
     """Active issues for the store relevant to your role, most urgent first.
 
-    `category` is "operational" (the backend default when omitted), "integrity" (data-quality issues, with
-    `exposure_usd`) or "all"; `kind` optionally narrows to one issue kind.
+    `category` is "operational" (the backend default when omitted), "integrity"
+    (data-quality issues, with `exposure_usd`) or "all"; `kind` narrows to one issue kind.
 
     Each issue has: issue_id, kind, sku?, supplier_id?, store_display_name, as_of,
     severity_usd, `evidence` [{metric, value, unit, period, source}], `data_caveats` [str]
