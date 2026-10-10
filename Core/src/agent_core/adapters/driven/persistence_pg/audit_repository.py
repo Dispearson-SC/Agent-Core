@@ -155,6 +155,29 @@ ARGUMENT_ALLOWLIST: Mapping[str, frozenset[str]] = {
     # the "we do not know" answer. It is also the half of the exchange this deployment
     # WROTE - the answer comes back untrusted and is not an argument here at all.
     "ask_peer": frozenset({"target", "question"}),
+    # --- glazed package (adapters/driven/tools/glazed/tools.py) ---
+    #
+    # Everything the model passes is an identifier, a date, a bounded number or a metric
+    # name: what the call was about, and none of it personal data. The store, the case and
+    # the date are bound by the turn, never arguments. Tools that take no model argument
+    # (`get_order_plan`, `get_supplier_performance`, `get_history`) are decided with an
+    # empty set: there is nothing to record, and that is a decision, not a gap.
+    "get_kpis": frozenset({"date_from", "date_to"}),
+    "get_day_summary": frozenset({"date"}),
+    "get_issues": frozenset({"limit"}),
+    "explain_metric": frozenset({"metric"}),
+    "get_order_plan": frozenset(),
+    "project_inventory": frozenset({"sku", "horizon"}),
+    "get_supplier_performance": frozenset(),
+    "get_history": frozenset(),
+    "evaluate_promo": frozenset({"promo_id"}),
+    "recall_experiences": frozenset({"limit"}),
+    "record_event": frozenset({"type", "date_from", "date_to"}),
+    # `issue_id` and `option_id` ARE the action: the backend copies action_type, params and
+    # tier from the stored option, so these two lines the row up against what was proposed.
+    "propose_action": frozenset({"issue_id", "option_id"}),
+    "offer_surplus": frozenset({"sku"}),
+    "request_stock": frozenset({"sku"}),
 }
 
 # Per-tool fields recorded BY PRESENCE: the key is stored with `PRESENCE_RECORDED` in
@@ -172,6 +195,12 @@ ARGUMENT_PRESENCE_ONLY: Mapping[str, frozenset[str]] = {
     # data into the one place it can never be corrected or removed (non-negotiable #6 -
     # this row is written once and never updated). Presence keeps the fact, not the copy.
     "case_notes_append": frozenset({"note"}),
+    # Free text the model wrote: its existence matters to the trail, its copy does not
+    # (the proposal row and the event row in the backend hold the text under their own
+    # retention). `query` is a natural-language memory search that may quote a person.
+    "propose_action": frozenset({"rationale"}),
+    "record_event": frozenset({"note"}),
+    "recall_experiences": frozenset({"query"}),
 }
 
 _LOG = logging.getLogger(__name__)
@@ -389,7 +418,8 @@ class PgAuditSink:
         """
         allowed = self._argument_allowlist.get(tool_name, frozenset())
         presence = self._argument_presence_only.get(tool_name, frozenset())
-        if not allowed and not presence and tool_name not in self._undecided_tools_warned:
+        decided = tool_name in self._argument_allowlist or tool_name in self._argument_presence_only
+        if not decided and tool_name not in self._undecided_tools_warned:
             self._undecided_tools_warned.add(tool_name)
             _LOG.warning(
                 "No audit argument decision for tool %r: every argument of this call is "

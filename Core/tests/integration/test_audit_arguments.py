@@ -136,7 +136,7 @@ def test_every_tool_this_process_serves_has_a_deliberate_argument_decision() -> 
     undecided = sorted(
         name
         for name in _shipped_tool_names()
-        if not by_value.get(name) and not by_presence.get(name)
+        if name not in by_value and name not in by_presence
     )
     assert not undecided, (
         "these shipped tools record no argument at all, so every call to them renders "
