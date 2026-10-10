@@ -46,3 +46,11 @@ def test_a_tool_without_arguments_is_a_decision_not_a_warning(
     with caplog.at_level(logging.WARNING):
         assert sink._redact("get_order_plan", {}) == {}
     assert "No audit argument decision" not in caplog.text
+
+
+def test_new_tools_decisions_record_ids_by_value_and_free_text_by_presence() -> None:
+    assert ar.ARGUMENT_ALLOWLIST["check_compliance"] == {"decision_id"}
+    assert ar.ARGUMENT_ALLOWLIST["classify_text"] == {"kind"}
+    assert ar.ARGUMENT_PRESENCE_ONLY["classify_text"] == {"text"}
+    assert ar.ARGUMENT_ALLOWLIST["audit_promo"] == {"department", "discount_pct"}
+    assert ar.ARGUMENT_ALLOWLIST["get_integrity_issues"] == frozenset()

@@ -183,6 +183,78 @@ async def propose_action(ctx: Ctx, issue_id: str, option_id: str, rationale: str
     )
 
 
+_CLASSIFY_KINDS = ("rejection_reason", "deviation_cause")
+
+
+async def check_compliance(ctx: Ctx, decision_id: str | None = None) -> Any:
+    """Whether approved decisions were carried out, as measured by the backend.
+
+    Without `decision_id` it covers all approved decisions of the case, otherwise only
+    that one. Returns the checked decisions; each has `decision_id`, `execution_status`
+    (executed, not_executed or partial) and, once the horizon passed, a `diagnosis`:
+    `not_executed`, `within_range`, `external_event` (a registered event overlaps the
+    horizon) or `forecast_error`, with the observed vs simulated figures (label
+    `backtest`). Only order-quantity actions are measurable; a field may be absent; never
+    estimate it yourself. An empty list means there is nothing to check.
+    """
+    return await call(
+        ctx, "GET", f"{_API}/compliance", params={"decision_id": decision_id or None}
+    )
+
+
+async def classify_text(ctx: Ctx, kind: str, text: str) -> Any:
+    """Classify free text with Jev into a fixed label set.
+
+    `kind` is `rejection_reason` (why the manager rejected a proposal) or
+    `deviation_cause` (why a decision was not carried out as planned). Returns
+    {label, confidence, model, calibrated, adapter} plus `warning` when an earlier
+    classifier failed. The label is `needs_review` (rejection_reason) or `no_match`
+    (deviation_cause) when nothing fits or confidence is under 0.4. `confidence` only
+    measures how well the text fits the label; it is not the confidence of a
+    recommendation, and `calibrated` false means a fallback model answered. Quote the
+    label as returned; never invent a category.
+    """
+    if kind not in _CLASSIFY_KINDS:
+        return {"error": f"kind must be one of {', '.join(_CLASSIFY_KINDS)}."}
+    return await call(ctx, "POST", f"{_API}/classify", body={"kind": kind, "text": text})
+
+
+async def audit_promo(ctx: Ctx, department: str, discount_pct: float) -> Any:
+    """Audit a promotion idea against past evidence BEFORE recommending it.
+
+    Returns {verdict, recommendation, similar, alternative, reasons, noise_floor_pct}.
+    `verdict` is `block` (do not recommend it), `allow` or `insufficient_evidence`.
+    `similar` lists comparable past promos (each may carry this store's
+    `store_evaluation`), `alternative` a better idea when there is one and `reasons` the
+    evidence. On `block`, recommend `do_nothing`. A field may be absent; never estimate
+    it yourself.
+    """
+    try:
+        pct = float(discount_pct)
+    except (TypeError, ValueError):
+        pct = float("nan")
+    if not 0.0 <= pct <= 100.0:  # NaN fails the comparison too
+        return {"error": "discount_pct must be a number between 0 and 100."}
+    return await call(
+        ctx,
+        "POST",
+        f"{_API}/promos/audit",
+        body={"department": department, "discount_pct": pct},
+    )
+
+
+async def get_integrity_issues(ctx: Ctx) -> Any:
+    """Data-integrity issues of the store (SKU key mismatches, orphan SKUs...).
+
+    Same Issue shape as get_issues (issue_id, kind, evidence, data_caveats, options)
+    marked `category` integrity, `integrity` true, with `exposure_usd`: the sales amount
+    at stake (their `severity_usd` is 0 on purpose). Options are a `data_fix_task`
+    (never automatic) and `do_nothing`. A field may be absent; never estimate it
+    yourself. An empty list means no integrity issue was found.
+    """
+    return await call(ctx, "GET", f"{_API}/issues", params={"category": "integrity"})
+
+
 async def offer_surplus(ctx: Ctx, sku: str) -> Any:
     """Offer surplus of a SKU to other stores. NOT AVAILABLE YET."""
     return dict(_NOT_AVAILABLE)
@@ -199,14 +271,14 @@ def _toolset(*functions: Callable[..., Any]) -> FunctionToolset[Any]:
 
 # One literal builder per role. The packages `glazed_<role>/` re-export these.
 TOOLSETS: dict[str, Callable[[], FunctionToolset[Any]]] = {
-    "orchestrator": lambda: _toolset(propose_action),
+    "orchestrator": lambda: _toolset(propose_action, classify_text),
     "present": lambda: _toolset(get_kpis, get_day_summary, get_issues, explain_metric),
     "past": lambda: _toolset(get_history, evaluate_promo, recall_experiences),
     "supply": lambda: _toolset(
         get_order_plan, project_inventory, get_supplier_performance, get_issues
     ),
-    "strategist": lambda: _toolset(get_kpis, get_day_summary, evaluate_promo),
-    "sentinel": lambda: _toolset(get_history, record_event),
-    "auditor": lambda: _toolset(get_issues),
+    "strategist": lambda: _toolset(get_kpis, get_day_summary, evaluate_promo, audit_promo),
+    "sentinel": lambda: _toolset(get_history, record_event, check_compliance, classify_text),
+    "auditor": lambda: _toolset(get_integrity_issues),
     "liaison": lambda: _toolset(offer_surplus, request_stock),
 }

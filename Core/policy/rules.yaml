@@ -340,6 +340,59 @@ rules:
       Reading request stock changes nothing; the backend fixes the store, the case and the
       date, and returns only what this agent's role may see.
 
+  - rule_id: glazed-read-check-compliance
+    tool_pattern: check_compliance
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Checking compliance reads the backend's measurement of approved decisions; it
+      changes nothing. Only the sentinel's toolset holds it.
+
+  - rule_id: glazed-read-get-integrity-issues
+    tool_pattern: get_integrity_issues
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Listing integrity issues reads the backend's data checks; it changes nothing. Only
+      the auditor's toolset holds it.
+
+  - rule_id: glazed-audit-promo
+    tool_pattern: audit_promo
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      A promo audit is a backend computation over past evidence; it creates and changes
+      nothing. Only the strategist's toolset holds it.
+
+  - rule_id: glazed-classify-text
+    tool_pattern: classify_text
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+      - glazed-manager
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Classifying a text returns a label from a fixed set and stores nothing. The
+      orchestrator (manager turn) and the sentinel (peer or service turn) hold it.
+
   - rule_id: glazed-record-event
     tool_pattern: record_event
     effect: allow

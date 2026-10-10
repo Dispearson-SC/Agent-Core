@@ -20,13 +20,13 @@ from agent_core.adapters.driven.tools.glazed import tools as gt
 from agent_core.domain.turn import CallerIdentity, SessionRef, TenantId
 
 ROLES = {
-    "orchestrator": {"propose_action"},
+    "orchestrator": {"propose_action", "classify_text"},
     "present": {"get_kpis", "get_day_summary", "get_issues", "explain_metric"},
     "past": {"get_history", "evaluate_promo", "recall_experiences"},
     "supply": {"get_order_plan", "project_inventory", "get_supplier_performance", "get_issues"},
-    "strategist": {"get_kpis", "get_day_summary", "evaluate_promo"},
-    "sentinel": {"get_history", "record_event"},
-    "auditor": {"get_issues"},
+    "strategist": {"get_kpis", "get_day_summary", "evaluate_promo", "audit_promo"},
+    "sentinel": {"get_history", "record_event", "check_compliance", "classify_text"},
+    "auditor": {"get_integrity_issues"},
     "liaison": {"offer_surplus", "request_stock"},
 }
 FORBIDDEN_PARAMS = {"store_id", "store", "as_of", "case", "case_id", "tenant", "tenant_id"}
@@ -301,3 +301,54 @@ def test_registered_in_the_composition_root() -> None:
 )
 def test_case_id_for_edge_cases(session_id: str, case: str) -> None:
     assert glazed_client.case_id_for(session_id) == case
+
+
+def test_check_compliance_reads_all_decisions_or_one(backend: Backend) -> None:
+    _run(gt.check_compliance(_ctx(agent="glazed_sentinel")))
+    _run(gt.check_compliance(_ctx(agent="glazed_sentinel"), "D-1"))
+
+    first, second = backend.requests
+    assert (first.method, first.url.path) == ("GET", "/internal/v1/compliance")
+    assert dict(first.url.params) == {}
+    assert dict(second.url.params) == {"decision_id": "D-1"}
+
+
+def test_classify_text_posts_kind_and_text(backend: Backend) -> None:
+    _run(gt.classify_text(_ctx(agent="glazed_sentinel"), "rejection_reason", "muy caro"))
+
+    req = backend.requests[0]
+    assert (req.method, req.url.path) == ("POST", "/internal/v1/classify")
+    assert json.loads(req.content) == {"kind": "rejection_reason", "text": "muy caro"}
+
+
+def test_classify_text_rejects_an_unknown_kind_without_calling_the_backend(
+    backend: Backend,
+) -> None:
+    result = _run(gt.classify_text(_ctx(), "mood", "x"))
+
+    assert "rejection_reason" in result["error"] and "deviation_cause" in result["error"]
+    assert backend.requests == []
+
+
+def test_audit_promo_posts_department_and_discount(backend: Backend) -> None:
+    _run(gt.audit_promo(_ctx(agent="glazed_strategist"), "bakery", 15))
+
+    req = backend.requests[0]
+    assert (req.method, req.url.path) == ("POST", "/internal/v1/promos/audit")
+    assert json.loads(req.content) == {"department": "bakery", "discount_pct": 15.0}
+
+
+@pytest.mark.parametrize("bad", ["abc", None, float("nan"), -5, 101])
+def test_audit_promo_refuses_a_junk_discount_without_raising(backend: Backend, bad: Any) -> None:
+    result = _run(gt.audit_promo(_ctx(), "bakery", bad))
+
+    assert "error" in result
+    assert backend.requests == []
+
+
+def test_get_integrity_issues_filters_by_category(backend: Backend) -> None:
+    _run(gt.get_integrity_issues(_ctx(agent="glazed_auditor")))
+
+    req = backend.requests[0]
+    assert (req.method, req.url.path) == ("GET", "/internal/v1/issues")
+    assert dict(req.url.params) == {"category": "integrity"}

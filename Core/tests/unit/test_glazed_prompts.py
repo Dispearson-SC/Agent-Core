@@ -95,6 +95,17 @@ DOC_EXPECTATIONS = {
     ],
     "get_kpis": ["waste_usd", "lost_sales_usd", "low", "mid", "high"],
     "propose_action": ["issue_id", "option_id", "rationale", "backend"],
+    "check_compliance": [
+        "execution_status",
+        "not_executed",
+        "within_range",
+        "external_event",
+        "forecast_error",
+        "decision_id",
+    ],
+    "classify_text": ["rejection_reason", "deviation_cause", "label", "confidence", "calibrated"],
+    "audit_promo": ["verdict", "block", "allow", "insufficient_evidence", "similar", "reasons"],
+    "get_integrity_issues": ["exposure_usd", "data_fix_task", "integrity", "do_nothing"],
 }
 
 

@@ -116,6 +116,7 @@ MANAGER = CallerIdentity("m-1", "glazed", TenantId("S030"), frozenset({"glazed-m
 SERVICE = CallerIdentity("svc", "glazed", TenantId("S030"), frozenset({"glazed-service"}))
 PEER = CallerIdentity("peer-agent", "peer", TenantId("S030"), frozenset({"peer"}))
 READ = (
+    "check_compliance get_integrity_issues audit_promo "
     "get_kpis get_day_summary get_issues explain_metric get_order_plan project_inventory "
     "get_supplier_performance get_history evaluate_promo recall_experiences "
     "offer_surplus request_stock"
@@ -182,3 +183,12 @@ def test_the_peer_channel_is_denied_by_the_specific_glazed_row() -> None:
 
     assert decision.effect is Effect.DENY
     assert decision.rule_id == "glazed-specialists-do-not-ask-peers"
+
+
+def test_classify_text_is_allowed_for_manager_service_and_peer_turns_only_on_glazed_channels() -> (
+    None
+):
+    for caller in (MANAGER, SERVICE, PEER):
+        assert _effect(caller, "classify_text") is Effect.ALLOW
+    stranger = CallerIdentity("x", "http", TenantId("S030"), frozenset({"glazed-manager"}))
+    assert _effect(stranger, "classify_text") is not Effect.ALLOW

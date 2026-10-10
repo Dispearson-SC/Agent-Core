@@ -178,6 +178,12 @@ ARGUMENT_ALLOWLIST: Mapping[str, frozenset[str]] = {
     "propose_action": frozenset({"issue_id", "option_id"}),
     "offer_surplus": frozenset({"sku"}),
     "request_stock": frozenset({"sku"}),
+    # `decision_id` names the decision checked; `kind` is one of two fixed labels; the
+    # department and the discount are the promo being audited. None is personal data.
+    "check_compliance": frozenset({"decision_id"}),
+    "classify_text": frozenset({"kind"}),
+    "audit_promo": frozenset({"department", "discount_pct"}),
+    "get_integrity_issues": frozenset(),
 }
 
 # Per-tool fields recorded BY PRESENCE: the key is stored with `PRESENCE_RECORDED` in
@@ -201,6 +207,9 @@ ARGUMENT_PRESENCE_ONLY: Mapping[str, frozenset[str]] = {
     "propose_action": frozenset({"rationale"}),
     "record_event": frozenset({"note"}),
     "recall_experiences": frozenset({"query"}),
+    # The manager's own words (a rejection reason) or a deviation note: kept in the
+    # backend under its retention, not copied into the append-only trail.
+    "classify_text": frozenset({"text"}),
 }
 
 _LOG = logging.getLogger(__name__)
