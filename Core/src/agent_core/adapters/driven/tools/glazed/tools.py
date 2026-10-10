@@ -29,6 +29,9 @@ _NOT_AVAILABLE = {
 Ctx = RunContext[Any]
 
 
+_ISSUE_CATEGORIES = ("operational", "integrity", "all")
+
+
 def _bounded(limit: int) -> int:
     try:
         return max(1, min(int(limit), _MAX_LIMIT))
@@ -44,7 +47,9 @@ def _clamped(value: Any, low: int, high: int, default: int) -> int:
 
 
 async def get_kpis(ctx: Ctx, date_from: str, date_to: str) -> Any:
-    """KPIs for the store between two ISO dates, computed by the backend.
+    """KPIs for the store over a date window (`date_from` to `date_to`, ISO dates).
+
+    One call covers the whole window: use it once instead of one call per day.
 
     Returns sales and traffic figures plus the two losses in USD: `waste_usd` and
     `lost_sales_usd`, the latter as {low, mid, high} (a range, never a point value; quote
@@ -61,8 +66,13 @@ async def get_day_summary(ctx: Ctx, date: str) -> Any:
     return await call(ctx, "GET", f"{_API}/day-summary", params={"date": date})
 
 
-async def get_issues(ctx: Ctx, limit: int = 10) -> Any:
+async def get_issues(
+    ctx: Ctx, limit: int = 10, category: str | None = None, kind: str | None = None
+) -> Any:
     """Active issues for the store relevant to your role, most urgent first.
+
+    `category` is "operational" (the backend default when omitted), "integrity" (data-quality issues, with
+    `exposure_usd`) or "all"; `kind` optionally narrows to one issue kind.
 
     Each issue has: issue_id, kind, sku?, supplier_id?, store_display_name, as_of,
     severity_usd, `evidence` [{metric, value, unit, period, source}], `data_caveats` [str]
@@ -75,7 +85,14 @@ async def get_issues(ctx: Ctx, limit: int = 10) -> Any:
     backend has no value: a field may be absent; never estimate it yourself.
     An empty list means there are no issues.
     """
-    return await call(ctx, "GET", f"{_API}/issues", params={"limit": _bounded(limit)})
+    if category is not None and category not in _ISSUE_CATEGORIES:
+        return {"error": f"category must be one of {', '.join(_ISSUE_CATEGORIES)}"}
+    params: dict[str, Any] = {"limit": _bounded(limit)}
+    if category is not None:
+        params["category"] = category
+    if kind:
+        params["kind"] = kind
+    return await call(ctx, "GET", f"{_API}/issues", params=params)
 
 
 async def explain_metric(ctx: Ctx, metric: str) -> Any:

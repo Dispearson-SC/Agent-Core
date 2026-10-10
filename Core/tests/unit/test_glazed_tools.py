@@ -7,6 +7,7 @@ No network: `httpx.MockTransport` stands in for the backend.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -400,3 +401,36 @@ def test_second_ask_peer_of_a_step_is_a_deterministic_result_not_a_retry() -> No
     assert "not sent" in result.lower()
     with pytest.raises(CallDeferred):  # the first one still defers
         peers._guarded_ask_peer(_two_asks_ctx("c1"), "glazed_past", "a")
+
+
+def test_get_issues_defaults_to_operational_without_extra_params(backend: Backend) -> None:
+    _run(gt.get_issues(_ctx()))
+
+    params = dict(backend.requests[0].url.params)
+    assert "category" not in params and "kind" not in params
+
+
+@pytest.mark.parametrize("category", ["operational", "integrity", "all"])
+def test_get_issues_maps_category_and_kind_to_the_backend(
+    backend: Backend, category: str
+) -> None:
+    _run(gt.get_issues(_ctx(), 5, category, "sku_key_mismatch"))
+
+    params = dict(backend.requests[0].url.params)
+    assert params["category"] == category
+    assert params["kind"] == "sku_key_mismatch"
+    assert params["limit"] == "5"
+
+
+def test_get_issues_rejects_an_unknown_category_without_calling_the_backend(
+    backend: Backend,
+) -> None:
+    result = _run(gt.get_issues(_ctx(), 5, "everything"))
+
+    assert "error" in result and "category" in result["error"]
+    assert backend.requests == []
+
+
+def test_get_kpis_docstring_says_it_takes_a_date_window() -> None:
+    doc = inspect.getdoc(gt.get_kpis) or ""
+    assert "date_from" in doc and "date_to" in doc and "window" in doc
