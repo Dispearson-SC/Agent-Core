@@ -23,7 +23,15 @@ from agent_core.domain.turn import CallerIdentity, SessionRef, TenantId
 
 ROLES = {
     "orchestrator": {"propose_action", "classify_text", "get_briefing"},
-    "present": {"get_snapshot", "get_kpis", "get_day_summary", "get_issues", "explain_metric"},
+    "present": {
+        "get_snapshot",
+        "get_kpis",
+        "get_day_summary",
+        "get_issues",
+        "explain_metric",
+        "get_expiring",
+        "get_outlook",
+    },
     "past": {"get_snapshot", "get_history", "evaluate_promo", "recall_experiences"},
     "supply": {
         "get_snapshot",
@@ -32,6 +40,10 @@ ROLES = {
         "get_supplier_performance",
         "get_issues",
         "forecast_demand",
+        "get_inventory_status",
+        "get_expiring",
+        "get_deliveries",
+        "get_issue_analysis",
     },
     "strategist": {
         "get_snapshot",
@@ -40,6 +52,9 @@ ROLES = {
         "evaluate_promo",
         "audit_promo",
         "forecast_daily_flow",
+        "get_staffing",
+        "get_promos",
+        "get_outlook",
     },
     "sentinel": {"get_history", "record_event", "check_compliance", "classify_text"},
     "auditor": {"get_integrity_issues"},
@@ -618,3 +633,403 @@ def test_forecast_daily_flow_refuses_a_date_not_after_the_forecast_origin(
 ) -> None:
     backend.body = {**_FLOW_BODY, "forecast_origin": "2026-03-11"}
     assert "future" in _run(gt.forecast_daily_flow(_ctx(), _TARGET))["error"].lower()
+
+
+# ---- manager views: inventory, expiring, deliveries, staffing, promos, outlook, analysis ----
+
+_V = "/internal/v1"
+_ENVELOPE = {
+    "as_of": "2026-03-07",
+    "store_id": "S030",
+    "store_display_name": "Tienda Centro",
+    "source": "internal-debug",
+}
+
+
+def _items(n: int, **extra: Any) -> list[dict[str, Any]]:
+    return [{"sku": f"SKU-{i}", **extra} for i in range(n)]
+
+
+@pytest.mark.parametrize(
+    ("call", "path", "params"),
+    [
+        (lambda c: gt.get_inventory_status(c), f"{_V}/inventory", {"limit": "15"}),
+        (
+            lambda c: gt.get_inventory_status(c, "slow", 5),
+            f"{_V}/inventory",
+            {"sort": "slow", "limit": "5"},
+        ),
+        (lambda c: gt.get_expiring(c), f"{_V}/expiring", {"days": "7", "limit": "10"}),
+        (lambda c: gt.get_expiring(c, 3), f"{_V}/expiring", {"days": "3", "limit": "10"}),
+        (lambda c: gt.get_deliveries(c, 5), f"{_V}/deliveries", {"days": "5"}),
+        (lambda c: gt.get_staffing(c, 4), f"{_V}/staffing", {"days": "4"}),
+        (lambda c: gt.get_outlook(c, 2), f"{_V}/outlook", {"days": "2"}),
+        (
+            lambda c: gt.get_promos(c, "active", 30),
+            f"{_V}/promos",
+            {"status": "active", "days": "30", "limit": "10"},
+        ),
+        (lambda c: gt.get_promos(c), f"{_V}/promos", {"days": "14", "limit": "10"}),
+        (lambda c: gt.get_issue_analysis(c, "ISS-1"), f"{_V}/issues/ISS-1/analysis", {}),
+    ],
+)
+def test_manager_view_tools_hit_the_internal_twins_without_store_or_as_of(
+    backend: Backend, call: Any, path: str, params: dict[str, str]
+) -> None:
+    backend.body = {**_ENVELOPE}
+    _run(call(_ctx()))
+
+    (req,) = backend.requests
+    assert req.method == "GET"
+    assert req.url.path == path
+    assert dict(req.url.params) == params
+    assert req.headers["X-Glazed-Store"] == "S030"
+    assert req.headers["X-Glazed-Case"] == "case-77"
+    assert req.headers["X-Glazed-Agent"] == "glazed_supply"
+    assert "store_id" not in req.url.params and "as_of" not in req.url.params
+
+
+def test_issue_id_cannot_escape_its_path_segment(backend: Backend) -> None:
+    backend.body = {**_ENVELOPE}
+    _run(gt.get_issue_analysis(_ctx(), "../x"))
+
+    assert backend.requests[0].url.raw_path == b"/internal/v1/issues/..%2Fx/analysis"
+
+
+@pytest.mark.parametrize(
+    ("call", "params"),
+    [
+        (lambda c: gt.get_expiring(c, 999), {"days": "30", "limit": "10"}),
+        (lambda c: gt.get_expiring(c, "junk"), {"days": "7", "limit": "10"}),
+        (lambda c: gt.get_deliveries(c, 0), {"days": "1"}),
+        (lambda c: gt.get_deliveries(c, 99), {"days": "14"}),
+        (lambda c: gt.get_staffing(c, 99), {"days": "14"}),
+        (lambda c: gt.get_outlook(c, 99), {"days": "7"}),
+        (lambda c: gt.get_outlook(c, None), {"days": "2"}),
+        (lambda c: gt.get_inventory_status(c, None, 9999), {"limit": "50"}),
+        (lambda c: gt.get_inventory_status(c, None, "x"), {"limit": "15"}),
+        (lambda c: gt.get_promos(c, None, 9999), {"days": "365", "limit": "10"}),
+    ],
+)
+def test_junk_or_oversized_window_arguments_are_clamped_not_raised(
+    backend: Backend, call: Any, params: dict[str, str]
+) -> None:
+    backend.body = {**_ENVELOPE}
+    _run(call(_ctx()))
+
+    assert dict(backend.requests[0].url.params) == params
+
+
+def test_unknown_inventory_sort_and_promo_status_are_refused_without_a_request(
+    backend: Backend,
+) -> None:
+    assert "sort" in _run(gt.get_inventory_status(_ctx(), "random"))["error"]
+    assert "status" in _run(gt.get_promos(_ctx(), "someday"))["error"]
+    assert backend.requests == []
+
+
+def test_inventory_status_is_compact_and_keeps_cover_status_and_next_delivery(
+    backend: Backend,
+) -> None:
+    backend.body = {
+        **_ENVELOPE,
+        "coverage": {"skus_with_inventory": 40, "skus_selling": 38},
+        "status_rule": "long text",
+        "items": [
+            {
+                "sku": "SKU-1",
+                "product_name": "Dona",
+                "department": "Bakery",
+                "on_hand": 12,
+                "avg_daily_demand": 6.0,
+                "days_of_cover": 2.0,
+                "status": "critical",
+                "status_reason": "runs out before delivery",
+                "next_delivery_date": "2026-03-09",
+                "next_delivery_source": "po",
+                "scheduled_in_units": 24,
+                "forecast_outflow_units": 18,
+                "projected_stockout_date": "2026-03-09",
+                "turnover_28d": 4.1,
+                "weeks_of_supply": 0.3,
+                "inventory_value_usd": 10.0,
+                "last_sale_date": "2026-03-07",
+                "slow_mover": False,
+                "internal_debug": "leak",
+            }
+        ],
+    }
+    out = _run(gt.get_inventory_status(_ctx()))
+
+    assert out["available"] is True
+    assert out["store_display_name"] == "Tienda Centro"
+    assert out["as_of"] == "2026-03-07"
+    assert out["coverage"] == {"skus_with_inventory": 40, "skus_selling": 38}
+    assert "source" not in out and "store_id" not in out and "status_rule" not in out
+    (item,) = out["items"]
+    assert item["days_of_cover"] == 2.0
+    assert item["status"] == "critical"
+    assert item["next_delivery_date"] == "2026-03-09"
+    assert item["on_hand"] == 12
+    assert "internal_debug" not in item
+
+
+def test_expiring_keeps_waste_ranges_by_day_and_the_total(backend: Backend) -> None:
+    backend.body = {
+        **_ENVELOPE,
+        "days": 7,
+        "total_items": 12,
+        "total_waste_usd": {"low": 1.0, "mid": 5.0, "high": 9.0},
+        "by_day": [
+            {
+                "date": "2026-03-08",
+                "waste_usd": {"low": 1.0, "mid": 2.0, "high": 3.0},
+                "projected": True,
+            }
+        ],
+        "items": [
+            {
+                "sku": "SKU-1",
+                "product_name": "Dona",
+                "expiring_units": 4,
+                "expiry_date": "2026-03-08",
+                "waste_units": {"low": 0, "mid": 1, "high": 2},
+                "waste_usd": {"low": 0.0, "mid": 1.5, "high": 3.0},
+                "lot_age_inferred": True,
+                "projected": True,
+                "shelf_life_days": 3,
+            }
+        ],
+    }
+    out = _run(gt.get_expiring(_ctx()))
+
+    assert out["available"] is True
+    assert out["total_items"] == 12
+    assert out["total_waste_usd"] == {"low": 1.0, "mid": 5.0, "high": 9.0}
+    assert out["by_day"][0]["waste_usd"]["mid"] == 2.0
+    assert out["items"][0]["waste_usd"] == {"low": 0.0, "mid": 1.5, "high": 3.0}
+    assert out["items"][0]["expiry_date"] == "2026-03-08"
+    assert "store_id" not in out and "source" not in out
+
+
+def test_deliveries_keep_the_calendar_per_day(backend: Backend) -> None:
+    backend.body = {
+        **_ENVELOPE,
+        "window_days": 7,
+        "late_lookback_days": 3,
+        "days": [
+            {
+                "date": "2026-03-09",
+                "projected": True,
+                "deliveries": [
+                    {
+                        "supplier_id": "SUP-1",
+                        "supplier_name": "Panificadora",
+                        "po_id": "PO-1",
+                        "kind": "open_po",
+                        "status": "expected",
+                        "value_usd": 120.0,
+                        "expected_date": "2026-03-09",
+                        "lines": [{"sku": "SKU-1", "product_name": "Dona", "qty": 10}],
+                    }
+                ],
+            }
+        ],
+    }
+    out = _run(gt.get_deliveries(_ctx(), 7))
+
+    assert out["available"] is True
+    (day,) = out["days"]
+    assert day["date"] == "2026-03-09"
+    assert day["deliveries"][0]["supplier_name"] == "Panificadora"
+    assert day["deliveries"][0]["lines"][0]["qty"] == 10
+    assert "store_id" not in out
+
+
+def test_staffing_keeps_recommended_hours_by_day_and_says_daily_only(backend: Backend) -> None:
+    backend.body = {
+        **_ENVELOPE,
+        "benchmark": {"format": "mall", "tx_per_staff_hour_p50": 11.2, "n_store_days": 40},
+        "note": "sin datos por hora",
+        "planned_hours_note": "no roster",
+        "days": [
+            {
+                "date": "2026-03-08",
+                "forecast_transactions": {"low": 90, "mid": 120, "high": 150},
+                "recommended_staff_hours": {"low": 70.0, "mid": 90.0, "high": 110.0},
+                "planned_staff_hours": None,
+                "gap_hours": None,
+                "basis": "daily",
+                "projected": True,
+            }
+        ],
+    }
+    out = _run(gt.get_staffing(_ctx(agent="glazed_strategist"), 7))
+
+    assert out["available"] is True
+    assert out["days"][0]["recommended_staff_hours"]["mid"] == 90.0
+    assert out["days"][0]["basis"] == "daily"
+    assert out["benchmark"]["tx_per_staff_hour_p50"] == 11.2
+    assert out["note"] == "sin datos por hora"
+
+
+def test_promos_keep_the_audit_verdict_and_evaluation(backend: Backend) -> None:
+    backend.body = {
+        **_ENVELOPE,
+        "window_days": 14,
+        "items": [
+            {
+                "promo_id": "PR1",
+                "name": "2x1 donas",
+                "department": "Bakery",
+                "category": "bundle",
+                "discount_pct": 20,
+                "start_date": "2026-02-20",
+                "end_date": "2026-03-01",
+                "status": "past",
+                "audit_verdict": "block",
+                "evaluation": {"uplift_pct": 2.0, "expected_uplift_pct": 8.0, "confidence": 0.4},
+                "projected": False,
+            }
+        ],
+    }
+    out = _run(gt.get_promos(_ctx(agent="glazed_strategist"), "past"))
+
+    assert out["available"] is True
+    (promo,) = out["items"]
+    assert promo["audit_verdict"] == "block"
+    assert promo["evaluation"]["uplift_pct"] == 2.0
+    assert promo["status"] == "past"
+
+
+def test_outlook_keeps_sales_waste_lost_sales_and_the_weather_note(backend: Backend) -> None:
+    backend.body = {
+        **_ENVELOPE,
+        "days": [
+            {
+                "date": "2026-03-08",
+                "projected": True,
+                "net_sales": {"low": 800.0, "mid": 1000.0, "high": 1200.0},
+                "transactions": {"low": 90, "mid": 120, "high": 150},
+                "avg_ticket": {"low": 8.0, "mid": 9.5, "high": 11.0},
+                "expected_waste_usd": {"low": 0.0, "mid": 3.0, "high": 6.0},
+                "expected_lost_sales_usd": {"low": 0.0, "mid": 10.0, "high": 30.0},
+                "weather": None,
+                "weather_note": "Sin pronóstico",
+            }
+        ],
+    }
+    out = _run(gt.get_outlook(_ctx(agent="glazed_present")))
+
+    assert out["available"] is True
+    day = out["days"][0]
+    assert day["net_sales"]["mid"] == 1000.0
+    assert day["expected_lost_sales_usd"]["high"] == 30.0
+    assert day["expected_waste_usd"]["mid"] == 3.0
+    assert day["weather_note"] == "Sin pronóstico"
+    assert day["avg_ticket"]["mid"] == 9.5
+
+
+def test_issue_analysis_keeps_recommendation_pros_cons_do_nothing_and_confidence(
+    backend: Backend,
+) -> None:
+    backend.body = {
+        **_ENVELOPE,
+        "issue_id": "ISS-1",
+        "title": "Reorder donas",
+        "tier": "N1",
+        "deadline": "2026-03-08",
+        "impact_usd": {"low": 10, "mid": 20, "high": 30},
+        "confidence": {"score": 0.8, "calibrated": True},
+        "problem": "stockout risk",
+        "recommendation": {"option_id": "O1", "label": "Order 24", "action_type": "order"},
+        "pros": ["avoids stockout"],
+        "cons": ["min order of 20"],
+        "requires_approval": False,
+        "dialog": {
+            "why": "best net",
+            "if_accept": "order",
+            "if_not_act": "lose sales",
+            "alternatives": [{"option_id": "do_nothing", "label": "Do nothing", "net_usd_mid": 0}],
+        },
+    }
+    out = _run(gt.get_issue_analysis(_ctx(), "ISS-1"))
+
+    assert out["available"] is True
+    assert out["recommendation"]["option_id"] == "O1"
+    assert out["confidence"]["score"] == 0.8
+    assert out["pros"] == ["avoids stockout"] and out["cons"] == ["min order of 20"]
+    assert out["dialog"]["alternatives"][0]["option_id"] == "do_nothing"
+    assert out["dialog"]["if_not_act"] == "lose sales"
+    assert out["store_display_name"] == "Tienda Centro"
+    assert "store_id" not in out and "source" not in out
+
+
+_VIEWS = [
+    lambda c: gt.get_inventory_status(c),
+    lambda c: gt.get_expiring(c),
+    lambda c: gt.get_deliveries(c),
+    lambda c: gt.get_staffing(c),
+    lambda c: gt.get_promos(c),
+    lambda c: gt.get_outlook(c),
+    lambda c: gt.get_issue_analysis(c, "ISS-1"),
+]
+
+
+@pytest.mark.parametrize("view", _VIEWS)
+@pytest.mark.parametrize("status", [404, 503])
+def test_views_degrade_to_unavailable_on_404_and_503(
+    backend: Backend, view: Any, status: int
+) -> None:
+    backend.status, backend.body = status, {"detail": "nope"}
+    out = _run(view(_ctx()))
+
+    assert out["available"] is False
+    assert "reason" in out and "never estimate" in out["reason"].lower()
+    assert "error" not in out
+
+
+@pytest.mark.parametrize("view", _VIEWS)
+def test_views_degrade_to_unavailable_when_the_backend_is_unreachable(
+    backend: Backend, view: Any
+) -> None:
+    backend.error = httpx.ConnectError("down")
+    out = _run(view(_ctx()))
+
+    assert out["available"] is False
+    assert "reason" in out
+
+
+@pytest.mark.parametrize("view", _VIEWS)
+def test_views_keep_other_backend_errors_as_errors(backend: Backend, view: Any) -> None:
+    backend.status, backend.body = 400, {"detail": "days must be between 1 and 7"}
+    out = _run(view(_ctx()))
+
+    assert out["status"] == 400
+    assert "error" in out
+
+
+@pytest.mark.parametrize("view", _VIEWS)
+def test_views_with_an_unexpected_body_are_unavailable(backend: Backend, view: Any) -> None:
+    backend.body = ["not", "an", "object"]
+    assert _run(view(_ctx()))["available"] is False
+
+
+def test_view_docstrings_tell_the_model_what_comes_back() -> None:
+    for tool, terms in {
+        "get_inventory_status": ["days_of_cover", "status", "next_delivery_date"],
+        "get_expiring": ["waste_usd", "by_day", "low", "high"],
+        "get_deliveries": ["supplier", "calendar"],
+        "get_staffing": ["recommended_staff_hours", "daily"],
+        "get_promos": ["audit_verdict", "evaluation"],
+        "get_outlook": [
+            "net_sales",
+            "expected_waste_usd",
+            "expected_lost_sales_usd",
+            "weather_note",
+        ],
+        "get_issue_analysis": ["recommendation", "pros", "cons", "do_nothing", "confidence"],
+    }.items():
+        doc = inspect.getdoc(getattr(gt, tool)) or ""
+        for term in terms:
+            assert term in doc, f"{tool} docstring lacks {term}"

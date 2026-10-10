@@ -173,6 +173,15 @@ ARGUMENT_ALLOWLIST: Mapping[str, frozenset[str]] = {
     "project_inventory": frozenset({"sku", "horizon"}),
     "forecast_demand": frozenset({"sku", "target_date"}),
     "forecast_daily_flow": frozenset({"target_date"}),
+    # Manager views: windows and sort orders are the question asked (no free text); the
+    # issue id names the issue the analysis was about.
+    "get_inventory_status": frozenset({"sort", "limit"}),
+    "get_expiring": frozenset({"days"}),
+    "get_deliveries": frozenset({"days"}),
+    "get_staffing": frozenset({"days"}),
+    "get_promos": frozenset({"status", "days"}),
+    "get_outlook": frozenset({"days"}),
+    "get_issue_analysis": frozenset({"issue_id"}),
     "get_supplier_performance": frozenset(),
     "get_history": frozenset(),
     "evaluate_promo": frozenset({"promo_id"}),

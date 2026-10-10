@@ -416,6 +416,299 @@ async def request_stock(ctx: Ctx, sku: str) -> Any:
     return dict(_NOT_AVAILABLE)
 
 
+# ---- manager views (inventory, expiring, deliveries, staffing, promos, outlook, analysis) ----
+#
+# Each tool calls the backend's internal twin of a public manager screen, so the chat and the
+# web quote the same numbers. The model never supplies the store or the date: the case in the
+# headers fixes both. Replies are compacted with a whitelist of keys (no store codes, no
+# internal sources) and every failure the backend can have becomes a structured
+# `{"available": false, "reason": ...}` the persona can say out loud.
+
+_INVENTORY_SORTS = ("days_of_cover", "turnover", "slow")
+_PROMO_STATUSES = ("active", "upcoming", "past")
+_ENVELOPE_KEYS = ("store_display_name", "as_of")
+_INVENTORY_ITEM_KEYS = (
+    "sku",
+    "product_name",
+    "department",
+    "on_hand",
+    "avg_daily_demand",
+    "days_of_cover",
+    "status",
+    "status_reason",
+    "next_delivery_date",
+    "next_delivery_source",
+    "scheduled_in_units",
+    "forecast_outflow_units",
+    "projected_stockout_date",
+    "turnover_28d",
+    "inventory_value_usd",
+    "slow_mover",
+)
+_EXPIRING_ITEM_KEYS = (
+    "sku",
+    "product_name",
+    "expiring_units",
+    "expiry_date",
+    "waste_units",
+    "waste_usd",
+    "shelf_life_days",
+    "lot_age_inferred",
+)
+_DELIVERY_KEYS = (
+    "supplier_id",
+    "supplier_name",
+    "po_id",
+    "kind",
+    "status",
+    "value_usd",
+    "expected_date",
+    "received_date",
+    "lines",
+)
+_STAFFING_DAY_KEYS = (
+    "date",
+    "forecast_transactions",
+    "recommended_staff_hours",
+    "planned_staff_hours",
+    "gap_hours",
+    "basis",
+)
+_PROMO_KEYS = (
+    "promo_id",
+    "name",
+    "department",
+    "category",
+    "discount_pct",
+    "start_date",
+    "end_date",
+    "status",
+    "audit_verdict",
+    "evaluation",
+)
+_OUTLOOK_DAY_KEYS = (
+    "date",
+    "net_sales",
+    "transactions",
+    "avg_ticket",
+    "expected_waste_usd",
+    "expected_lost_sales_usd",
+    "weather",
+    "weather_note",
+)
+_ANALYSIS_KEYS = (
+    "issue_id",
+    "title",
+    "tier",
+    "deadline",
+    "impact_usd",
+    "confidence",
+    "problem",
+    "recommendation",
+    "pros",
+    "cons",
+    "requires_approval",
+    "dialog",
+)
+_VIEW_LIST_LIMIT = 10
+
+
+def _pick(row: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+    return {k: row[k] for k in keys if k in row} if isinstance(row, dict) else {}
+
+
+def _pick_all(rows: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    return [_pick(r, keys) for r in rows] if isinstance(rows, list) else []
+
+
+def _view_unavailable(reason: str) -> dict[str, Any]:
+    return {
+        "available": False,
+        "reason": f"{reason} Say the data is unavailable; never estimate it yourself.",
+    }
+
+
+async def _view(
+    ctx: Ctx,
+    path: str,
+    params: dict[str, Any],
+    shape: Callable[[dict[str, Any]], dict[str, Any]],
+    what: str,
+) -> Any:
+    """One manager-view call: compacted data, or `available: false` when it cannot be had."""
+    data = await call(ctx, "GET", f"{_API}/{path}", params=params)
+    if isinstance(data, dict) and "error" in data:
+        status = data.get("status")
+        if status is None or status in (404, 503):
+            return _view_unavailable(f"The {what} is not available right now.")
+        return data
+    if not isinstance(data, dict):
+        return _view_unavailable(f"The backend returned an unexpected {what}.")
+    return {"available": True, **_pick(data, _ENVELOPE_KEYS), **shape(data)}
+
+
+async def get_inventory_status(ctx: Ctx, sort: str | None = None, limit: int = 15) -> Any:
+    """Stock status per SKU: on hand, days_of_cover, status and the next delivery.
+
+    `sort` is "days_of_cover" (emptiest shelf first, the default), "turnover" (fastest
+    first) or "slow" (slow movers with the most money tied up first); `limit` is 1-50.
+    Each item has `days_of_cover`, `status` (critical when the cover ends before the next
+    delivery, watch or ok) with `status_reason`, `next_delivery_date`,
+    `projected_stockout_date` and `forecast_outflow_units`. A field may be absent; never
+    estimate it yourself. Use it for any question about what is running out or what is
+    covered until the next delivery.
+    """
+    if sort is not None and sort not in _INVENTORY_SORTS:
+        return {"error": f"sort must be one of {', '.join(_INVENTORY_SORTS)}."}
+    params: dict[str, Any] = {"limit": _clamped(limit, 1, 50, 15)}
+    if sort is not None:
+        params["sort"] = sort
+    return await _view(
+        ctx,
+        "inventory",
+        params,
+        lambda d: {
+            "coverage": d.get("coverage"),
+            "sort": d.get("sort"),
+            "items": _pick_all(d.get("items"), _INVENTORY_ITEM_KEYS),
+        },
+        "inventory status",
+    )
+
+
+async def get_expiring(ctx: Ctx, days: int = 7) -> Any:
+    """Items about to expire in the next `days` (1-30, default 7) and the waste they imply.
+
+    Returns `items` (the largest lots first: sku, product_name, expiring_units,
+    expiry_date, `waste_usd` as {low, mid, high} - a range, quote all three), `by_day`
+    (the waste_usd range per expiry date), `total_items` and `total_waste_usd`. Lot ages
+    are inferred, not measured. Use it for any question about expiry or waste to come.
+    """
+    return await _view(
+        ctx,
+        "expiring",
+        {"days": _clamped(days, 1, 30, 7), "limit": _VIEW_LIST_LIMIT},
+        lambda d: {
+            "days": d.get("days"),
+            "total_items": d.get("total_items"),
+            "total_waste_usd": d.get("total_waste_usd"),
+            "by_day": _pick_all(d.get("by_day"), ("date", "waste_usd")),
+            "items": _pick_all(d.get("items"), _EXPIRING_ITEM_KEYS),
+        },
+        "expiring list",
+    )
+
+
+async def get_deliveries(ctx: Ctx, days: int = 7) -> Any:
+    """The delivery calendar of the next `days` (1-14, default 7): which supplier comes when.
+
+    Returns `days`, one entry per date with its `deliveries`: open purchase orders (kind
+    open_po, with po_id, expected_date, lines and value_usd) and scheduled supplier slots
+    (kind scheduled, no lines). Use it to answer when a supplier arrives; never guess a
+    delivery date.
+    """
+    return await _view(
+        ctx,
+        "deliveries",
+        {"days": _clamped(days, 1, 14, 7)},
+        lambda d: {
+            "window_days": d.get("window_days"),
+            "days": [
+                {
+                    "date": day.get("date"),
+                    "deliveries": _pick_all(day.get("deliveries"), _DELIVERY_KEYS),
+                }
+                for day in (d.get("days") or [])
+                if isinstance(day, dict)
+            ],
+        },
+        "delivery calendar",
+    )
+
+
+async def get_staffing(ctx: Ctx, days: int = 7) -> Any:
+    """Recommended staff hours per future day (daily only; there is no hourly staffing).
+
+    `days` is 1-14, default 7. Each day has `forecast_transactions` and
+    `recommended_staff_hours` as {low, mid, high}; `planned_staff_hours` and `gap_hours`
+    are null because there is no roster in the data. `benchmark` gives the format's
+    transactions per staff hour. Say plainly that the data is daily when asked about hours.
+    """
+    return await _view(
+        ctx,
+        "staffing",
+        {"days": _clamped(days, 1, 14, 7)},
+        lambda d: {
+            "benchmark": d.get("benchmark"),
+            "note": d.get("note"),
+            "planned_hours_note": d.get("planned_hours_note"),
+            "days": _pick_all(d.get("days"), _STAFFING_DAY_KEYS),
+        },
+        "staffing recommendation",
+    )
+
+
+async def get_promos(ctx: Ctx, status: str | None = None, days: int = 14) -> Any:
+    """Promotions with their audit verdict and evaluation.
+
+    `status` is "active", "upcoming" or "past" (all when omitted); `days` (1-365, default
+    14) is the window around the case date. Each item has `audit_verdict` (block, allow or
+    insufficient_evidence) and, only for promos that already ended, an `evaluation`
+    (uplift_pct, expected_uplift_pct, confidence). A promo without evaluation has no result
+    yet: never claim an uplift.
+    """
+    if status is not None and status not in _PROMO_STATUSES:
+        return {"error": f"status must be one of {', '.join(_PROMO_STATUSES)}."}
+    params: dict[str, Any] = {"days": _clamped(days, 1, 365, 14), "limit": _VIEW_LIST_LIMIT}
+    if status is not None:
+        params["status"] = status
+    return await _view(
+        ctx,
+        "promos",
+        params,
+        lambda d: {
+            "window_days": d.get("window_days"),
+            "items": _pick_all(d.get("items"), _PROMO_KEYS),
+        },
+        "promotions list",
+    )
+
+
+async def get_outlook(ctx: Ctx, days: int = 2) -> Any:
+    """Outlook for the next `days` (1-7, default 2: tomorrow and the day after).
+
+    Each day has `net_sales`, `transactions` and `avg_ticket` as {low, mid, high},
+    `expected_waste_usd` and `expected_lost_sales_usd` as {low, mid, high} ranges (quote
+    all three), `weather` (null without a feed) and `weather_note`. Every day is a
+    projection. Use it for any question about today, tomorrow or the next days.
+    """
+    return await _view(
+        ctx,
+        "outlook",
+        {"days": _clamped(days, 1, 7, 2)},
+        lambda d: {"days": _pick_all(d.get("days"), _OUTLOOK_DAY_KEYS)},
+        "outlook",
+    )
+
+
+async def get_issue_analysis(ctx: Ctx, issue_id: str) -> Any:
+    """The deterministic analysis of one issue (use an issue_id from get_issues).
+
+    Returns the `recommendation` (option_id, label), its `pros` and `cons`, `confidence`
+    {score, calibrated}, `tier`, `deadline`, `impact_usd` {low, mid, high}, `problem` and
+    `dialog`: `why`, `if_accept`, `if_not_act` (the do_nothing case) and `alternatives`
+    with their net_usd_mid. Always give the confidence and the do_nothing comparison with
+    a recommendation.
+    """
+    return await _view(
+        ctx,
+        f"issues/{quote(str(issue_id), safe='')}/analysis",
+        {},
+        lambda d: _pick(d, _ANALYSIS_KEYS),
+        "issue analysis",
+    )
+
+
 def _toolset(*functions: Callable[..., Any]) -> FunctionToolset[Any]:
     return FunctionToolset(list(functions))
 
@@ -424,7 +717,13 @@ def _toolset(*functions: Callable[..., Any]) -> FunctionToolset[Any]:
 TOOLSETS: dict[str, Callable[[], FunctionToolset[Any]]] = {
     "orchestrator": lambda: _toolset(propose_action, classify_text, get_briefing),
     "present": lambda: _toolset(
-        get_snapshot, get_kpis, get_day_summary, get_issues, explain_metric
+        get_snapshot,
+        get_kpis,
+        get_day_summary,
+        get_issues,
+        explain_metric,
+        get_expiring,
+        get_outlook,
     ),
     "past": lambda: _toolset(get_snapshot, get_history, evaluate_promo, recall_experiences),
     "supply": lambda: _toolset(
@@ -434,6 +733,10 @@ TOOLSETS: dict[str, Callable[[], FunctionToolset[Any]]] = {
         get_supplier_performance,
         get_issues,
         forecast_demand,
+        get_inventory_status,
+        get_expiring,
+        get_deliveries,
+        get_issue_analysis,
     ),
     "strategist": lambda: _toolset(
         get_snapshot,
@@ -442,6 +745,9 @@ TOOLSETS: dict[str, Callable[[], FunctionToolset[Any]]] = {
         evaluate_promo,
         audit_promo,
         forecast_daily_flow,
+        get_staffing,
+        get_promos,
+        get_outlook,
     ),
     "sentinel": lambda: _toolset(get_history, record_event, check_compliance, classify_text),
     "auditor": lambda: _toolset(get_integrity_issues),

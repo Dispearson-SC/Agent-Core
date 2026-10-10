@@ -325,6 +325,97 @@ rules:
       Reading forecast daily flow changes nothing; the backend fixes the store, the case and the
       date, forecasts only future dates, and returns only what this agent's role may see.
 
+  - rule_id: glazed-read-get-inventory-status
+    tool_pattern: get_inventory_status
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get inventory status changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-get-expiring
+    tool_pattern: get_expiring
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get expiring changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-get-deliveries
+    tool_pattern: get_deliveries
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get deliveries changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-get-issue-analysis
+    tool_pattern: get_issue_analysis
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get issue analysis changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-get-staffing
+    tool_pattern: get_staffing
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get staffing changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-get-promos
+    tool_pattern: get_promos
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get promos changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
+  - rule_id: glazed-read-get-outlook
+    tool_pattern: get_outlook
+    effect: allow
+    subject_roles:
+      - peer
+      - glazed-service
+    channels:
+      - peer
+      - glazed
+    reason: >-
+      Reading get outlook changes nothing; the backend fixes the store, the case and the
+      date, and returns only what this agent's role may see.
+
   - rule_id: glazed-read-get-history
     tool_pattern: get_history
     effect: allow
