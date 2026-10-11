@@ -27,8 +27,11 @@ What it gives you
       (e.g. nothing resumes before both peers answered) without sleeping.
     * `wait_for_calls(n)`: await until the model has been entered n times.
 
-A tool_call without `id=` gets a deterministic `scripted-call-N` id so assertions on
-`tool_call_id` order are stable. The helper itself is tested in
+A tool_call without `id=` gets a deterministic `scripted-call-N` id, numbered by the MODEL
+INSTANCE that emits it (1, 2, ... per model, in emission order), so assertions on `tool_call_id`
+order are stable and never depend on which test ran first. The id is assigned when the model
+answers, not when `tool_call(...)` is built: until then the part carries an empty id.
+The helper itself is tested in
 `tests/unit/test_scripted_model.py`.
 """
 
@@ -36,15 +39,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from itertools import count
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
-
-_ids = count(1)
 
 
 @dataclass(frozen=True)
@@ -73,8 +73,7 @@ def text(content: str) -> Reply:
 
 
 def tool_call(name: str, args: dict[str, Any] | None = None, *, id: str | None = None) -> Reply:
-    call_id = id if id is not None else f"scripted-call-{next(_ids)}"
-    return Reply((ToolCallPart(name, args or {}, tool_call_id=call_id),))
+    return Reply((ToolCallPart(name, args or {}, tool_call_id=id if id is not None else ""),))
 
 
 def reply(*items: Reply) -> Reply:
@@ -118,6 +117,7 @@ class ScriptedModel:
         self._entered = asyncio.Condition()
         self.requests: list[list[ModelMessage]] = []
         self.call_count = 0
+        self._generated_ids = 0
         self.model = FunctionModel(self._call, model_name=model_name)
 
     def push(self, *responses: Scripted) -> ScriptedModel:
@@ -168,5 +168,13 @@ class ScriptedModel:
         if isinstance(scripted, ModelResponse):
             return scripted
         return ModelResponse(
-            parts=list(scripted.parts), usage=RequestUsage(input_tokens=1, output_tokens=1)
+            parts=[self._with_id(part) for part in scripted.parts],
+            usage=RequestUsage(input_tokens=1, output_tokens=1),
         )
+
+    def _with_id(self, part: TextPart | ToolCallPart) -> TextPart | ToolCallPart:
+        """Give an unnamed tool call the next id of THIS model; leave everything else alone."""
+        if isinstance(part, ToolCallPart) and not part.tool_call_id:
+            self._generated_ids += 1
+            return replace(part, tool_call_id=f"scripted-call-{self._generated_ids}")
+        return part

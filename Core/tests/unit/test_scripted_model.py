@@ -57,12 +57,31 @@ def test_several_tool_calls_in_one_response_come_back_together() -> None:
     assert [p.tool_call_id for p in last.parts if isinstance(p, ToolReturnPart)] == ["c1", "c2"]
 
 
-def test_reply_mixes_parts_and_missing_ids_are_generated() -> None:
+def test_reply_mixes_parts_and_unnamed_calls_stay_unnamed_until_the_model_answers() -> None:
     combined = reply(text("thinking"), tool_call("echo", {"value": "v"}))
 
     assert isinstance(combined.parts[0], TextPart)
     call = combined.parts[1]
-    assert isinstance(call, ToolCallPart) and call.tool_call_id.startswith("scripted-call-")
+    assert isinstance(call, ToolCallPart) and call.tool_call_id == ""
+
+
+def _issued_ids(model: ScriptedModel) -> list[str]:
+    asyncio.run(_agent(model).run("go"))
+    last = model.requests[1][-1]
+    return [p.tool_call_id for p in last.parts if isinstance(p, ToolReturnPart)]
+
+
+def _two_unnamed_calls() -> ScriptedModel:
+    return ScriptedModel().push(
+        tool_calls(tool_call("echo", {"value": "a"}), tool_call("echo", {"value": "b"})),
+        text("ok"),
+    )
+
+
+def test_generated_ids_are_per_instance_and_deterministic() -> None:
+    """The counter belongs to the model, so a test never depends on which ran before it."""
+    assert _issued_ids(_two_unnamed_calls()) == ["scripted-call-1", "scripted-call-2"]
+    assert _issued_ids(_two_unnamed_calls()) == ["scripted-call-1", "scripted-call-2"]
 
 
 def test_serve_is_the_fallback_after_the_queue_and_sees_the_messages() -> None:

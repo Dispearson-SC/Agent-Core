@@ -209,6 +209,8 @@ __all__ = [
     "window_queue",
 ]
 
+_LOG = logging.getLogger(__name__)
+
 # Three days. Long enough for a weekend plus a public holiday, short enough that an
 # abandoned turn does not sit in the database forever.
 #
@@ -216,8 +218,6 @@ __all__ = [
 # dbos 2.31.1, docs/FIELD-NOTES.md). Taking the default would turn the durable wait for a
 # human into a one-minute wait, and the test that proves the wait works would still pass
 # on a fast machine.
-_LOG = logging.getLogger(__name__)
-
 THREE_DAYS: Final[int] = 3 * 24 * 60 * 60
 
 # A resumed turn may suspend AGAIN - an approval unlocks a tool whose result triggers an

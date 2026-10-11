@@ -7,7 +7,7 @@ wrapped as untrusted content.
 
 Unlike `test_peer_fanout.py` (which stubs the runner), start and resume here go through the
 production runner and Pydantic AI; only the ports around it are fakes. The DBOS workflow body
-is driven the way `test_peer_fanout.py` does (steps that touch the world are swapped).
+is driven the way `tests/fakes/fanout.py` does (steps that touch the world are swapped).
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ from agent_core.adapters.driven.tools.peers import build_toolset
 from agent_core.domain.policy import Effect, RuleSet
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import TurnId, TurnOutcome, TurnRequest
+from tests.fakes import fanout
 from tests.fakes import ports as fakes
 from tests.fakes.scripted_model import ScriptedModel, text, tool_call, tool_calls
-from tests.unit import test_peer_fanout as fanout
 
 
 def test_two_ask_peer_calls_from_a_scripted_model_resume_once_in_id_order(
@@ -39,7 +39,7 @@ def test_two_ask_peer_calls_from_a_scripted_model_resume_once_in_id_order(
         ),
         text("both answered"),
     )
-    request = fanout._request()
+    request = fanout.request()
     runner = runner_module.PydanticAgentRunner(
         model=fakes.FakeModelGateway(model_map={"minimax/MiniMax-M3": "minimax/MiniMax-M3"}),
         policy=fakes.FakeToolPolicy(
@@ -76,15 +76,15 @@ def test_two_ask_peer_calls_from_a_scripted_model_resume_once_in_id_order(
             )
 
     # the peer asks go out in tool_call_id order: "first?" -> corr-1 (c1), "second?" -> corr-2
-    world = fanout._install(
+    world = fanout.install(
         monkeypatch,
         (),  # unused: start_step supplies the real outcome
-        [fanout._answer("corr-2", "slow one"), fanout._answer("corr-1", "fast one")],
+        [fanout.answer("corr-2", "slow one"), fanout.answer("corr-1", "fast one")],
         start_step=start,
         resume_seat=_Seat(),
     )
 
-    outcome = asyncio.run(fanout._body()(request))
+    outcome = asyncio.run(fanout.body()(request))
 
     assert outcome.result is not None and outcome.result.text == "both answered"
     assert model.call_count == 2, "one run, ONE resume"
