@@ -457,9 +457,10 @@ def test_the_normal_and_the_peek_path_read_through_one_shared_reader(
 
 
 def test_a_stale_duplicate_human_answer_in_a_later_round_is_ignored(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A double click lands after round 1 resumed, while round 2 is collecting: skip it."""
+    caplog.set_level("WARNING", logger=turn_workflow._LOG.name)
     world = fanout.install(
         monkeypatch,
         (_approval("tc-h"), fanout.ask("tc-p")),
@@ -475,6 +476,39 @@ def test_a_stale_duplicate_human_answer_in_a_later_round_is_ignored(
 
     assert outcome.result is not None and outcome.result.text == "done"
     assert [[t for t, _ in call] for call in world.resume.calls] == [["tc-h", "tc-p"], ["tc-q"]]
+    assert "stale or duplicate answer" in caplog.text
+
+
+def test_a_human_answer_for_a_call_never_issued_in_this_turn_is_rejected_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An id no round of this turn ever issued is not a double click: it names a tool call the
+    model never made. Skipping it would leave the turn waiting on nothing (the person who
+    sent it believes they decided something); the turn fails with the reason instead."""
+    world = fanout.install(
+        monkeypatch,
+        (_approval("tc-h"), fanout.ask("tc-p")),
+        [_human("tc-never-issued")],
+    )
+
+    with pytest.raises(turn_workflow.UnusableResumeAnswerError, match="tc-never-issued"):
+        _run(world)
+
+    assert world.resume.calls == [], "nothing was resumed on the bogus decision"
+
+
+def test_a_human_answer_naming_a_peer_ask_of_this_round_is_rejected_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The id was issued, but as a delegation: a person cannot decide an ask to an agent."""
+    world = fanout.install(
+        monkeypatch,
+        (_approval("tc-h"), fanout.ask("tc-p")),
+        [_human("tc-p")],
+    )
+
+    with pytest.raises(turn_workflow.UnusableResumeAnswerError, match="tc-p"):
+        _run(world)
 
 
 def test_the_replay_shape_change_moved_the_pinned_application_version() -> None:

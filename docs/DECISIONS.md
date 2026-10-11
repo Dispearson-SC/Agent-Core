@@ -895,4 +895,20 @@ abandoned. A unit test pins that the version is no longer `.1`.
 
 **Ignored on purpose.** A `HumanAnswer` for a call the current round is not waiting on (a
 double click or retried POST arriving after its round resumed) is logged and skipped, like a
-duplicate peer wake-up; it never fails the turn.
+duplicate peer wake-up; it never fails the turn. D30 narrows this: only a duplicate of a call an
+EARLIER round issued is ignored; an id no round issued fails the turn.
+
+## D30 · Follow-ups of the D28 review: stale answers, stranded versions
+
+**Stale or unknown human answers (`_collect_round`).** D28 logged and skipped any `HumanAnswer`
+whose call the round was not waiting on. That conflated two cases. The body now hands the round
+`earlier_calls`, every tool call id issued by previous rounds of the turn:
+
+- an id in `earlier_calls` is a double click or retried POST whose first copy resumed that round:
+  logged and ignored, as before;
+- an id NO earlier round issued (or one issued to a peer, which no person can decide) is not a
+  duplicate of anything. Skipping it left the sender believing a decision was taken while the turn
+  waited on nothing until `THREE_DAYS`. It now raises `UnusableResumeAnswerError`, the same
+  treatment a peer wake-up for a handle the turn never asked under already gets.
+
+`earlier_calls` is derived in the workflow body from step results, so replay recomputes it.

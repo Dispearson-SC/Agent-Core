@@ -1164,6 +1164,7 @@ async def _collect_round(
     dispatch: PeerDispatch,
     peer_calls: dict[str, ToolCallId],
     timed_out: set[str],
+    earlier_calls: frozenset[str] = frozenset(),
 ) -> TurnOutcome:
     """Wait for EVERY result of one model step, then resume the turn once.
 
@@ -1188,6 +1189,14 @@ async def _collect_round(
     A late reply from a timed-out ask is remembered in `timed_out` so a later wait skips
     it instead of resuming on it, UNLESS the same question is asked again: see the re-ask
     block below.
+
+    A HUMAN ANSWER THAT THIS ROUND IS NOT WAITING ON IS ONE OF TWO THINGS. `earlier_calls`
+    holds every tool call id issued by the rounds BEFORE this one. A decision naming one of
+    them is a double click or a retried POST whose first copy already resumed that round:
+    logged and ignored. A decision naming an id NO round issued (or one issued to a peer, which
+    no person can decide) is not a duplicate of anything; skipping it would leave the person
+    believing they decided something while the turn waits on nothing, so it fails the turn
+    with `UnusableResumeAnswerError`, like a peer wake-up for a handle never asked under.
 
     Results are returned in `tool_call_id` order (`asks` arrives sorted), never in arrival
     order (CLAUDE.md non-negotiable #7).
@@ -1251,17 +1260,23 @@ async def _collect_round(
             if answer.tool_call_id in decisions:
                 continue  # a double-click or a retried POST: the first decision stands
             if answer.tool_call_id not in human_missing:
-                # A decision for a call this round is not waiting on: in practice a
-                # double click or retried POST whose first copy already resumed an earlier
-                # round. Ignored like a duplicate peer wake-up; failing the turn on it
-                # would punish a person for clicking twice. It resolves nothing.
-                _LOG.warning(
-                    "ignored a decision for tool call %r on turn %r: this round is not "
-                    "waiting on a person for it (stale or duplicate answer)",
-                    answer.tool_call_id,
-                    turn_id,
+                if answer.tool_call_id in earlier_calls:
+                    # A double click or retried POST whose first copy already resumed an
+                    # earlier round. Ignored like a duplicate peer wake-up; failing the turn
+                    # on it would punish a person for clicking twice. It resolves nothing.
+                    _LOG.warning(
+                        "ignored a decision for tool call %r on turn %r: this round is not "
+                        "waiting on a person for it (stale or duplicate answer)",
+                        answer.tool_call_id,
+                        turn_id,
+                    )
+                    continue
+                raise UnusableResumeAnswerError(
+                    f"a decision named tool call {answer.tool_call_id!r} on turn {turn_id!r}, "
+                    "but no round of this turn asked a person to decide that call (it was "
+                    "never issued, or it was issued to a peer agent). Applying or skipping it "
+                    "would leave the sender believing something was decided."
                 )
-                continue
             human_missing.discard(answer.tool_call_id)
             decisions[answer.tool_call_id] = answer
             continue
@@ -1590,6 +1605,7 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
     # Handles whose ask was given up on (reply timeout). A reply that still arrives later is
     # skipped, not resumed on: its tool call was already answered with an error.
     timed_out_peers: set[str] = set()
+    issued_calls: set[str] = set()
     while outcome.is_suspended:
         rounds += 1
         if rounds > MAX_HUMAN_ROUNDS:
@@ -1611,6 +1627,8 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
         # takes one path whatever the outcome carries. `_step_publish` returns on an empty
         # tuple; a branch here would be a second decision to keep deterministic for no gain.
         ordered = _in_deterministic_order(outcome.pending)
+        earlier_calls = frozenset(issued_calls)
+        issued_calls.update(str(ask.tool_call_id) for ask in ordered)
         await _step_publish(turn_id, request, _for_a_human(ordered))
 
         # t-f11-42. The other half of the same suspension: the asks ANOTHER AGENT
@@ -1627,7 +1645,7 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
         # A round with no peer ask keeps the per-answer wait below.
         if _for_a_peer(ordered):
             outcome = await _collect_round(
-                turn_id, request, ordered, dispatch, peer_calls, timed_out_peers
+                turn_id, request, ordered, dispatch, peer_calls, timed_out_peers, earlier_calls
             )
             continue
 
