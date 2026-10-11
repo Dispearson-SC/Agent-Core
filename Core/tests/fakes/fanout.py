@@ -83,6 +83,7 @@ class Mailbox:
     def __init__(self) -> None:
         self.asks: list[tuple[str, str]] = []
         self.request_keys: list[str | None] = []
+        self.answer_calls: list[tuple[str, str]] = []
         self.answers: dict[str, str] = {}
         self._ids: dict[tuple[str, str], str] = {}
 
@@ -93,6 +94,11 @@ class Mailbox:
             self._ids[key] = f"corr-{len(self._ids) + 1}"
             self.asks.append(key)
         return self._ids[key]
+
+    async def answer(self, correlation_id: str, answer: str) -> None:
+        """The answering half, first answer wins like the real row. Logged in call order."""
+        self.answer_calls.append((correlation_id, answer))
+        self.answers.setdefault(correlation_id, answer)
 
     async def read_answer(self, correlation_id: str) -> str | None:
         raw = self.answers.get(correlation_id)

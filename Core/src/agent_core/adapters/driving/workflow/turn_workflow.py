@@ -157,7 +157,12 @@ from agent_core.application.resume_turn import ResolvedTool, ResumeTurn
 from agent_core.application.start_turn import StartTurn
 from agent_core.domain.compaction import ContextState
 from agent_core.domain.media import MediaRef
-from agent_core.domain.peers import AgentId, PeerPolicy
+from agent_core.domain.peers import (
+    PEER_ASK_CLOSED_ANSWER,
+    PEER_ASK_FAILED_ANSWER,
+    AgentId,
+    PeerPolicy,
+)
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     PendingKind,
@@ -182,20 +187,25 @@ __all__ = [
     "TURN_QUEUE_NAME",
     "WINDOW_QUEUE_NAME",
     "CompactionSeat",
+    "DurablePeerTurnStarter",
     "HumanAnswer",
     "HumanPayload",
     "NotInsideAWorkflowError",
     "PeerAnswer",
     "PeerDispatch",
     "PeerSeat",
+    "PeerTurnJob",
     "PendingInputs",
     "TurnWorkflowDependencies",
     "TurnWorkflowNotWiredError",
     "UnusableResumeAnswerError",
     "WindowEnqueue",
     "bind_dependencies",
+    "enqueue_peer_turn",
     "enqueue_turn",
     "enqueue_turn_window",
+    "peer_workflow_id",
+    "run_peer_turn_workflow",
     "run_turn_window",
     "run_turn_workflow",
     "session_partition_key",
@@ -1544,6 +1554,110 @@ async def _step_expire(turn_id: TurnId) -> TurnOutcome:
     return _closed_without_an_answer(turn_id, _NO_ANSWER, datetime.now(UTC))
 
 
+@dataclass(frozen=True, slots=True)
+class _TurnEnd:
+    """How `_drive_turn` ended. `closed` is the turn GIVING UP (abandoned after too many
+    rounds, or expired with a person unanswered) rather than answering."""
+
+    outcome: TurnOutcome
+    closed: bool = False
+
+
+async def _drive_turn(request: TurnRequest) -> _TurnEnd:
+    """The turn itself, durably: start it, then collect or wait for whatever it suspends on,
+    resume, and repeat until it finishes or gives up.
+
+    Shared by `run_turn_workflow` (a turn a person or a channel started, which then delivers
+    and compacts) and `run_peer_turn_workflow` (the callee's turn for a peer ask, which
+    answers the asker instead). Every step is called from here in the same order for both, so
+    this is the ONE definition of the replay shape of a turn. Not a workflow or a step itself:
+    it runs inside whichever workflow calls it, and its decisions are functions of step results
+    (R1-R5 in `run_turn_workflow`).
+    """
+    turn_id = await _step_new_turn_id()
+    outcome = await _step_start(turn_id, request)
+
+    rounds = 0
+    # correlation_id -> the PROVIDER's tool_call_id, accumulated across rounds. Built only
+    # from step RESULTS, so a replay rebuilds exactly the same mapping (R1): this is the
+    # one place the provider's id is held while the question is away, and holding it here
+    # rather than putting it on the wire is what makes CLAUDE.md non-negotiable #5
+    # unbreakable on this path - a string that is never serialised cannot come back changed.
+    peer_calls: dict[str, ToolCallId] = {}
+    # Handles whose ask was given up on (reply timeout). A reply that still arrives later is
+    # skipped, not resumed on: its tool call was already answered with an error.
+    timed_out_peers: set[str] = set()
+    issued_calls: set[str] = set()
+    while outcome.is_suspended:
+        rounds += 1
+        if rounds > MAX_HUMAN_ROUNDS:
+            return _TurnEnd(await _step_abandon(turn_id, _TOO_MANY_ROUNDS), closed=True)
+
+        # Sorted before dispatch, never in the order the runner happened to produce
+        # (CLAUDE.md non-negotiable #7), and then narrowed to the requests a PERSON can
+        # actually resolve. A peer ask is answered by another agent's turn on this same
+        # durable topic, so publishing it asks somebody a question they cannot answer and
+        # spends the three days below waiting on them for it.
+        #
+        # Filtered here rather than inside the step: which requests a human is asked is a
+        # decision the body makes, so it is recorded in the step's arguments and replays
+        # identically. Inside the step it would be re-derived on every retry, and the day
+        # the rule changes a recovered turn would publish a different set than the one that
+        # crashed.
+        #
+        # The publish is UNCONDITIONAL even when nothing survives the filter, so the body
+        # takes one path whatever the outcome carries. `_step_publish` returns on an empty
+        # tuple; a branch here would be a second decision to keep deterministic for no gain.
+        ordered = _in_deterministic_order(outcome.pending)
+        earlier_calls = frozenset(issued_calls)
+        issued_calls.update(str(ask.tool_call_id) for ask in ordered)
+        await _step_publish(turn_id, request, _for_a_human(ordered))
+
+        # t-f11-42. The other half of the same suspension: the asks ANOTHER AGENT
+        # executes. Filtered in the body for the reason the publish is - which requests
+        # leave as questions is a decision that has to replay identically - and asked in a
+        # step, which is where the correlation id is minted and persisted as one act.
+        dispatch = await _step_ask_peers(turn_id, request, _for_a_peer(ordered))
+        peer_calls.update(dispatch.handles)
+
+        # Any round that asked a peer (one ask, several, or mixed with a human's request):
+        # collect EVERY result - peer answers, refusals, timeouts and the humans'
+        # decisions - then resume once. Pydantic AI will not continue on a subset of its
+        # deferred calls, and a peer wait is bounded by the asker's reply timeout.
+        # A round with no peer ask keeps the per-answer wait below.
+        if _for_a_peer(ordered):
+            outcome = await _collect_round(
+                turn_id, request, ordered, dispatch, peer_calls, timed_out_peers, earlier_calls
+            )
+            continue
+
+        # Only human-only rounds reach here (a round with any peer ask went through
+        # `_collect_round` above, which also resolves refused asks in-band). One wait per
+        # human answer, explicitly THREE_DAYS - the 60-second default is the trap, and a
+        # person decides in hours, not seconds.
+        while True:
+            answer = await DBOS.recv_async(RESUME_TOPIC, timeout_seconds=THREE_DAYS)
+            if isinstance(answer, PeerAnswer) and answer.correlation_id in timed_out_peers:
+                continue
+            break
+        if answer is None:
+            return _TurnEnd(await _step_expire(turn_id), closed=True)
+
+        # ONE topic, two payload types, and the branch is on the TYPE rather than on
+        # anything this body remembers. `DBOS.recv_async` returns whatever was sent to this
+        # workflow and the type is part of the durable payload, so the branch replays
+        # identically; deciding from "was a peer asked?" instead would take a different
+        # path the day both a human and a peer answer the same turn.
+        if isinstance(answer, PeerAnswer):
+            outcome = await _step_answer_peer(
+                turn_id, request, answer, peer_calls.get(answer.correlation_id)
+            )
+        else:
+            outcome = await _step_resume(turn_id, request, answer)
+
+    return _TurnEnd(outcome)
+
+
 @DBOS.workflow()
 async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
     """One turn, durably.
@@ -1595,86 +1709,10 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
     # replay reads it back out of the operation log rather than draining again.
     request = await _step_drain_pending(request)
 
-    turn_id = await _step_new_turn_id()
-    outcome = await _step_start(turn_id, request)
-
-    rounds = 0
-    # correlation_id -> the PROVIDER's tool_call_id, accumulated across rounds. Built only
-    # from step RESULTS, so a replay rebuilds exactly the same mapping (R1): this is the
-    # one place the provider's id is held while the question is away, and holding it here
-    # rather than putting it on the wire is what makes CLAUDE.md non-negotiable #5
-    # unbreakable on this path - a string that is never serialised cannot come back changed.
-    peer_calls: dict[str, ToolCallId] = {}
-    # Handles whose ask was given up on (reply timeout). A reply that still arrives later is
-    # skipped, not resumed on: its tool call was already answered with an error.
-    timed_out_peers: set[str] = set()
-    issued_calls: set[str] = set()
-    while outcome.is_suspended:
-        rounds += 1
-        if rounds > MAX_HUMAN_ROUNDS:
-            return await _step_abandon(turn_id, _TOO_MANY_ROUNDS)
-
-        # Sorted before dispatch, never in the order the runner happened to produce
-        # (CLAUDE.md non-negotiable #7), and then narrowed to the requests a PERSON can
-        # actually resolve. A peer ask is answered by another agent's turn on this same
-        # durable topic, so publishing it asks somebody a question they cannot answer and
-        # spends the three days below waiting on them for it.
-        #
-        # Filtered here rather than inside the step: which requests a human is asked is a
-        # decision the body makes, so it is recorded in the step's arguments and replays
-        # identically. Inside the step it would be re-derived on every retry, and the day
-        # the rule changes a recovered turn would publish a different set than the one that
-        # crashed.
-        #
-        # The publish is UNCONDITIONAL even when nothing survives the filter, so the body
-        # takes one path whatever the outcome carries. `_step_publish` returns on an empty
-        # tuple; a branch here would be a second decision to keep deterministic for no gain.
-        ordered = _in_deterministic_order(outcome.pending)
-        earlier_calls = frozenset(issued_calls)
-        issued_calls.update(str(ask.tool_call_id) for ask in ordered)
-        await _step_publish(turn_id, request, _for_a_human(ordered))
-
-        # t-f11-42. The other half of the same suspension: the asks ANOTHER AGENT
-        # executes. Filtered in the body for the reason the publish is - which requests
-        # leave as questions is a decision that has to replay identically - and asked in a
-        # step, which is where the correlation id is minted and persisted as one act.
-        dispatch = await _step_ask_peers(turn_id, request, _for_a_peer(ordered))
-        peer_calls.update(dispatch.handles)
-
-        # Any round that asked a peer (one ask, several, or mixed with a human's request):
-        # collect EVERY result - peer answers, refusals, timeouts and the humans'
-        # decisions - then resume once. Pydantic AI will not continue on a subset of its
-        # deferred calls, and a peer wait is bounded by the asker's reply timeout.
-        # A round with no peer ask keeps the per-answer wait below.
-        if _for_a_peer(ordered):
-            outcome = await _collect_round(
-                turn_id, request, ordered, dispatch, peer_calls, timed_out_peers, earlier_calls
-            )
-            continue
-
-        # Only human-only rounds reach here (a round with any peer ask went through
-        # `_collect_round` above, which also resolves refused asks in-band). One wait per
-        # human answer, explicitly THREE_DAYS - the 60-second default is the trap, and a
-        # person decides in hours, not seconds.
-        while True:
-            answer = await DBOS.recv_async(RESUME_TOPIC, timeout_seconds=THREE_DAYS)
-            if isinstance(answer, PeerAnswer) and answer.correlation_id in timed_out_peers:
-                continue
-            break
-        if answer is None:
-            return await _step_expire(turn_id)
-
-        # ONE topic, two payload types, and the branch is on the TYPE rather than on
-        # anything this body remembers. `DBOS.recv_async` returns whatever was sent to this
-        # workflow and the type is part of the durable payload, so the branch replays
-        # identically; deciding from "was a peer asked?" instead would take a different
-        # path the day both a human and a peer answer the same turn.
-        if isinstance(answer, PeerAnswer):
-            outcome = await _step_answer_peer(
-                turn_id, request, answer, peer_calls.get(answer.correlation_id)
-            )
-        else:
-            outcome = await _step_resume(turn_id, request, answer)
+    end = await _drive_turn(request)
+    if end.closed:
+        return end.outcome
+    outcome = end.outcome
 
     # t-f3-07. The loop above exits only on a FINISHED outcome, and I2 makes `result`
     # non-None for exactly that shape - `TurnOutcome.__post_init__` refuses any other. The
@@ -1704,6 +1742,101 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
         await _step_compact(request, result.usage)
 
     return outcome
+
+
+@dataclass(frozen=True, slots=True)
+class PeerTurnJob:
+    """What the peer workflow is started with: the callee's turn and where its answer goes.
+
+    A plain frozen dataclass of picklable values, because workflow arguments are serialised
+    into the operation log (like `TurnRequest`). `asking_turn_id` is the workflow the
+    answer wakes; `correlation_id` is the mailbox row it is recorded on.
+    """
+
+    request: TurnRequest
+    correlation_id: str
+    asking_turn_id: TurnId
+
+
+PEER_WORKFLOW_PREFIX: Final[str] = "peer-"
+
+
+def peer_workflow_id(correlation_id: str) -> str:
+    """The durable id of the workflow that answers one ask. Pure.
+
+    DETERMINISTIC ON PURPOSE (C1): starting it twice - a worker that claimed the row, died
+    and claimed it again, or two workers racing - names the same workflow, and DBOS returns
+    the existing one instead of running the callee's turn twice. It is also the callee's
+    TURN ID (`_step_new_turn_id` reads the workflow id), so an approval for the callee's
+    human is addressed to it.
+    """
+    return f"{PEER_WORKFLOW_PREFIX}{correlation_id}"
+
+
+@DBOS.step()
+async def _step_record_peer_reply(correlation_id: str, text: str) -> None:
+    """Write the callee's answer on the mailbox row the asker holds a handle to.
+
+    Idempotent in the mailbox (the first answer wins), so a retried step is a no-op. The
+    text is the callee's bytes VERBATIM: wrapping is `read_answer`'s (CLAUDE.md #10).
+    """
+    await _require_peer_seat().mailbox.answer(correlation_id, text)
+
+
+async def _close_peer_ask(job: PeerTurnJob, text: str) -> None:
+    """Record the answer, THEN wake the asker - the order is the contract (see
+    `signal_peer_answer`). A workflow that dies between the two leaves a recorded answer and
+    an unwoken asker; replay resumes at the signal because the record step is already logged.
+
+    The wake is best effort. If the asking turn is gone (expired, cancelled, never existed in
+    this database) the send fails, and failing THIS workflow would not bring it back; the
+    answer is on the row either way.
+    """
+    await _step_record_peer_reply(job.correlation_id, text)
+    try:
+        await signal_peer_answer(job.asking_turn_id, job.correlation_id)
+    except Exception:
+        _LOG.warning(
+            "could not wake asking turn %r for peer ask %r; the answer is recorded",
+            job.asking_turn_id,
+            job.correlation_id,
+            exc_info=True,
+        )
+
+
+@DBOS.workflow()
+async def run_peer_turn_workflow(job: PeerTurnJob) -> TurnOutcome:
+    """The callee's turn for one peer ask, durably, ending in the asker's answer. C1 / D29.
+
+    It runs the SAME durable turn as `run_turn_workflow` (`_drive_turn`: start, publish,
+    wait for a human or a third agent, resume), as the TARGET agent, in the fresh peer session,
+    with the hop count the ask carried - so everything a turn can suspend on keeps working: the
+    callee's own human approval wakes THIS workflow (its id is the callee's turn id), and a
+    nested ask to a third agent starts another of these.
+
+    What differs is the end. Nobody reads the callee's reply on a channel, so it is not
+    delivered and not compacted; it is the answer to the ask:
+
+      * finished        -> the turn's text;
+      * closed unanswered (abandoned after too many rounds, or expired waiting for a person)
+                        -> `PEER_ASK_CLOSED_ANSWER`;
+      * raised          -> `PEER_ASK_FAILED_ANSWER` (fixed text, never the exception), and the
+                        workflow still fails so the error stays visible.
+
+    A crash at any point replays from the log: the claimed row is no longer lost with the
+    worker's memory, and the deterministic workflow id makes a second start a no-op.
+    """
+    try:
+        end = await _drive_turn(job.request)
+    except Exception:
+        _LOG.exception("peer turn for ask %r failed", job.correlation_id)
+        await _close_peer_ask(job, PEER_ASK_FAILED_ANSWER)
+        raise
+    result = end.outcome.result
+    closed = end.closed or result is None or result.text in (_NO_ANSWER, _TOO_MANY_ROUNDS)
+    text = PEER_ASK_CLOSED_ANSWER if closed or result is None else result.text
+    await _close_peer_ask(job, text)
+    return end.outcome
 
 
 # What a human can put on the durable wire in answer to a deferred call.
@@ -1974,6 +2107,39 @@ async def enqueue_turn(
             return await turn_queue.enqueue_async(run_turn_workflow, request)
         with SetWorkflowID(str(turn_id)):
             return await turn_queue.enqueue_async(run_turn_workflow, request)
+
+
+async def enqueue_peer_turn(job: PeerTurnJob) -> WorkflowHandleAsync[TurnOutcome]:
+    """Hand one peer ask's turn to the durable queue under its deterministic workflow id.
+
+    Idempotent: DBOS returns the existing handle for an id it already has, so a worker that
+    claims the same row again (crash, race) does not run the callee's turn twice. It goes on
+    the ordinary turn queue, partitioned by the peer session - a fresh session per ask, so a
+    slow callee never queues behind another conversation.
+    """
+    with (
+        SetEnqueueOptions(queue_partition_key=session_partition_key(job.request.session)),
+        SetWorkflowID(peer_workflow_id(job.correlation_id)),
+    ):
+        return await turn_queue.enqueue_async(run_peer_turn_workflow, job)
+
+
+@dataclass(frozen=True, slots=True)
+class DurablePeerTurnStarter:
+    """The peer worker's seat for starting a callee turn durably (`PeerTurnStarter`).
+
+    Returns as soon as the workflow is enqueued: the worker never holds a claim open while
+    the callee thinks or waits for its human, and the workflow, not the worker, answers.
+    """
+
+    async def start(
+        self, correlation_id: str, asking_turn_id: TurnId, request: TurnRequest
+    ) -> None:
+        await enqueue_peer_turn(
+            PeerTurnJob(
+                request=request, correlation_id=correlation_id, asking_turn_id=asking_turn_id
+            )
+        )
 
 
 def session_window_key(session: SessionRef) -> str:

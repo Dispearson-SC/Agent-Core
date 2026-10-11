@@ -618,6 +618,15 @@ humans keep their own, longer wait (three days, then the turn expires). Pydantic
 continue on a subset. A re-ask of the same question after a timeout reuses the mailbox's
 idempotent handle and can still deliver. See DECISIONS D28.
 
+**The answering side is durable too.** The `peer-worker` claims a mailbox row and starts the
+DBOS workflow `peer-<correlation_id>` (`run_peer_turn_workflow`), then moves on. That workflow
+runs the callee's turn through the same durable path as any turn, as the target agent in a
+fresh `peer~<root>~<key>` session, and when the turn finishes - including after the callee's
+own human approval or its own ask to a third agent - it records the answer on the row and
+wakes the asking turn. The ask's correlation id, the callee session and the workflow id are all
+derived from the ask, so a replay or a second claim of the same row cannot run the callee
+twice. See DECISIONS D29.
+
 ### A2A: shape now, wire protocol in D2
 
 Agent2Agent reached **v1.0 under the Linux Foundation**, backed by Google, Microsoft and

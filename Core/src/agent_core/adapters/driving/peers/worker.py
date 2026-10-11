@@ -75,6 +75,12 @@ THE HOP TRAVELS WITH THE ASK
     reconciles the two by applying the seat's count to the request it forwards, so the
     number the caller passed is the number the gate sees.
 
+C1 (D29) CHANGED BOTH SECTIONS BELOW FOR THE PRODUCTION WORKER. `dispatch_next_ask` hands the
+    claimed ask to a durable workflow (`peer-<correlation_id>`) that runs the callee's turn,
+    records the answer and wakes the asker, whether or not the callee suspends along the way;
+    a worker that dies after the claim no longer loses the turn. The text below still
+    describes `answer_next_ask` with `DirectTurnRunner`, which the console and tests use.
+
 WHAT HAPPENS TO A CLAIM WHOSE TURN SUSPENDS - READ THIS BEFORE CHANGING ANYTHING
     B may itself suspend: to ask its own human (the shipped `billing_specialist` needs an
     approval before it freezes an account) or to ask a third agent. That is the ordinary
@@ -128,7 +134,7 @@ from typing import Final, Protocol, runtime_checkable
 from uuid import uuid4
 
 from agent_core.adapters.driven.peers.mailbox import PeerAsk
-from agent_core.domain.peers import AgentId, peer_session_key
+from agent_core.domain.peers import PEER_ASK_FAILED_ANSWER, AgentId, peer_session_key
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     CallerIdentity,
@@ -153,10 +159,12 @@ __all__ = [
     "PeerQueue",
     "PeerTurnReport",
     "PeerTurnRunner",
+    "PeerTurnStarter",
     "TurnRunner",
     "answer_next_ask",
     "answerable_targets",
     "build_peer_identity",
+    "dispatch_next_ask",
     "new_peer_session",
     "peer_root_origin",
     "new_turn_id",
@@ -187,6 +195,8 @@ PeerAnswerSignal = Callable[[TurnId, str], Awaitable[None]]
 class AskDisposition(StrEnum):
     """What became of one claimed ask.
 
+    STARTED   - B's turn was handed to a durable workflow, which owns the answer from here
+                (`dispatch_next_ask`, C1). The worker never answers a started ask.
     ANSWERED  - B finished and its answer is on the row A is waiting on.
     SUSPENDED - B is waiting on a human or another agent. Nothing was recorded; see WHAT
                 HAPPENS TO A CLAIM WHOSE TURN SUSPENDS in the module docstring.
@@ -197,6 +207,7 @@ class AskDisposition(StrEnum):
     prevent, and a member here would be the place someone later wrote `pass`.
     """
 
+    STARTED = "started"
     ANSWERED = "answered"
     SUSPENDED = "suspended"
 
@@ -249,6 +260,24 @@ class PeerTurnRunner(Protocol):
     """
 
     async def execute(self, turn_id: TurnId, request: TurnRequest, *, hop: int) -> TurnOutcome: ...
+
+
+@runtime_checkable
+class PeerTurnStarter(Protocol):
+    """What the DURABLE worker needs: start B's turn somewhere that outlives this process.
+
+    `start` must be idempotent per `correlation_id` and return once the work is durably
+    accepted, NOT when it finishes. The implementation answers the ask (`mailbox.answer`) and
+    wakes the asker (`signal_peer_answer`) itself when the turn completes - including after
+    B's own human approval or B's own ask to a third agent. `turn_workflow.DurablePeerTurnStarter`
+    is the production binding (a DBOS workflow with id `peer-<correlation_id>`).
+
+    `runtime_checkable` so `run_peer_worker` can accept either seat and pick the path.
+    """
+
+    async def start(
+        self, correlation_id: str, asking_turn_id: TurnId, request: TurnRequest
+    ) -> None: ...
 
 
 class TurnRunner(Protocol):
@@ -408,6 +437,78 @@ def peer_turn_request(ask: PeerAsk, *, session: SessionRef) -> TurnRequest:
     )
 
 
+def _session_for(
+    ask: PeerAsk, mint_session: Callable[[TenantId, SessionRef], SessionRef] | None
+) -> SessionRef:
+    """The fresh session for one claimed ask: `peer~<root>~<stable key>`, in the asker's tenant.
+
+    The key derives from the correlation id (C2), so claiming the same row again files the
+    callee's turn under the same session. EVERY path names the session `peer~<asker>~...`: a
+    minter that drops the origin would make the specialist lose its case, so it is refused
+    before any turn runs.
+    """
+    session = (
+        new_peer_session(
+            ask.from_session.tenant_id,
+            origin=ask.from_session,
+            key=peer_session_key(ask.correlation_id),
+        )
+        if mint_session is None
+        else mint_session(ask.from_session.tenant_id, ask.from_session)
+    )
+    expected_prefix = f"peer~{peer_root_origin(ask.from_session.session_id)}~"
+    if not session.session_id.startswith(expected_prefix):
+        raise ValueError(
+            f"a minted peer session must be named {expected_prefix}<uuid>, "
+            "carrying the asking session"
+        )
+    return session
+
+
+async def dispatch_next_ask(
+    queue: PeerQueue,
+    starter: PeerTurnStarter,
+    *,
+    target: AgentId,
+    wake: PeerAnswerSignal | None = None,
+    mint_session: Callable[[TenantId, SessionRef], SessionRef] | None = None,
+) -> PeerTurnReport | None:
+    """Claim one ask for `target` and hand its turn to a DURABLE workflow. C1 / D29.
+
+    Claim, build the request AS THE TARGET AGENT (identity, role, hop and untrusted question
+    exactly as `peer_turn_request` always built them), start, return. The worker does not run
+    the turn, wait for it, or answer it: the workflow owns the answer, so a callee that
+    suspends for a human or a third agent still answers the asker when it resumes, and a
+    worker that dies after this returns loses nothing.
+
+    The one failure it handles is the start itself failing (nothing durable exists to answer
+    for the ask): the ask is closed with the fixed failure text and the asker woken, then the
+    error propagates, as `answer_next_ask` always did for a failed turn.
+
+    A crash BETWEEN the claim and the start is the remaining window: the row is `delivered`
+    and nothing runs. The deterministic workflow id makes a retry safe; the redelivery lease
+    that performs it is C3.
+    """
+    if mint_session is not None:
+        _check_minter_arity(mint_session)
+    ask = await queue.claim_next(target)
+    if ask is None:
+        return None
+    try:
+        session = _session_for(ask, mint_session)
+        await starter.start(
+            ask.correlation_id, ask.turn_id, peer_turn_request(ask, session=session)
+        )
+    except (Exception, asyncio.CancelledError):
+        await _answer_failed_ask(queue, ask, wake)
+        raise
+    return PeerTurnReport(
+        correlation_id=ask.correlation_id,
+        target=ask.target,
+        disposition=AskDisposition.STARTED,
+    )
+
+
 async def answer_next_ask(
     queue: PeerQueue,
     runner: PeerTurnRunner,
@@ -446,24 +547,7 @@ async def answer_next_ask(
         return None
 
     try:
-        session = (
-            new_peer_session(
-                ask.from_session.tenant_id,
-                origin=ask.from_session,
-                key=peer_session_key(ask.correlation_id),
-            )
-            if mint_session is None
-            else mint_session(ask.from_session.tenant_id, ask.from_session)
-        )
-        # EVERY PATH NAMES THE SESSION `peer~<asker>~<uuid>`: a minter that drops the
-        # origin would make the specialist lose its case, so it is refused before any turn
-        # runs.
-        expected_prefix = f"peer~{peer_root_origin(ask.from_session.session_id)}~"
-        if not session.session_id.startswith(expected_prefix):
-            raise ValueError(
-                f"a minted peer session must be named {expected_prefix}<uuid>, "
-                "carrying the asking session"
-            )
+        session = _session_for(ask, mint_session)
         outcome = await runner.execute(
             mint_turn_id(), peer_turn_request(ask, session=session), hop=ask.hop
         )
@@ -501,7 +585,7 @@ async def answer_next_ask(
     )
 
 
-_FAILED_ASK_ANSWER = "The question could not be answered: the answering agent failed."
+_FAILED_ASK_ANSWER = PEER_ASK_FAILED_ANSWER
 
 
 async def _answer_failed_ask(queue: PeerQueue, ask: PeerAsk, wake: PeerAnswerSignal | None) -> None:
@@ -550,7 +634,7 @@ def _forever() -> bool:
 
 async def run_peer_worker(
     queue: PeerQueue,
-    runner: PeerTurnRunner,
+    runner: PeerTurnRunner | PeerTurnStarter,
     *,
     targets: Iterable[AgentId],
     wake: PeerAnswerSignal | None = None,
@@ -583,7 +667,10 @@ async def run_peer_worker(
     while keep_going():
         handled = False
         for target in ordered:
-            report = await answer_next_ask(queue, runner, target=target, wake=wake)
+            if isinstance(runner, PeerTurnStarter):
+                report = await dispatch_next_ask(queue, runner, target=target, wake=wake)
+            else:
+                report = await answer_next_ask(queue, runner, target=target, wake=wake)
             if report is None:
                 continue
             handled = True

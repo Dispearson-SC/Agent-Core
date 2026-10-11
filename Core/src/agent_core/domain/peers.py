@@ -38,6 +38,18 @@ AgentId = NewType("AgentId", str)
 _PEER_ID_NAMESPACE: Final[UUID] = UUID("5b1c1f0e-6f6d-4d53-9a52-0d2c3f6f9a11")
 
 
+# What a peer ask is answered with when the answering turn could not produce an answer. FIXED
+# text: the exception message stays out of what the asking model reads, and a person's
+# non-answer is not turned into a sentence an agent supposedly wrote.
+PEER_ASK_FAILED_ANSWER: Final[str] = (
+    "The question could not be answered: the answering agent failed."
+)
+PEER_ASK_CLOSED_ANSWER: Final[str] = (
+    "The question could not be answered: the answering agent's turn was closed before it "
+    "finished (nobody answered what it was waiting for)."
+)
+
+
 def peer_ask_id(turn_id: str, request_key: str, target: str, question: str) -> str:
     """The correlation id of one ask, derived from what identifies it. Pure.
 

@@ -924,6 +924,42 @@ callee's conversation:
 Replay shape: step names and order are unchanged, only the id a step returns differs. The pinned
 application version is not bumped for this.
 
+**C1 · the peer's turn is a DBOS workflow.** The worker used to claim a row and run the callee's
+turn through `DirectTurnRunner` (`StartTurn` directly, not durable). Two holes followed: a callee
+that suspended (its own human's approval, or its own ask) recorded nothing, so the asker waited
+for its reply timeout; and a worker that died after the claim lost the row with the turn.
+
+- `run_peer_turn_workflow(PeerTurnJob)` runs the callee's turn with `_drive_turn`, the body that
+  `run_turn_workflow` was split into (same steps, same order: no replay-shape change for existing
+  turns). It differs only at the end: no channel delivery or compaction (nobody is on the `peer`
+  channel); instead `_step_record_peer_reply` writes the answer (`mailbox.answer`, first answer
+  wins) and then `signal_peer_answer` wakes the asker. Record first, wake second.
+- Its workflow id is `peer-<correlation_id>`, which is also the callee's turn id, so the callee's
+  human approval is addressed to it and an asker that restarts or a worker that re-claims the row
+  names the same workflow: DBOS returns the existing one and the callee does not run twice.
+  It is enqueued on `agent-core-turns`, partitioned by the (fresh) peer session.
+- The worker (`dispatch_next_ask`) claims, builds the request exactly as before (target profile,
+  `peer-agent` identity and role, the hop count, the untrusted question, the root-origin session
+  id), starts the workflow through the `PeerTurnStarter` seat (`DurablePeerTurnStarter`) and
+  returns. It no longer answers started asks. Hop limits and the asking side's two-sided
+  allowlist are untouched (`_step_ask_peers`). `answer_next_ask` and `DirectTurnRunner` remain
+  for the console and for tests; `run_peer_worker` picks the path from the seat it is given.
+- Errors: the callee raising records `PEER_ASK_FAILED_ANSWER` (fixed text, never the exception)
+  and the workflow still fails, so the error stays visible. A callee turn closed unanswered
+  (expired waiting for a person, too many rounds) records `PEER_ASK_CLOSED_ANSWER`. A failed
+  start closes the ask with the failure text, as a failed turn always did. A cancelled task
+  (engine shutdown) records nothing. If the asking turn is gone the wake fails and is logged;
+  the answer is on the row.
+- Replay shape: `_drive_turn` is a plain coroutine, so `run_turn_workflow` keeps the same step
+  names and order. The new workflow and step do not affect turns in flight, so the pinned
+  application version is NOT bumped (`agent-core-turns.2`).
+
+**Known limits, owned by later tasks.** A crash between the claim and the workflow start still
+leaves a `delivered` row with nothing running (C3: redelivery lease; the deterministic id makes
+the retry safe). The callee's approval request is published through the same `HumanGateway` as
+any turn, addressed by the peer session; showing it under the conversation the user is in is C16.
+Cancelling a running callee when the asker times out is C4.
+
 ## D30 · Follow-ups of the D28 review: stale answers, stranded versions
 
 **Stale or unknown human answers (`_collect_round`).** D28 logged and skipped any `HumanAnswer`

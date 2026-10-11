@@ -129,13 +129,13 @@ from agent_core.adapters.driving.http.routes import (
 )
 from agent_core.adapters.driving.http.transcript_routes import create_transcript_router
 from agent_core.adapters.driving.peers.worker import (
-    DirectTurnRunner,
     PeerQueue,
     answerable_targets,
     run_peer_worker,
 )
 from agent_core.adapters.driving.workflow.bootstrap import launch_dbos
 from agent_core.adapters.driving.workflow.turn_workflow import (
+    DurablePeerTurnStarter,
     enqueue_turn,
     signal_peer_answer,
 )
@@ -731,12 +731,13 @@ def run_peer_worker_process(arguments: argparse.Namespace) -> None:
         who wants the two roles on separate capacity runs them on separate deployments,
         which is a deployment decision and not one this file can make for them.
 
-        WHAT IT DOES NOT BUY, so the banner below stays honest: the PEER turn is still not
-        durable. `DirectTurnRunner` calls `StartTurn` directly because the worker needs the
-        OUTCOME in order to answer, and `enqueue_turn` returns a handle whose result would
-        never come back here. Kill this process while B is thinking and that turn is gone -
-        the ask stays `delivered` with a null answer and nobody recovers it
-        (`adapters/driving/peers/worker.py`, WHAT HAPPENS WHEN THE WORKER DIES MID-TURN).
+        THE PEER TURN IS DURABLE (C1, D29). The worker claims a row and starts the workflow
+        `peer-<correlation_id>` (`DurablePeerTurnStarter`), then moves on. That workflow runs
+        the callee's turn through the same durable path as any turn, records the answer and
+        wakes the asker when it finishes - including after the callee's own human approval -
+        so killing this process while B thinks no longer loses the ask, and a callee that
+        suspends is no longer an ask nobody answers. The remaining window is a crash between
+        the claim and the start (the redelivery lease, C3).
     """
     container = asyncio.run(start_container())
     refuse_unless_ready(container.settings)
@@ -762,9 +763,9 @@ def run_peer_worker_process(arguments: argparse.Namespace) -> None:
     print(
         "[peer-worker] answering for: "
         + ", ".join(targets)
-        + " - peer turns run through StartTurn directly, so one killed halfway is not "
-        "recovered. This process launches the durable engine (it has to, to wake the turn "
-        "that asked), so it also dequeues ordinary turns and takes part in recovery."
+        + " - each ask starts a durable workflow `peer-<correlation id>` that answers it. "
+        "This process launches the durable engine, so it also dequeues turns and takes part "
+        "in recovery."
     )
 
     container.domain_pool.open()
@@ -786,7 +787,7 @@ def run_peer_worker_process(arguments: argparse.Namespace) -> None:
         asyncio.run(
             run_peer_worker(
                 queue,
-                DirectTurnRunner(container.start_turn),
+                DurablePeerTurnStarter(),
                 targets=targets,
                 wake=signal_peer_answer,
                 idle_seconds=arguments.poll,
