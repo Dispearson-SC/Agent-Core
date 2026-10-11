@@ -96,7 +96,7 @@ What each name is for, grouped the way `.env.example` groups them:
 | `AGENT_CORE_CHANNEL_TENANT_ID`, `AGENT_CORE_CHANNEL_PROFILE_ID` | Which tenant and which agent profile a channel adapter binds to. Day 1 is a single deployment, so every channel shares this one pair. |
 | `AGENT_CORE_HUMAN_GATEWAY_CHANNEL_ID` | Which registered channel a pending approval is asked on. Unset resolves to the HTTP channel, which nobody is watching — set it to reach an actual human. |
 | `AGENT_CORE_PROFILES_DIR`, `AGENT_CORE_SKILLS_DIR`, `AGENT_CORE_MEDIA_DIR`, `AGENT_CORE_POLICY_DIR` | Override the four `Core/…` directories this process reads from. Only needed running from an installed wheel with no `Core/` above it. |
-| `AGENT_CORE_DBOS_APP_NAME`, `AGENT_CORE_DBOS_APPLICATION_VERSION` | Constants of the *source*, correct for a single-process deployment as shipped. Do not set the version override without reading `composition.dbos_config`'s docstring first — it is a pin, not a preference. |
+| `AGENT_CORE_DBOS_APP_NAME`, `AGENT_CORE_DBOS_APPLICATION_VERSION` | Constants of the *source*, correct for a single-process deployment as shipped. Do not set the version override without reading `composition.dbos_config`'s docstring first — it is a pin, not a preference. After a bump, `python -m agent_core stranded-turns` lists the turns it stranded; the procedure is in `docs/OPERATIONS.md`. |
 | `DBOS_CONDUCTOR_KEY` | Optional. Connects this process to DBOS Conductor for observability; unset is a fully local, working deployment. |
 
 `.env.example` also carries a **day-2 proxy section** (a LiteLLM proxy URL and one API key

@@ -114,6 +114,7 @@ from typing import Any, Protocol
 
 from agent_core.adapters.driving.cli.console import Console
 from agent_core.adapters.driving.cli.preflight import preflight
+from agent_core.adapters.driving.cli.stranded_turns import run_stranded_check
 from agent_core.adapters.driving.http.admin_routes import (
     AdminAuthenticator,
     create_admin_router,
@@ -801,7 +802,7 @@ def run_peer_worker_process(arguments: argparse.Namespace) -> None:
 
 
 def _argument_parser() -> argparse.ArgumentParser:
-    """Four ways to run one container. No subcommand means `serve`, as it always did."""
+    """Ways to run one container. No subcommand means `serve`, as it always did."""
     parser = argparse.ArgumentParser(
         prog="agent-core",
         description=(
@@ -815,6 +816,14 @@ def _argument_parser() -> argparse.ArgumentParser:
         help=(
             "say what is not ready - database, credentials, models, profiles, policy - "
             "in one pass, and exit non-zero if anything is"
+        ),
+    )
+
+    subcommands.add_parser(
+        "stranded-turns",
+        help=(
+            "list open durable turns written under another DBOS application version (they "
+            "are never recovered by this build); exit 1 if any, 2 if the check cannot run"
         ),
     )
 
@@ -917,6 +926,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     if arguments.command == "peer-worker":
         run_peer_worker_process(arguments)
         return
+    if arguments.command == "stranded-turns":
+        raise SystemExit(run_stranded_check(Settings.from_env()))
     serve()
 
 

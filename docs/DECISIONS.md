@@ -912,3 +912,12 @@ whose call the round was not waiting on. That conflated two cases. The body now 
   treatment a peer wake-up for a handle the turn never asked under already gets.
 
 `earlier_calls` is derived in the workflow body from step results, so replay recomputes it.
+
+**Stranded turns after a version bump (C0a).** D28's bump `.1` -> `.2` left turns suspended under
+`.1` PENDING for ever, each holding its session's single queue slot, with no way for an operator
+to even see them. `python -m agent_core stranded-turns` now lists the open workflows
+(`PENDING`, `ENQUEUED`, `DELAYED`) whose `application_version` differs from the one the build
+claims, by one SELECT on `dbos.workflow_status` of the DBOS system database. It exits 0 / 1 / 2
+(clean / stranded / could not check) so a deploy script can gate on it. It reads only: launching
+DBOS would start recovery in the checking process, and cancelling is a different act. The
+drain/cancel procedure is in `docs/OPERATIONS.md` (`dbos workflow cancel`).
