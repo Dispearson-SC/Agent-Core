@@ -518,6 +518,15 @@ def _build_peer_policy(data: object) -> PeerPolicy:
     )
 
 
+def _build_public_alias(data: object) -> str:
+    """The alias as written, or `""` (which `__post_init__` turns into the id)."""
+    if data is None:
+        return ""
+    if not isinstance(data, str) or not data.strip():
+        raise ProfileValidationError("public_alias must be a non-empty string")
+    return data.strip()
+
+
 def _build_fragment_map(data: object, *, where: str) -> tuple[tuple[str, str], ...]:
     """`{key: text}` -> sorted `((key, text), ...)`; absent -> `()`."""
     if data is None:
@@ -603,12 +612,21 @@ class AgentProfile:
     channel_instructions: tuple[tuple[str, str], ...] = ()
     modality_instructions: tuple[tuple[str, str], ...] = ()
 
+    # The name shown to END USERS for an agent whose `id` is internal. Defaults to `id`
+    # (see `__post_init__`), so a profile that never sets it behaves as before. It is a
+    # label only: policy, audit and routing keep using `id`.
+    public_alias: str = ""
+
     # D20, docs/TASKS.md#t-f1-17. Derived at load time, never read from the YAML.
     # `version` is 0 until a `ProfileVersionRegistry` assigns one: a profile that never
     # passed through a registry must not be able to claim it is version 1, because a turn
     # persisting that number would be recording an unverifiable fact.
     version: int = 0
     content_hash: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.public_alias:
+            object.__setattr__(self, "public_alias", self.id)
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, object]) -> AgentProfile:
@@ -680,6 +698,7 @@ class AgentProfile:
             peers=(
                 _build_peer_policy(mapping["peers"]) if "peers" in mapping else defaults.peers
             ),
+            public_alias=_build_public_alias(mapping.get("public_alias")),
             channel_instructions=_build_fragment_map(
                 mapping.get("channel_instructions"), where="channel_instructions"
             ),

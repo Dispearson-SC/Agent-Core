@@ -447,6 +447,14 @@ declare:
   appends as run-level instructions after the persona. The user's text is never altered and
   the fragments are not stored in the history.
 
+- Shared instruction fragments: a profile may list `include: [tone, format]`; the loader
+  appends `profiles/fragments/<name>.md` to the persona in that order (blank-line
+  separated). A missing fragment is a load-time error, and editing a fragment moves the
+  content hash like editing the persona does.
+- `public_alias`: the name end users see for an agent whose `id` is internal. Defaults to
+  `id`; policy, audit and routing keep using `id`. No endpoint lists agent ids publicly
+  today, so it is carried on the profile for the adapters that will.
+
 Deployment configuration, not code: `AGENT_CORE_PULL_CHANNELS=a,b` registers extra pull-mode
 channels (a vertical's backend polling `GET /turns/{id}`). `POST /turns` answers 422 for a
 channel the registry does not hold, before the turn is enqueued and so before any model call.

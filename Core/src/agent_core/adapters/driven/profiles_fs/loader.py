@@ -38,30 +38,71 @@ SYNC AND ASYNC - BOTH, DELIBERATELY
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]  # no stub package installed; see pyproject.toml
 
-from agent_core.domain.profile import AgentProfile
+from agent_core.domain.profile import AgentProfile, ProfileValidationError
 
 __all__ = ["load_profile", "load_profile_sync", "parse_profile"]
 
 
-def parse_profile(text: str) -> AgentProfile:
+def parse_profile(text: str, *, fragments_dir: Path | None = None) -> AgentProfile:
     """Parse one profile document. Raises `ProfileValidationError` on anything malformed.
 
     `safe_load`, never `load`: a profile file is configuration, and a loader that can
     construct arbitrary Python objects turns "someone may edit a profile" into "someone may
     run code in the agent process". Same reasoning as the note on `ApprovalRule.condition`.
+
+    `include: [name, ...]` is resolved HERE, not in the domain, because it is file reading:
+    each `<fragments_dir>/<name>.md` is appended to `persona` in the order listed, separated
+    by a blank line. The domain only ever sees the resolved persona, so editing a fragment
+    moves the content hash and earns a new profile version (D20). A missing fragment, or no
+    fragments directory, is a `ProfileValidationError` at load - never a silently shorter
+    persona.
     """
     data: Any = yaml.safe_load(text)
+    if isinstance(data, dict) and "include" in data:
+        data = {**data}
+        names = data.pop("include")
+        data["persona"] = _with_fragments(data.get("persona"), names, fragments_dir)
     return AgentProfile.from_mapping(data)
 
 
-def load_profile_sync(path: str | Path) -> AgentProfile:
-    """Read and parse one profile file. The sync island - see the module docstring."""
-    return parse_profile(Path(path).read_text(encoding="utf-8"))
+# A fragment name is a bare file stem. The pattern is what keeps `include: ["../x"]` from
+# reading outside the fragments directory.
+_FRAGMENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+
+
+def _with_fragments(persona: object, names: object, fragments_dir: Path | None) -> object:
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        raise ProfileValidationError("include must be a list of fragment names")
+    if not isinstance(persona, str):
+        return persona  # from_mapping reports the missing/invalid persona itself
+    parts = [persona]
+    for name in names:
+        if not _FRAGMENT_NAME.fullmatch(name) or ".." in name:
+            raise ProfileValidationError(f"invalid fragment name {name!r}")
+        path = None if fragments_dir is None else fragments_dir / f"{name}.md"
+        if path is None or not path.is_file():
+            raise ProfileValidationError(
+                f"include: fragment {name!r} not found"
+                + ("" if fragments_dir is None else f" in {fragments_dir}")
+            )
+        parts.append(path.read_text(encoding="utf-8").strip())
+    return "\n\n".join(parts)
+
+
+def load_profile_sync(path: str | Path, fragments_dir: Path | None = None) -> AgentProfile:
+    """Read and parse one profile file. The sync island - see the module docstring.
+
+    Fragments default to the `fragments/` directory next to the profile file.
+    """
+    file = Path(path)
+    directory = file.parent / "fragments" if fragments_dir is None else fragments_dir
+    return parse_profile(file.read_text(encoding="utf-8"), fragments_dir=directory)
 
 
 async def load_profile(path: str | Path) -> AgentProfile:
