@@ -232,7 +232,7 @@ from agent_core.adapters.driving.workflow.turn_workflow import (
 from agent_core.adapters.driving.workflow.turn_workflow import (
     signal_evidence as durable_signal_evidence,
 )
-from agent_core.application.decide_approval import DecideApproval, RequesterLookup
+from agent_core.application.decide_approval import DecideApproval, PendingCheck, RequesterLookup
 from agent_core.application.ingest_media import IngestMedia
 from agent_core.application.resume_turn import ResumeTurn
 from agent_core.application.start_turn import StartTurn
@@ -1212,6 +1212,37 @@ def _pg_requester_lookup(conninfo: str) -> RequesterLookup:
     return lookup
 
 
+# C1b. The boundary check behind `DecideApproval`'s `pending` seat: is (turn, tool call) a
+# LIVE request a person may decide? `human_requests` is the record of everything published to
+# a person, so a delegation row (never published, but defended in depth), an expired row and a
+# call nobody published all answer False. Not a `HumanGateway` member for the reason
+# `_REQUESTER_LOOKUP_SQL` gives: the port answers its one question already. The database's
+# clock decides expiry, as in `gateway.py`.
+_PENDING_HUMAN_REQUEST_SQL = """
+    SELECT 1
+    FROM human_requests
+    WHERE turn_id = %s AND tool_call_id = %s AND kind <> %s AND expires_at > now()
+"""
+
+
+def _pending_human_request_sync(conninfo: str, turn_id: TurnId, tool_call_id: ToolCallId) -> bool:
+    with psycopg.connect(conninfo) as conn:
+        row = conn.execute(
+            _PENDING_HUMAN_REQUEST_SQL,
+            (str(turn_id), str(tool_call_id), PendingKind.DELEGATION.value),
+        ).fetchone()
+    return row is not None
+
+
+def _pg_pending_human_request(conninfo: str) -> PendingCheck:
+    """Bind `DecideApproval`'s `PendingCheck` seat. D13: sync psycopg in a thread."""
+
+    async def pending(turn_id: TurnId, tool_call_id: ToolCallId) -> bool:
+        return await asyncio.to_thread(_pending_human_request_sync, conninfo, turn_id, tool_call_id)
+
+    return pending
+
+
 # t-f0-06. The three `turns.state` values `PgConversationStore` writes
 # (adapters/driven/persistence_pg/conversation_repository.py's `_TURN_STATE_*`
 # constants), restated here for the same reason `_WHATSAPP_CHANNEL_ID` and
@@ -1636,6 +1667,7 @@ def build_container(
         audit=audit,
         signal=durable_signal_decision,
         requester=_pg_requester_lookup(resolved.resolved_audit_conninfo),
+        pending=_pg_pending_human_request(resolved.app_conninfo),
     )
     # t-f0-06. The `turns` row lives on `resolved.app_conninfo` - the SAME conninfo
     # `store` above was built with - never the audit conninfo: it is domain state, not an

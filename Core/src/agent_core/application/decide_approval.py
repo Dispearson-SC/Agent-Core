@@ -44,6 +44,7 @@ __all__ = [
     "DecideApproval",
     "DecisionSignal",
     "FourEyesError",
+    "PendingCheck",
     "RequesterLookup",
     "UnknownCorrelationError",
 ]
@@ -59,6 +60,11 @@ DecisionSignal = Callable[[TurnId, ToolCallId, bool, str | None], Awaitable[None
 # narrow callable gives this file nothing it could wait on. Returns None when nobody is on
 # record for that turn - which D25 treats as a refusal, not as a pass.
 RequesterLookup = Callable[[TurnId], Awaitable[str | None]]
+
+
+# Whether (turn, tool call) is a LIVE request a person may decide: published to a human (never
+# a delegation), not expired. Injected for the reason `RequesterLookup` is. C1b.
+PendingCheck = Callable[[TurnId, ToolCallId], Awaitable[bool]]
 
 
 class FourEyesError(PermissionError):
@@ -140,11 +146,13 @@ class DecideApproval:
         audit: AuditSink,
         signal: DecisionSignal,
         requester: RequesterLookup | None = None,
+        pending: PendingCheck | None = None,
     ) -> None:
         self._gateway = gateway
         self._audit = audit
         self._signal = signal
         self._requester = requester
+        self._pending = pending
 
     async def execute(
         self,
@@ -221,6 +229,15 @@ class DecideApproval:
                 "no pending human decision for this correlation handle"
             )
         turn_id, tool_call_id = resolved
+
+        # C1b. The boundary check, BEFORE the audit row and the signal: a decision for a call
+        # that is not a live human request of this turn must never reach the workflow, where
+        # it could only be ignored. Answered as an unknown handle (404) so a stranger learns
+        # nothing about which ids exist.
+        if self._pending is not None and not await self._pending(turn_id, tool_call_id):
+            raise UnknownCorrelationError(
+                "no pending human decision for this correlation handle"
+            )
 
         # Four-eyes (D25). After correlation, so a stray reply never becomes a lookup
         # against a turn nobody resolved; before `record_human_decision`, for the reason

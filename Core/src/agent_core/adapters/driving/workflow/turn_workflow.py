@@ -1203,13 +1203,13 @@ async def _collect_round(
     it instead of resuming on it, UNLESS the same question is asked again: see the re-ask
     block below.
 
-    A HUMAN ANSWER THAT THIS ROUND IS NOT WAITING ON IS ONE OF TWO THINGS. `earlier_calls`
-    holds every tool call id issued by the rounds BEFORE this one. A decision naming one of
-    them is a double click or a retried POST whose first copy already resumed that round:
-    logged and ignored. A decision naming an id NO round issued (or one issued to a peer, which
-    no person can decide) is not a duplicate of anything; skipping it would leave the person
-    believing they decided something while the turn waits on nothing, so it fails the turn
-    with `UnusableResumeAnswerError`, like a peer wake-up for a handle never asked under.
+    A HUMAN ANSWER THAT THIS ROUND IS NOT WAITING ON IS LOGGED AND IGNORED, never fatal
+    (C1b). `earlier_calls` holds every tool call id issued by the rounds BEFORE this one: a
+    decision naming one is a double click or a retried POST whose first copy already resumed
+    that round. A decision naming an id NO round issued (or one issued to a peer) is not a
+    duplicate of anything; D30 made that fail the turn, which turned one bad send into a way to
+    kill a live turn. The sender is told at the API boundary instead (`DecideApproval` refuses
+    a decision that is not a pending human request of the turn, before signalling).
 
     Results are returned in `tool_call_id` order (`asks` arrives sorted), never in arrival
     order (CLAUDE.md non-negotiable #7).
@@ -1284,12 +1284,20 @@ async def _collect_round(
                         turn_id,
                     )
                     continue
-                raise UnusableResumeAnswerError(
-                    f"a decision named tool call {answer.tool_call_id!r} on turn {turn_id!r}, "
-                    "but no round of this turn asked a person to decide that call (it was "
-                    "never issued, or it was issued to a peer agent). Applying or skipping it "
-                    "would leave the sender believing something was decided."
+                # C1b. An id NO earlier round issued (or one issued to a peer, which no person
+                # can decide). It resolves nothing and the turn does not wait on it, but it
+                # must NOT fail the turn either: the API boundary rejects such a decision
+                # before it is signalled (`DecideApproval`), and this is the second layer for
+                # whatever still reaches the topic. Failing here would let one bad send
+                # kill a live turn.
+                _LOG.warning(
+                    "ignored a decision for tool call %r on turn %r: no round of this turn "
+                    "asked a person to decide that call (never issued, or issued to a peer "
+                    "agent)",
+                    answer.tool_call_id,
+                    turn_id,
                 )
+                continue
             human_missing.discard(answer.tool_call_id)
             decisions[answer.tool_call_id] = answer
             continue

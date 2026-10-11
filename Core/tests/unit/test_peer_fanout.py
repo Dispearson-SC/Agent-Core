@@ -479,36 +479,44 @@ def test_a_stale_duplicate_human_answer_in_a_later_round_is_ignored(
     assert "stale or duplicate answer" in caplog.text
 
 
-def test_a_human_answer_for_a_call_never_issued_in_this_turn_is_rejected_loudly(
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_human_answer_for_a_call_never_issued_in_this_turn_is_logged_and_ignored(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """An id no round of this turn ever issued is not a double click: it names a tool call the
-    model never made. Skipping it would leave the turn waiting on nothing (the person who
-    sent it believes they decided something); the turn fails with the reason instead."""
+    """C1b. An id no round of this turn ever issued names a tool call the model never made.
+    It must not kill a live turn (a forged or buggy POST would be a denial of service): it is
+    logged loudly and skipped, and the turn goes on waiting for the real decision."""
+    caplog.set_level("WARNING", logger=turn_workflow._LOG.name)
     world = fanout.install(
         monkeypatch,
         (_approval("tc-h"), fanout.ask("tc-p")),
-        [_human("tc-never-issued")],
+        [_human("tc-never-issued"), _human("tc-h"), fanout.answer("corr-1", "one")],
     )
 
-    with pytest.raises(turn_workflow.UnusableResumeAnswerError, match="tc-never-issued"):
-        _run(world)
+    outcome = _run(world)
 
-    assert world.resume.calls == [], "nothing was resumed on the bogus decision"
+    assert outcome.result is not None and outcome.result.text == "done"
+    assert [[t for t, _ in call] for call in world.resume.calls] == [["tc-h", "tc-p"]]
+    assert "tc-never-issued" in caplog.text
+    assert "never issued" in caplog.text
 
 
-def test_a_human_answer_naming_a_peer_ask_of_this_round_is_rejected_too(
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_human_answer_naming_a_peer_ask_of_this_round_is_ignored_too(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The id was issued, but as a delegation: a person cannot decide an ask to an agent."""
+    """The id was issued, but as a delegation: a person cannot decide an ask to an agent. The
+    decision is skipped (logged), it neither resolves the peer's call nor fails the turn."""
+    caplog.set_level("WARNING", logger=turn_workflow._LOG.name)
     world = fanout.install(
         monkeypatch,
         (_approval("tc-h"), fanout.ask("tc-p")),
-        [_human("tc-p")],
+        [_human("tc-p"), _human("tc-h"), fanout.answer("corr-1", "one")],
     )
 
-    with pytest.raises(turn_workflow.UnusableResumeAnswerError, match="tc-p"):
-        _run(world)
+    outcome = _run(world)
+
+    assert outcome.result is not None and outcome.result.text == "done"
+    assert "one" in str(dict(world.resume.calls[0])["tc-p"]), "the peer's own answer resolved it"
+    assert "tc-p" in caplog.text
 
 
 def test_the_replay_shape_change_moved_the_pinned_application_version() -> None:

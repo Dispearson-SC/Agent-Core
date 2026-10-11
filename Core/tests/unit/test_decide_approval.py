@@ -140,3 +140,41 @@ def test_an_unknown_handle_records_nothing_and_signals_nothing() -> None:
 
     assert audit.calls == []
     assert signal.calls == []
+
+
+@pytest.mark.phase("F3")
+def test_a_non_pending_handle_is_refused_before_anything_is_signalled() -> None:
+    """C1b. The boundary check: a decision whose (turn, tool call) is not a live human request
+    of that turn is refused with the unknown-handle error (a 404 at the route) BEFORE the audit
+    row and BEFORE the workflow is signalled, so a bad POST can never reach a live turn."""
+    audit = FakeAuditSink()
+    signal = RecordingSignal(audit)
+    asked: list[tuple[TurnId, ToolCallId]] = []
+
+    async def pending(turn_id: TurnId, tool_call_id: ToolCallId) -> bool:
+        asked.append((turn_id, tool_call_id))
+        return False
+
+    use_case = DecideApproval(gateway=_gateway(), audit=audit, signal=signal, pending=pending)
+
+    with pytest.raises(UnknownCorrelationError):
+        asyncio.run(use_case.execute(CORRELATION, SUBJECT, approved=True))
+
+    assert asked == [(TURN, CALL)]
+    assert signal.calls == []
+    assert audit.calls == []
+
+
+@pytest.mark.phase("F3")
+def test_a_handle_that_is_a_pending_human_request_goes_through_the_boundary_check() -> None:
+    audit = FakeAuditSink()
+    signal = RecordingSignal(audit)
+
+    async def pending(turn_id: TurnId, tool_call_id: ToolCallId) -> bool:
+        return True
+
+    use_case = DecideApproval(gateway=_gateway(), audit=audit, signal=signal, pending=pending)
+
+    asyncio.run(use_case.execute(CORRELATION, SUBJECT, approved=True))
+
+    assert signal.calls == [(TURN, CALL, True, None)]
