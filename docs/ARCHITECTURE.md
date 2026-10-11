@@ -610,10 +610,13 @@ tool the agent cannot resolve locally
 
 `AgentMailbox` exists only for addressing and routing, not for waiting.
 
-The model may emit several `ask_peer` calls in one step. The workflow dispatches them all,
-waits until every one is answered (or the asker's `reply_timeout_seconds` passes, giving an
-error result for only the unanswered calls) and resumes the turn once with all results in
-`tool_call_id` order. Pydantic AI cannot continue on a subset. See DECISIONS D28.
+A round with any `ask_peer` - one, several, or mixed with a human's approval - is collected
+whole: the workflow dispatches every ask, waits until every deferred call has a result, and
+resumes the turn once, in `tool_call_id` order. Peer asks are bounded by the asker's
+`reply_timeout_seconds` (an unanswered ask becomes an error result for that call only);
+humans keep their own, longer wait (three days, then the turn expires). Pydantic AI cannot
+continue on a subset. A re-ask of the same question after a timeout reuses the mailbox's
+idempotent handle and can still deliver. See DECISIONS D28.
 
 ### A2A: shape now, wire protocol in D2
 

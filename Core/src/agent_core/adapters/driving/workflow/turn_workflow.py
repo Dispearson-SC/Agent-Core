@@ -989,20 +989,6 @@ async def _answer_the_deferred_calls(
 
 
 @DBOS.step()
-async def _step_refuse_peers(
-    turn_id: TurnId, request: TurnRequest, refusals: tuple[tuple[ToolCallId, str], ...]
-) -> TurnOutcome:
-    """Resolve the asks the gate stopped, so the turn does not wait on a question nobody was
-    asked. t-f11-42.
-
-    NOT WRAPPED IN THE UNTRUSTED DELIMITERS, deliberately. CLAUDE.md non-negotiable #10 is
-    about what a PEER wrote; these sentences were written in this file and never left the
-    process, and wrapping trusted text is how a boundary stops meaning anything.
-    """
-    return await _answer_the_deferred_calls(turn_id, request, refusals)
-
-
-@DBOS.step()
 async def _step_answer_peer(
     turn_id: TurnId,
     request: TurnRequest,
@@ -1110,18 +1096,55 @@ async def _step_read_peer_answer(
 
 
 @DBOS.step()
-async def _step_resume_peers(
-    turn_id: TurnId, request: TurnRequest, answered: tuple[tuple[ToolCallId, str], ...]
-) -> TurnOutcome:
-    """Resume ONCE with every result of a peer round: answers, refusals and timeouts alike.
+async def _step_peek_peer_answer(correlation_id: str) -> str | None:
+    """The wrapped answer already stored under a handle, or None. Read-only, no resume.
 
-    `ResumeTurn` keys its ledger on `(turn_id, tool_call_id)` and treats the batch as a
-    unit, so a replayed step re-runs nothing.
+    For a re-ask whose handle was given up on earlier (`timed_out`): the mailbox is
+    idempotent per (target, question), so the re-ask gets the same handle back, and the
+    reply may have landed - and its wake-up been skipped - before the re-ask was made.
     """
-    return await _answer_the_deferred_calls(turn_id, request, answered)
+    return await _require_peer_seat().mailbox.read_answer(correlation_id)
 
 
-async def _collect_peer_round(
+@DBOS.step()
+async def _step_resume_round(
+    turn_id: TurnId,
+    request: TurnRequest,
+    order: tuple[ToolCallId, ...],
+    peer_results: tuple[tuple[ToolCallId, str], ...],
+    decisions: tuple[HumanAnswer, ...],
+) -> TurnOutcome:
+    """Resume ONCE with every result of a round: peer answers, refusals and timeouts (all
+    externally executed) and the humans' decisions.
+
+    `order` is the round's `tool_call_id` order, so the batch never follows arrival order
+    (CLAUDE.md non-negotiable #7). `ResumeTurn` keys its ledger on `(turn_id,
+    tool_call_id)` and treats the batch as a unit, so a replayed step re-runs nothing.
+    """
+    peer = dict(peer_results)
+    human = {decision.tool_call_id: decision for decision in decisions}
+    resolved: list[ResolvedTool] = []
+    for tool_call_id in order:
+        if tool_call_id in peer:
+            # The shape `_answer_the_deferred_calls` documents: approved WITH a payload.
+            resolved.append(ResolvedTool(tool_call_id, approved=True, payload=peer[tool_call_id]))
+        else:
+            decision = human[tool_call_id]
+            # The human's note IS the tool result, passed through unnarrowed (see
+            # `_step_resume`).
+            resolved.append(
+                ResolvedTool(tool_call_id, approved=decision.approved, payload=decision.note)
+            )
+    return await _require_resume_turn().execute(
+        turn_id,
+        request.session,
+        request.profile_id,
+        tuple(resolved),
+        caller=request.caller,
+    )
+
+
+async def _collect_round(
     turn_id: TurnId,
     request: TurnRequest,
     asks: tuple[PendingRequest, ...],
@@ -1129,68 +1152,129 @@ async def _collect_peer_round(
     peer_calls: dict[str, ToolCallId],
     timed_out: set[str],
 ) -> TurnOutcome:
-    """Wait for EVERY ask of one model step, then resume the turn once..
+    """Wait for EVERY result of one model step, then resume the turn once.
 
     Called from the workflow body: it makes no decision that is not a function of step
-    results and the recorded `recv_async` values, so a replay takes the same path.
+    results and the recorded `recv_async` values (the clock and the reply timeout are
+    steps), so a replay takes the same path.
 
     WHY ONE RESUME. Pydantic AI continues a run that stopped on N deferred calls only when
-    given results for all N, so resuming per answer fails the turn on the first reply of
-    a two-ask step. All asks are dispatched before the wait (the peers run their turns
-    concurrently on their own queues), so the round takes as long as the SLOWEST peer.
+    given results for all N, so resuming per answer fails the turn on the first reply of a
+    two-call step. All asks are dispatched before the wait (the peers run their turns
+    concurrently on their own queues), so the round takes as long as the SLOWEST call.
 
-    DEADLINE. One for the round - the asker's `reply_timeout_seconds` counted from the
-    moment the asks left - and an ask unanswered at it is resolved with an error text for
-    that call only; the answers that did arrive are still delivered. The remaining time is
-    recomputed from the recorded clock after every wake. A late reply from a timed-out ask
-    is remembered in `timed_out` so a later wait skips it instead of resuming on it.
+    TWO DEADLINES, ONE LOOP
+        Peer asks: the asker's `reply_timeout_seconds` counted from the moment the asks
+        left; an ask unanswered at it is resolved with an error text for that call only
+        and the answers that did arrive are still delivered. Humans (approval, evidence,
+        and any kind nobody can answer): `THREE_DAYS` from the same moment, and a person
+        who has not decided by then expires the TURN, as the per-answer wait always did.
+        Each wait is bounded by the nearest live deadline; the remaining time is
+        recomputed from the recorded clock after every wake.
+
+    A late reply from a timed-out ask is remembered in `timed_out` so a later wait skips
+    it instead of resuming on it, UNLESS the same question is asked again: see the re-ask
+    block below.
 
     Results are returned in `tool_call_id` order (`asks` arrives sorted), never in arrival
     order (CLAUDE.md non-negotiable #7).
     """
-    results: dict[ToolCallId, str] = dict(dispatch.refusals)
+    peer_results: dict[ToolCallId, str] = dict(dispatch.refusals)
+    decisions: dict[ToolCallId, HumanAnswer] = {}
     awaiting: dict[str, ToolCallId] = {corr: tcid for corr, tcid in dispatch.handles}
+    human_missing = {ask.tool_call_id for ask in asks if ask.kind is not PendingKind.DELEGATION}
     targets = {ask.tool_call_id: str(ask.arguments.get(_ASK_TARGET, "")) for ask in asks}
 
-    if awaiting:
-        seconds = await _step_peer_reply_timeout(request)
-        deadline = await _step_peer_clock() + seconds
-        while awaiting:
-            remaining = deadline - await _step_peer_clock()
-            answer = (
-                await DBOS.recv_async(RESUME_TOPIC, timeout_seconds=remaining)
-                if remaining > 0
-                else None
-            )
-            if answer is None:
-                for corr, tool_call_id in awaiting.items():
-                    timed_out.add(corr)
-                    results[tool_call_id] = _PEER_TIMED_OUT.format(
-                        target=targets[tool_call_id], seconds=seconds
-                    )
-                break
-            if not isinstance(answer, PeerAnswer):
-                raise UnusableResumeAnswerError(
-                    f"the durable wait woke with a {type(answer).__name__} while the turn "
-                    "was collecting peer answers; only a PeerAnswer can resolve this round."
-                )
-            if answer.correlation_id in timed_out or (
-                answer.correlation_id in peer_calls and answer.correlation_id not in awaiting
-            ):
-                continue  # a late reply to an ask already given up on, or a duplicate wake
-            asked_id = awaiting.get(answer.correlation_id)
-            if asked_id is None:
-                raise UnusableResumeAnswerError(
-                    f"the durable wait woke on peer handle {answer.correlation_id!r} and this "
-                    "turn never asked under it. Resolving it would name a tool_call_id the "
-                    "model never issued, which Pydantic AI drops in silence."
-                )
-            del awaiting[answer.correlation_id]
-            _, wrapped = await _step_read_peer_answer(turn_id, answer, asked_id)
-            results[asked_id] = wrapped
+    # RE-ASK AFTER A TIMEOUT. `AgentMailbox.ask` is idempotent per (target, question) and
+    # the port has no verb to close or version a row, so a word-for-word re-ask gets the
+    # handle it already gave out. That handle is no longer "given up on": its reply, late
+    # or not, is exactly what this ask is waiting for. The reply may already be stored (its
+    # wake-up consumed and skipped by an earlier round's wait), so it is read now rather
+    # than waited for.
+    for corr in [c for c in awaiting if c in timed_out]:
+        timed_out.discard(corr)
+        stored = await _step_peek_peer_answer(corr)
+        if stored is not None:
+            peer_results[awaiting.pop(corr)] = stored
 
-    return await _step_resume_peers(
-        turn_id, request, tuple((ask.tool_call_id, results[ask.tool_call_id]) for ask in asks)
+    seconds = 0
+    peer_deadline = human_deadline = 0.0
+    if awaiting or human_missing:
+        seconds = await _step_peer_reply_timeout(request) if awaiting else 0
+        started = await _step_peer_clock()
+        peer_deadline = started + seconds
+        human_deadline = started + THREE_DAYS
+
+    while awaiting or human_missing:
+        deadlines = ([peer_deadline] if awaiting else []) + (
+            [human_deadline] if human_missing else []
+        )
+        nearest = min(deadlines)
+        remaining = nearest - await _step_peer_clock()
+        answer = (
+            await DBOS.recv_async(RESUME_TOPIC, timeout_seconds=remaining)
+            if remaining > 0
+            else None
+        )
+        if answer is None:
+            now = await _step_peer_clock()
+            if human_missing and (human_deadline <= now or human_deadline == nearest):
+                return await _step_expire(turn_id)
+            for corr, tool_call_id in awaiting.items():
+                timed_out.add(corr)
+                peer_results[tool_call_id] = _PEER_TIMED_OUT.format(
+                    target=targets[tool_call_id], seconds=seconds
+                )
+            awaiting.clear()
+            continue
+
+        if isinstance(answer, HumanAnswer):
+            if answer.turn_id != turn_id:
+                raise UnusableResumeAnswerError(
+                    f"an answer for turn {answer.turn_id!r} was delivered to turn "
+                    f"{turn_id!r}. Applying it would resume this turn on a decision given "
+                    "about another one."
+                )
+            if answer.tool_call_id in decisions:
+                continue  # a double-click or a retried POST: the first decision stands
+            if answer.tool_call_id not in human_missing:
+                raise UnusableResumeAnswerError(
+                    f"a decision arrived for tool call {answer.tool_call_id!r} and this "
+                    "round is not waiting on a person for it. Resolving it would name a "
+                    "tool_call_id the model never issued, which Pydantic AI drops in "
+                    "silence."
+                )
+            human_missing.discard(answer.tool_call_id)
+            decisions[answer.tool_call_id] = answer
+            continue
+
+        if not isinstance(answer, PeerAnswer):
+            raise UnusableResumeAnswerError(
+                f"the durable wait woke with a {type(answer).__name__} while the turn "
+                "was collecting results; only a HumanAnswer or a PeerAnswer can resolve "
+                "this round."
+            )
+        if answer.correlation_id not in awaiting and (
+            answer.correlation_id in timed_out or answer.correlation_id in peer_calls
+        ):
+            continue  # a late reply to an ask already given up on, or a duplicate wake
+        asked_id = awaiting.get(answer.correlation_id)
+        if asked_id is None:
+            raise UnusableResumeAnswerError(
+                f"the durable wait woke on peer handle {answer.correlation_id!r} and this "
+                "turn never asked under it. Resolving it would name a tool_call_id the "
+                "model never issued, which Pydantic AI drops in silence."
+            )
+        del awaiting[answer.correlation_id]
+        _, wrapped = await _step_read_peer_answer(turn_id, answer, asked_id)
+        peer_results[asked_id] = wrapped
+
+    return await _step_resume_round(
+        turn_id,
+        request,
+        tuple(ask.tool_call_id for ask in asks),
+        tuple(peer_results.items()),
+        tuple(decisions.values()),
     )
 
 
@@ -1518,25 +1602,19 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
         dispatch = await _step_ask_peers(turn_id, request, _for_a_peer(ordered))
         peer_calls.update(dispatch.handles)
 
-        # Several asks in one model step (and nothing else pending): collect EVERY answer,
-        # then resume once. Pydantic AI will not continue on a subset of its deferred calls.
-        # A single ask, or a round that mixes in a human's request, keeps the path below.
-        if len(ordered) > 1 and len(_for_a_peer(ordered)) == len(ordered):
-            outcome = await _collect_peer_round(
+        # Any round that asked a peer (one ask, several, or mixed with a human's request):
+        # collect EVERY result - peer answers, refusals, timeouts and the humans'
+        # decisions - then resume once. Pydantic AI will not continue on a subset of its
+        # deferred calls, and a peer wait is bounded by the asker's reply timeout.
+        # A round with no peer ask keeps the per-answer wait below.
+        if _for_a_peer(ordered):
+            outcome = await _collect_round(
                 turn_id, request, ordered, dispatch, peer_calls, timed_out_peers
             )
             continue
 
-        # A refused ask has no answer coming, so it is resolved NOW rather than waited on.
-        # Entering the wait for it would spend THREE_DAYS on a question that was never
-        # asked and then report that nobody replied. The loop then re-reads the outcome:
-        # an ask that WAS allowed in the same round is still pending, and `ask` is
-        # idempotent per (turn_id, target, question), so the next round hands back the
-        # handle this one already minted rather than asking a second time.
-        if dispatch.refusals:
-            outcome = await _step_refuse_peers(turn_id, request, dispatch.refusals)
-            continue
-
+        # (A refused ask is resolved inside `_collect_round` with the round's other results:
+        # it has no answer coming, so it never enters a wait.)
         # The durable wait, entered whether or not anybody was asked: a peer ask suspends
         # the turn exactly as an approval does and its answer arrives on this same topic.
         # Explicitly THREE_DAYS - the 60-second default is the trap, and a peer may itself

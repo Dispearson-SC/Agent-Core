@@ -513,7 +513,7 @@ class _RecordingMailbox:
 
 
 class _InBandResume:
-    """`ResumeTurn` as `_step_refuse_peers` reaches it, recording what it was handed.
+    """`ResumeTurn` as `_step_resume_round` reaches it, recording what it was handed.
 
     `_step_resume` is swapped out by `_install`, so this is resolved on ONE path only: a
     peer ask the gate refused, resolved in-band rather than waited on. It returns the same
@@ -589,6 +589,7 @@ def _install(
     mint: Callable[[], TurnId],
     resumes_to: Callable[[TurnId], TurnOutcome],
     suspends_to: Callable[[TurnId], TurnOutcome] = _suspended,
+    wakes: Sequence[Callable[[_RecordingMailbox], object]] = (),
 ) -> _Wiring:
     """Replace every step and the durable receive with a recorder over `log`.
 
@@ -602,7 +603,7 @@ def _install(
         stub. That makes the seats mandatory - `_require_peer_seat` raises
         `TurnWorkflowNotWiredError` on the first turn that genuinely asks one, which is
         correct and loud and is exactly what this file used to die of. So a mailbox and the
-        two profiles are bound here, and `resume_turn` with them: `_step_refuse_peers`
+        two profiles are bound here, and `resume_turn` with them: `_step_resume_round`
         resolves a refused ask through the real `ResumeTurn` seat, and that seat has no
         silent default either.
     """
@@ -636,10 +637,20 @@ def _install(
             lambda: TurnOutcome(turn_id=turn_id, result=TurnResult(text="expired")),
         )
 
+    pending_wakes = list(wakes)
+    mailbox = _RecordingMailbox()
+
     class _DurableReceive:
         @staticmethod
         async def recv_async(topic: str | None = None, timeout_seconds: float = 60) -> Any:
-            return await log.call("recv_async", f"{topic}:{timeout_seconds}", lambda: ("answer",))
+            # `wakes` script what a round that COLLECTS (peer asks present) is woken by;
+            # the default is the opaque payload the per-answer wait never looks inside.
+            wake = pending_wakes.pop(0) if pending_wakes else None
+            return await log.call(
+                "recv_async",
+                f"{topic}:{timeout_seconds}",
+                (lambda: wake(mailbox)) if wake is not None else (lambda: ("answer",)),
+            )
 
     monkeypatch.setattr(turn_workflow, "_step_new_turn_id", new_turn_id)
     monkeypatch.setattr(turn_workflow, "_step_start", start)
@@ -661,7 +672,6 @@ def _install(
     #
     # `start_turn` is never resolved - `_step_start` is swapped above and it is the only
     # step that reaches for it - so there is no use case to build here and none is faked.
-    mailbox = _RecordingMailbox()
     resume_turn = _InBandResume(resumes_to)
     monkeypatch.setattr(
         turn_workflow,
@@ -762,6 +772,24 @@ def test_a_turn_that_never_stops_asking_is_abandoned_rather_than_looping(
     assert outcome.result is not None
 
 
+def _the_human_approves(tool_call_id: str) -> Callable[[_RecordingMailbox], object]:
+    def wake(mailbox: _RecordingMailbox) -> object:
+        del mailbox
+        return turn_workflow.HumanAnswer(
+            turn_id=TurnId("turn-1"), tool_call_id=ToolCallId(tool_call_id), approved=True
+        )
+
+    return wake
+
+
+def _the_peer_answers(correlation_id: str) -> Callable[[_RecordingMailbox], object]:
+    def wake(mailbox: _RecordingMailbox) -> object:
+        mailbox._answers.setdefault(correlation_id, "it is Tuesday")  # noqa: SLF001
+        return turn_workflow.PeerAnswer(turn_id=TurnId("turn-1"), correlation_id=correlation_id)
+
+    return wake
+
+
 @pytest.mark.phase("F3")
 def test_a_peer_ask_is_never_put_in_front_of_a_human(
     monkeypatch: pytest.MonkeyPatch,
@@ -789,7 +817,7 @@ def test_a_peer_ask_is_never_put_in_front_of_a_human(
         `arguments={}`, which `_step_ask_peers` refuses as malformed rather than coercing -
         an empty question asked of "another agent" bills a peer turn for a question nobody
         can answer - and a refused ask has no answer coming, so the body resolves it IN
-        BAND through `_step_refuse_peers` instead of entering the durable wait for it.
+        BAND (in the collected round's single resume) instead of entering a wait for it.
 
         So this test no longer reaches `recv_async` at all, and asserting that it does
         would be asserting the opposite of the behaviour that keeps a turn from spending
@@ -805,6 +833,7 @@ def test_a_peer_ask_is_never_put_in_front_of_a_human(
         mint=_minter(),
         resumes_to=_finished,
         suspends_to=_suspended_on_a_peer_and_a_human,
+        wakes=(_the_human_approves("tc-a"), _the_peer_answers("corr-1")),
     )
     outcome = asyncio.run(body(_request()))
 
@@ -821,12 +850,24 @@ def test_a_peer_ask_is_never_put_in_front_of_a_human(
         "must not drop the ask itself: 'tc-peer' names a target and a question, and the "
         "turn it belongs to suspends until another agent answers it."
     )
+    # D28: a round that mixes a person's decision with peer asks is collected whole and
+    # resumed ONCE, because Pydantic AI continues a run only when handed results for ALL its
+    # deferred calls. The refused ask 'tc-other' is resolved in that same batch - it never
+    # enters a wait (nothing will answer it) but it must not resume the turn alone either.
     resolved = [str(resolution.tool_call_id) for resolution in wiring.resume.resolutions]
-    assert resolved == ["tc-other"], (
-        f"the refused ask resolved {resolved}. 'tc-other' is a DELEGATION with no target "
-        "and no question, so nothing will ever answer it - a turn that entered the durable "
-        "wait for it would sit there for THREE_DAYS and then report that nobody replied, "
-        "to a question that was never asked."
+    assert resolved == ["tc-a", "tc-other", "tc-peer"], (
+        f"the round resumed with {resolved}. Every deferred call of the model step - the "
+        "human's decision, the refused ask and the peer's answer - must arrive in ONE "
+        "resume, in tool_call_id order."
+    )
+    assert [r.approved for r in wiring.resume.resolutions] == [True, True, True]
+    assert wiring.resume.resolutions[2].payload == wrap_peer_answer("it is Tuesday")
+    recv_waits = [label for name, label in log.decisions if name == "recv_async"]
+    assert len(recv_waits) == 2 and not any(
+        label.endswith(f":{turn_workflow.THREE_DAYS}") for label in recv_waits[:1]
+    ), (
+        f"the collecting waits ran with {recv_waits}. The first is bounded by the nearest "
+        "deadline (the asker's reply timeout), not by the three-day human wait."
     )
     assert outcome.result is not None
 

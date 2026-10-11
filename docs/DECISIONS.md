@@ -844,7 +844,7 @@ its own `created_at`-leading index, or it must run per session. That belongs to 
 owns the sweep; the claim in the docstring is wrong today and is recorded here so the sweep
 is not written against it.
 
-## D28 · Several `ask_peer` calls in one model step: collect every answer, resume once
+## D28 · Deferred calls of one model step: collect every result, resume once
 
 **Defect.** Pydantic AI continues a run that stopped on N deferred calls only when it is
 handed results for all N (`UserError: Tool call results need to be provided for all
@@ -852,22 +852,32 @@ deferred tool calls`). The workflow woke on each `PeerAnswer` and resumed with t
 answer, so the first reply to a two-ask step failed the turn. A vertical masked it in the
 tool (one `ask_peer` per step); the cause is in the workflow.
 
-**Decision.** When a round's pending set is more than one call and every call is a
-delegation (`PendingKind.DELEGATION`), the workflow body collects results (peer answers,
-gate refusals, timeouts) and runs a single `_step_resume_peers` once all are in, in
-`tool_call_id` order. All asks are dispatched before the wait, so the peers run
-concurrently and the round costs the slowest peer.
+**Decision.** When a round has any peer ask (`PendingKind.DELEGATION`) - one ask, several, or
+mixed with a human's approval or evidence request - the workflow collects every result and
+runs a single `_step_resume_round` once all are in, in `tool_call_id` order. Results are
+peer answers, gate refusals, peer timeouts and the humans' decisions (`HumanAnswer`). All
+asks are dispatched before the wait, so the peers run concurrently and the round costs the
+slowest call.
 
-- **Deadline.** The asking profile's `PeerPolicy.reply_timeout_seconds`, counted from the
-  moment the asks left. An ask still unanswered at the deadline gets an error text for that
-  call only; answers that arrived are delivered. Time comes from a recorded step
-  (`_step_peer_clock`), so replay recomputes the same remaining time.
+- **Two deadlines, one loop.** Peer asks: the asking profile's
+  `PeerPolicy.reply_timeout_seconds`, counted from the moment the asks left; an ask
+  unanswered at the deadline gets an error text for that call only and the answers that
+  arrived are delivered. Humans: `THREE_DAYS` from the same moment, unchanged in meaning -
+  the peer timeout is never applied to the person, and a person who has not decided by
+  then expires the turn (nothing is resumed on a partial set). Each wait is bounded by the
+  nearest live deadline; time comes from a recorded step (`_step_peer_clock`), so replay
+  recomputes the same remaining time.
 - **Late replies.** A reply to a timed-out ask is skipped by later waits (its call was
   already answered), instead of resuming the turn on it.
+- **Re-ask after a timeout.** The mailbox port is idempotent per `(target, question)` and
+  has no verb to close or version a row, so a word-for-word re-ask in a later round gets
+  the SAME correlation id. Keying the id by round would need a port change; instead the
+  re-dispatched handle leaves `timed_out` and its stored answer, if the reply already
+  landed, is read at once (`_step_peek_peer_answer`); otherwise the reply (late or fresh)
+  is accepted by the new round. Nothing marks a handle dead for good.
 - **Unchanged.** Hop gate per ask, mailbox idempotency, answer wrapping at one place, audit.
 
-**Deliberately not changed (conservative scope).** A single ask, and a round that mixes a
-human's request (approval or evidence) with peer asks, keep the previous per-answer path
-and its 3-day wait. The mixed case has the same partial-resume defect; fixing it means
-collecting human answers too and is a separate decision. The single-ask path therefore does
-not honour `reply_timeout_seconds` yet, which `PeerPolicy` documents.
+**Still on the per-answer path.** A round with no peer ask (one or several human requests)
+keeps the previous wait: one `THREE_DAYS` wait per answer. Several human-only requests in
+one step have the same partial-resume defect and are a separate decision. Timed-out ask
+rows stay open in the mailbox (no close verb).

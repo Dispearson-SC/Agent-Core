@@ -121,12 +121,14 @@ class _Mailbox:
 class _Resume:
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, object], ...]] = []
+        self.approvals: list[tuple[tuple[str, bool], ...]] = []
         self.then: list[TurnOutcome] = []  # outcomes to return before finishing
 
     async def execute(
         self, turn_id: TurnId, session: Any, profile_id: str, resolutions: Any, *, caller: Any
     ) -> TurnOutcome:
         self.calls.append(tuple((str(r.tool_call_id), r.payload) for r in resolutions))
+        self.approvals.append(tuple((str(r.tool_call_id), r.approved) for r in resolutions))
         if self.then:
             return self.then.pop(0)
         return TurnOutcome(turn_id=turn_id, result=TurnResult(text="done"))
@@ -165,6 +167,9 @@ def _install(
     async def clock() -> float:
         return world.clock[0]
 
+    async def expire(turn_id: TurnId) -> TurnOutcome:
+        return TurnOutcome(turn_id=turn_id, result=TurnResult(text="expired"))
+
     class _Dbos:
         @staticmethod
         async def recv_async(topic: str | None = None, timeout_seconds: float = 60) -> Any:
@@ -177,6 +182,7 @@ def _install(
     monkeypatch.setattr(turn_workflow, "_step_publish", noop)
     monkeypatch.setattr(turn_workflow, "_step_deliver", noop)
     monkeypatch.setattr(turn_workflow, "_step_compact", noop)
+    monkeypatch.setattr(turn_workflow, "_step_expire", expire)
     monkeypatch.setattr(turn_workflow, "_step_peer_clock", clock)
     monkeypatch.setattr(turn_workflow, "DBOS", _Dbos)
     monkeypatch.setattr(
@@ -397,3 +403,150 @@ def test_a_late_answer_from_a_timed_out_ask_does_not_resume_the_next_round(
         ["tc-3"],
     ]
     assert world.resume.calls[1][0][1] == wrap_peer_answer("second round")
+
+
+# --- a single ask uses the same bounded wait ------------------------------------------------
+
+
+def test_a_single_ask_is_bounded_by_the_reply_timeout_and_times_out_to_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _install(monkeypatch, (_ask("tc-1"),), [_nobody_answers(REPLY_TIMEOUT)])
+
+    outcome = _run(world)
+
+    assert world.recv_timeouts == [REPLY_TIMEOUT], "not THREE_DAYS: PeerPolicy documents this"
+    assert outcome.result is not None and outcome.result.text == "done"
+    ((tool, payload),) = world.resume.calls[0]
+    assert tool == "tc-1"
+    assert "did not answer" in str(payload)
+
+
+def test_a_single_ask_that_is_answered_resumes_with_the_wrapped_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _install(monkeypatch, (_ask("tc-1"),), [_answer("corr-1", "hello")])
+
+    _run(world)
+
+    assert world.resume.calls == [(("tc-1", wrap_peer_answer("hello")),)]
+
+
+# --- a round that mixes a human's request with peer asks ------------------------------------
+
+
+def _approval(tool_call_id: str) -> PendingRequest:
+    return PendingRequest(
+        kind=PendingKind.APPROVAL,
+        tool_call_id=ToolCallId(tool_call_id),
+        tool_name="freeze_account",
+        arguments={},
+        reason="a human must agree",
+    )
+
+
+def _human(tool_call_id: str, *, approved: bool = True, note: str | None = None) -> Any:
+    def run(world: _World) -> Any:
+        del world
+        return turn_workflow.HumanAnswer(
+            turn_id=TurnId("turn-1"),
+            tool_call_id=ToolCallId(tool_call_id),
+            approved=approved,
+            note=note,
+        )
+
+    return run
+
+
+def test_a_mixed_round_collects_the_decision_and_the_answer_and_resumes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _install(
+        monkeypatch,
+        (_ask("tc-p"), _approval("tc-h")),
+        [_human("tc-h", approved=False, note="no thanks"), _answer("corr-1", "peer says")],
+    )
+
+    outcome = _run(world)
+
+    assert outcome.result is not None
+    assert len(world.resume.calls) == 1, "one resume for the whole step"
+    assert world.resume.calls[0] == (
+        ("tc-h", "no thanks"),
+        ("tc-p", wrap_peer_answer("peer says")),
+    )
+    assert world.resume.approvals[0] == (("tc-h", False), ("tc-p", True))
+
+
+def test_in_a_mixed_round_the_peer_times_out_but_the_human_keeps_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _install(
+        monkeypatch,
+        (_ask("tc-p"), _approval("tc-h")),
+        [_nobody_answers(REPLY_TIMEOUT), _human("tc-h")],
+    )
+
+    _run(world)
+
+    # first wait: the nearest deadline (the peer's). Second: the human's, three days from the start.
+    assert world.recv_timeouts == [REPLY_TIMEOUT, turn_workflow.THREE_DAYS - REPLY_TIMEOUT]
+    ((first_id, first_payload), (second_id, _)) = world.resume.calls[0]
+    assert first_id == "tc-h" and first_payload is None
+    assert second_id == "tc-p"
+    assert len(world.resume.calls) == 1
+
+
+def test_in_a_mixed_round_an_unanswered_human_expires_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _install(
+        monkeypatch,
+        (_ask("tc-p"), _approval("tc-h")),
+        [_answer("corr-1", "ok"), _nobody_answers(turn_workflow.THREE_DAYS)],
+    )
+
+    outcome = _run(world)
+
+    assert world.resume.calls == [], "no partial resume: the human never decided"
+    assert outcome.result is not None and outcome.result.text == "expired"
+
+
+# --- re-asking after a timeout ---------------------------------------------------------------
+
+
+def test_a_word_for_word_re_ask_after_a_timeout_can_deliver_its_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mailbox is idempotent per (target, question), so the re-ask gets the SAME handle."""
+    world = _install(
+        monkeypatch,
+        (_ask("tc-1"),),
+        [
+            _nobody_answers(REPLY_TIMEOUT),  # round 1: times out
+            _answer("corr-1", "second time lucky"),  # round 2: the same question, same handle
+        ],
+    )
+    world.resume.then = [TurnOutcome(turn_id=TurnId("turn-1"), pending=(_ask("tc-1"),))]
+
+    outcome = _run(world)
+
+    assert outcome.result is not None
+    assert world.resume.calls[1] == (("tc-1", wrap_peer_answer("second time lucky")),)
+
+
+def test_a_re_ask_whose_reply_already_sits_in_the_mailbox_does_not_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def late_reply_lands(world: _World) -> Any:
+        world.clock[0] += REPLY_TIMEOUT
+        world.mailbox.answers["corr-1"] = "arrived after the deadline"
+        return None
+
+    world = _install(monkeypatch, (_ask("tc-1"),), [late_reply_lands])
+    world.resume.then = [TurnOutcome(turn_id=TurnId("turn-1"), pending=(_ask("tc-1"),))]
+
+    _run(world)
+
+    assert world.recv_timeouts == [REPLY_TIMEOUT], "round 2 read the stored answer, no new wait"
+    assert world.resume.calls[1] == (("tc-1", wrap_peer_answer("arrived after the deadline")),)
