@@ -67,8 +67,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -95,8 +97,10 @@ PRESENCE_RECORDED = "<present, value not recorded>"
 # Looked up per tool, so a tool nobody has opted in stores no arguments at all - see
 # `_redact`, which says that out loud rather than dropping them in silence.
 #
-# A vertical supplies its own map through the constructor, and the shipped verticals are
-# listed here; either way no file under domain/, application/ or ports/ changes to add one.
+# A tools package contributes its own entries through module-level `AUDIT_ALLOW` /
+# `AUDIT_PRESENCE_ONLY` next to its `build_toolset` (see `collect_audit_policy`); the
+# entries below are the built-ins and stay valid. Either way no file under domain/,
+# application/ or ports/ changes to add one, and a vertical no longer edits this file.
 # The entries below cover exactly the tools `composition.TOOL_PACKAGES` serves - the
 # delivery package and the fraud package - and each says why the operator needs the value.
 ARGUMENT_ALLOWLIST: Mapping[str, frozenset[str]] = {
@@ -175,6 +179,55 @@ ARGUMENT_PRESENCE_ONLY: Mapping[str, frozenset[str]] = {
 }
 
 _LOG = logging.getLogger(__name__)
+
+
+def _package_policy(module_name: str, attribute: str) -> dict[str, frozenset[str]]:
+    module = sys.modules.get(module_name)
+    declared = getattr(module, attribute, None)
+    if declared is None:
+        return {}
+    if not isinstance(declared, Mapping) or not all(
+        isinstance(tool, str) and isinstance(fields, (set, frozenset))
+        for tool, fields in declared.items()
+    ):
+        raise TypeError(
+            f"{module_name}.{attribute} must be a mapping of tool name to a set/frozenset "
+            "of argument names"
+        )
+    return {tool: frozenset(fields) for tool, fields in declared.items()}
+
+
+def collect_audit_policy(
+    packages: Mapping[str, Callable[..., object]],
+) -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]]]:
+    """The audit argument policy: the shipped constants plus what each package contributes.
+
+    A tools package declares, in the module that holds its `build_toolset`, an optional
+    `AUDIT_ALLOW` (tool name -> argument names stored BY VALUE) and an optional
+    `AUDIT_PRESENCE_ONLY` (stored by presence). The module is found from the registered
+    builder (`builder.__module__`), so only packages somebody registered by hand in
+    `composition.TOOL_PACKAGES` are read - there is no discovery, which is the security
+    property of that registry.
+
+    A package may not change a tool another source already decided: a different set for the
+    same tool name raises `ValueError`, because silently widening what an existing tool
+    records would be a data-exposure path. An identical repeat is accepted. Returns
+    `(by_value, by_presence)`.
+    """
+    allow = dict(ARGUMENT_ALLOWLIST)
+    presence = dict(ARGUMENT_PRESENCE_ONLY)
+    for target, attribute in ((allow, "AUDIT_ALLOW"), (presence, "AUDIT_PRESENCE_ONLY")):
+        for package, builder in packages.items():
+            contributed = _package_policy(getattr(builder, "__module__", ""), attribute)
+            for tool, fields in contributed.items():
+                if tool in target and target[tool] != fields:
+                    raise ValueError(
+                        f"package {package!r} declares {attribute}[{tool!r}] but that tool "
+                        "already has a different audit decision"
+                    )
+                target[tool] = fields
+    return allow, presence
+
 
 # `reason` is migration 0022's column (audit_reason_migration.py, t-f11-07). It is the
 # SENTENCE the winning rule gave - what the model is handed as the tool result on DENY and
@@ -389,20 +442,25 @@ class PgAuditSink:
         """
         allowed = self._argument_allowlist.get(tool_name, frozenset())
         presence = self._argument_presence_only.get(tool_name, frozenset())
-        if not allowed and not presence and tool_name not in self._undecided_tools_warned:
+        # DECIDED IS "HAS AN ENTRY", NOT "THE ENTRY IS NON-EMPTY": a tool that takes no
+        # model-supplied argument is decided with an empty set, and warning about it every
+        # time would bury the warning that matters.
+        decided = tool_name in self._argument_allowlist or tool_name in self._argument_presence_only
+        if not decided and tool_name not in self._undecided_tools_warned:
             self._undecided_tools_warned.add(tool_name)
             _LOG.warning(
                 "No audit argument decision for tool %r: every argument of this call is "
                 "dropped and its trail will read 'arguments: none recorded'. Add the tool "
                 "to ARGUMENT_ALLOWLIST (by value) or ARGUMENT_PRESENCE_ONLY (by presence) "
-                "in %s.",
+                "in %s, or declare AUDIT_ALLOW / AUDIT_PRESENCE_ONLY in the tools package.",
                 tool_name,
                 __name__,
             )
         redacted: dict[str, object] = {}
         for name, value in arguments.items():
             if name in allowed:
-                redacted[name] = value
+                # Typed tool params (a `date`) must survive the jsonb dump.
+                redacted[name] = value.isoformat() if isinstance(value, (date, datetime)) else value
             elif name in presence:
                 redacted[name] = PRESENCE_RECORDED
         return redacted

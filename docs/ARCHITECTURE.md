@@ -431,6 +431,16 @@ class AgentProfile:
 `domain/`, `application/` or `ports/`. Defend this with a test that fails if someone
 breaks it.
 
+**What a tools package may contribute without touching Core.** Registered by hand in
+`composition.TOOL_PACKAGES` (no auto-discovery), the module that holds `build_toolset` may
+declare:
+
+- `AUDIT_ALLOW` / `AUDIT_PRESENCE_ONLY`: `{tool_name: frozenset({argument, ...})}`. Arguments
+  stored by value / by presence in the audit trail; an empty set is a decision ("this tool
+  takes nothing worth recording"). A package may not change a tool that already has a
+  different decision (`ValueError` at startup). Everything else is dropped, and an
+  undecided tool is logged once.
+
 ---
 
 ## 9. Known risks

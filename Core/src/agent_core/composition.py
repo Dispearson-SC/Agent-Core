@@ -180,7 +180,10 @@ from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
 from agent_core.adapters.driven.persistence_pg.audit_read_repository import (
     PgAuditReadRepository,
 )
-from agent_core.adapters.driven.persistence_pg.audit_repository import PgAuditSink
+from agent_core.adapters.driven.persistence_pg.audit_repository import (
+    PgAuditSink,
+    collect_audit_policy,
+)
 from agent_core.adapters.driven.persistence_pg.conversation_repository import (
     PgConversationStore,
 )
@@ -1534,7 +1537,14 @@ def build_container(
     policy = PgToolPolicy(PoolConnections(domain_pool))
     # PoolConnections(audit_pool), never PoolConnections(domain_pool). This one line
     # is the whole of non-negotiable #6 in practice.
-    audit = PgAuditSink(PoolConnections(audit_pool))
+    # The argument policy is the shipped built-ins plus what each REGISTERED tools package
+    # declares (`AUDIT_ALLOW` / `AUDIT_PRESENCE_ONLY`), so a vertical never edits the sink.
+    audit_allow, audit_presence = collect_audit_policy(TOOL_PACKAGES)
+    audit = PgAuditSink(
+        PoolConnections(audit_pool),
+        argument_allowlist=audit_allow,
+        argument_presence_only=audit_presence,
+    )
     # t-f11-18. The READ side of the same trail, through the SAME pool - never
     # `PoolConnections(domain_pool)`. The sink is on its own pool so an audit write
     # survives the rollback of the turn it describes (non-negotiable #6); a reader that
