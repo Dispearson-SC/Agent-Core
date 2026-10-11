@@ -147,6 +147,9 @@ def _install(
     monkeypatch: pytest.MonkeyPatch,
     pending: tuple[PendingRequest, ...],
     script: list[Callable[[_World], Any]],
+    *,
+    start_step: Callable[[TurnId, TurnRequest], Any] | None = None,
+    resume_seat: Any | None = None,
 ) -> _World:
     """Bind the fakes. Each script item runs when the body waits: it may answer in the
     mailbox, advance the clock, and returns what `recv_async` hands back."""
@@ -178,7 +181,7 @@ def _install(
 
     monkeypatch.setattr(turn_workflow, "_step_drain_pending", drain)
     monkeypatch.setattr(turn_workflow, "_step_new_turn_id", new_turn_id)
-    monkeypatch.setattr(turn_workflow, "_step_start", start)
+    monkeypatch.setattr(turn_workflow, "_step_start", start_step or start)
     monkeypatch.setattr(turn_workflow, "_step_publish", noop)
     monkeypatch.setattr(turn_workflow, "_step_deliver", noop)
     monkeypatch.setattr(turn_workflow, "_step_compact", noop)
@@ -191,7 +194,7 @@ def _install(
         turn_workflow.TurnWorkflowDependencies(
             start_turn=cast("Any", None),
             channels=ChannelRegistry(()),
-            resume_turn=cast("Any", world.resume),
+            resume_turn=cast("Any", resume_seat or world.resume),
             peers=turn_workflow.PeerSeat(mailbox=cast("Any", world.mailbox), profiles=_profiles()),
         ),
     )

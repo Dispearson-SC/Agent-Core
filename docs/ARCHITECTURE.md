@@ -71,7 +71,7 @@ Core/
   pyproject.toml
   profiles/            <vertical>.yaml
   skills/              <skill-name>/SKILL.md
-  tests/               conftest, fakes/, unit/, integration/
+  tests/               conftest, fakes/ (ports.py, scripted_model.py), unit/, integration/
   src/agent_core/
     domain/
       turn.py            profile.py       policy.py
@@ -821,3 +821,19 @@ lines.
 The hard part was never typing. It is reconnection, delivery receipts, offline queueing, push
 notifications, media upload and read state. Typing is the easy two percent of a chat client,
 so it should not be the reason to build or avoid one.
+
+## Testing: the scripted model
+
+`Core/tests/fakes/scripted_model.py` is a deterministic stand-in for the LLM, built on
+Pydantic AI's `FunctionModel`; no network, no API key. Plug it into the real
+`PydanticAgentRunner` with `model_factory=lambda model_id, base_url: scripted.model`.
+
+- `push(text("x"), tool_call("ask_peer", {...}, id="c1"), tool_calls(a, b), reply(...))`:
+  one scripted response per model call, in order; several tool calls in one response.
+- `serve(fn)`: fallback once the queue is empty (an exhausted script without it fails loudly).
+- `requests` / `call_count`: what the model saw on each call.
+- `gate()` (`started` / `release()`), `hang()`, `fail(exc)`, `wait_for_calls(n)`: hold,
+  never answer, raise, or await a call count, without sleeping.
+
+Example: `tests/unit/test_scripted_peer_roundtrip.py` (two parallel `ask_peer` calls, one
+resume). The helper's own tests are `tests/unit/test_scripted_model.py`.
