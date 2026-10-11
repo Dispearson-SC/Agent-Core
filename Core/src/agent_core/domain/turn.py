@@ -71,6 +71,12 @@ class CallerIdentity:
     channel: str
     tenant_id: TenantId
     roles: frozenset[str] = frozenset()
+    # A HINT about how the reply will be consumed (`voice`, `text`, ...), set by the driving
+    # adapter. It is NOT an input to `ToolPolicy` and not a credential: its only reader is
+    # the runner, which appends the profile's matching instruction fragment. It lives here
+    # because `resume` already receives the caller, so a resumed turn keeps the same
+    # style without a second channel for it to travel on.
+    modality: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

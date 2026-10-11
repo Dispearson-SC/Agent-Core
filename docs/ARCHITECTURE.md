@@ -441,6 +441,12 @@ declare:
   different decision (`ValueError` at startup). Everything else is dropped, and an
   undecided tool is logged once.
 
+- Channel / modality style: a profile may declare `channel_instructions: {whatsapp: "..."}`
+  and `modality_instructions: {voice: "..."}`. The turn's channel (`X-Channel`) and optional
+  hint (`X-Modality`, carried as `CallerIdentity.modality`) select fragments that the runner
+  appends as run-level instructions after the persona. The user's text is never altered and
+  the fragments are not stored in the history.
+
 Deployment configuration, not code: `AGENT_CORE_PULL_CHANNELS=a,b` registers extra pull-mode
 channels (a vertical's backend polling `GET /turns/{id}`). `POST /turns` answers 422 for a
 channel the registry does not hold, before the turn is enqueued and so before any model call.

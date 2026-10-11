@@ -736,6 +736,12 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _turn_instructions(profile: AgentProfile, caller: CallerIdentity) -> list[str] | None:
+    """The profile's fragments for this caller's channel and modality, or `None`."""
+    fragments = profile.instructions_for(caller.channel, caller.modality)
+    return list(fragments) or None
+
+
 def _as_message_history(history: object) -> list[ModelMessage] | None:
     """Translate the store's history into what Pydantic AI prepends, or refuse."""
     if history is None:
@@ -1459,6 +1465,9 @@ class PydanticAgentRunner:
             result = await agent.run(
                 request.input.text,
                 message_history=message_history,
+                # Channel / modality fragments: extra INSTRUCTIONS for this run only, never
+                # text in the user's message and never stored in the history.
+                instructions=_turn_instructions(profile, request.caller),
                 capabilities=capabilities,
                 toolsets=self._per_turn_toolsets(request.caller, profile),
                 # The turn's identity for tools that need it (tools/context.py). Per turn,
@@ -1602,6 +1611,7 @@ class PydanticAgentRunner:
             result = await agent.run(
                 message_history=message_history,
                 deferred_tool_results=_deferred_results(resolutions, profile.media.delivery),
+                instructions=_turn_instructions(profile, caller),
                 capabilities=capabilities,
                 toolsets=self._per_turn_toolsets(caller, profile),
                 deps=TurnContext(caller=caller, session=session, agent_id=profile.id),

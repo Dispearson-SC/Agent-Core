@@ -518,6 +518,20 @@ def _build_peer_policy(data: object) -> PeerPolicy:
     )
 
 
+def _build_fragment_map(data: object, *, where: str) -> tuple[tuple[str, str], ...]:
+    """`{key: text}` -> sorted `((key, text), ...)`; absent -> `()`."""
+    if data is None:
+        return ()
+    if not isinstance(data, dict):
+        raise ProfileValidationError(f"{where} must be a mapping of name to instruction text")
+    for key, text in data.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ProfileValidationError(f"{where} keys must be non-empty strings")
+        if not isinstance(text, str) or not text.strip():
+            raise ProfileValidationError(f"{where}[{key!r}] must be a non-empty string")
+    return tuple(sorted((key, text) for key, text in data.items()))
+
+
 # `version` and `content_hash` are DERIVED at load time, never authored. Excluding them
 # from the accepted YAML keys means a profile that tries to pin its own version fails
 # loudly, exactly like any other unknown key - a hand-written version is a lie the audit
@@ -582,6 +596,12 @@ class AgentProfile:
     # never a branch in core code.
     knowledge: KnowledgePolicy = field(default_factory=KnowledgePolicy)
     peers: PeerPolicy = field(default_factory=PeerPolicy)
+
+    # Instruction fragments selected by the turn's channel / modality hint, appended to the
+    # persona by the runner as instructions - never as text in the user's message. Stored as
+    # sorted (key, text) pairs so the content hash is stable. See `instructions_for`.
+    channel_instructions: tuple[tuple[str, str], ...] = ()
+    modality_instructions: tuple[tuple[str, str], ...] = ()
 
     # D20, docs/TASKS.md#t-f1-17. Derived at load time, never read from the YAML.
     # `version` is 0 until a `ProfileVersionRegistry` assigns one: a profile that never
@@ -660,8 +680,30 @@ class AgentProfile:
             peers=(
                 _build_peer_policy(mapping["peers"]) if "peers" in mapping else defaults.peers
             ),
+            channel_instructions=_build_fragment_map(
+                mapping.get("channel_instructions"), where="channel_instructions"
+            ),
+            modality_instructions=_build_fragment_map(
+                mapping.get("modality_instructions"), where="modality_instructions"
+            ),
         )
         return replace(profile, content_hash=profile_content_hash(profile))
+
+    def instructions_for(self, channel: str, modality: str | None) -> tuple[str, ...]:
+        """The extra instructions for a turn on `channel` with `modality`, in a fixed order.
+
+        The channel fragment first, then the modality one. A key the profile does not
+        declare contributes nothing, so a profile with no fragments (or a turn with no
+        hint) gets exactly its persona. Pure: the runner decides what to do with the text."""
+        found: list[str] = []
+        for pairs, key in (
+            (self.channel_instructions, channel),
+            (self.modality_instructions, modality),
+        ):
+            if key is None:
+                continue
+            found.extend(text for name, text in pairs if name == key)
+        return tuple(found)
 
     def requires_approval_for(
         self, tool_name: str, arguments: dict[str, object]

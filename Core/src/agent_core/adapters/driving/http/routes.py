@@ -115,6 +115,7 @@ THE EVIDENCE UPLOAD - docs/TASKS.md#t-f7-08
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Literal, Protocol
@@ -310,8 +311,15 @@ class TurnView:
 TurnLookup = Callable[[TurnId, CallerIdentity], Awaitable[TurnView | None]]
 
 
+_MODALITY = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+
+
 def _authenticate(
-    subject_id: str | None, tenant_id: str | None, channel: str | None, roles: str | None
+    subject_id: str | None,
+    tenant_id: str | None,
+    channel: str | None,
+    roles: str | None,
+    modality: str | None = None,
 ) -> CallerIdentity:
     """Build the identity, or refuse the request. There is no third answer.
 
@@ -329,11 +337,19 @@ def _authenticate(
             detail="An authenticated subject and tenant are required to start a turn.",
         )
 
+    hint = modality.strip().lower() if modality and modality.strip() else None
+    if hint is not None and not _MODALITY.fullmatch(hint):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="X-Modality must be a short lowercase label such as 'voice' or 'text'.",
+        )
+
     return CallerIdentity(
         subject_id=subject_id,
         channel=channel or _DEFAULT_CHANNEL,
         tenant_id=TenantId(tenant_id),
         roles=frozenset(part.strip() for part in (roles or "").split(",") if part.strip()),
+        modality=hint,
     )
 
 
@@ -426,6 +442,7 @@ def create_app(
         x_tenant_id: Annotated[str | None, Header()] = None,
         x_channel: Annotated[str | None, Header()] = None,
         x_roles: Annotated[str | None, Header()] = None,
+        x_modality: Annotated[str | None, Header()] = None,
     ) -> dict[str, str]:
         """202 and a turn_id. Never a result, never a wait.
 
@@ -435,7 +452,7 @@ def create_app(
         """
         # Identity first, before anything downstream is touched. An unidentified request
         # must leave no half-started turn behind for an operator to puzzle over.
-        caller = _authenticate(x_subject_id, x_tenant_id, x_channel, x_roles)
+        caller = _authenticate(x_subject_id, x_tenant_id, x_channel, x_roles, x_modality)
         refuse_unregistered_channel(caller)
 
         request = TurnRequest(
