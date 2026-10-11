@@ -1039,3 +1039,23 @@ exactly like the per-answer path (an expired turn is the turn giving up, not ans
 private `_FAILED_ASK_ANSWER` alias in the worker was removed (the domain constant is used), and
 `cli/stranded_turns.py` has the `first_line` helper and documents that
 `dbos.workflow_status.created_at` is epoch MILLISECONDS (`row_to_stranded`).
+
+**C3 · redelivery lease.** A claim marks the row `delivered`; a worker that dies before it enqueues
+`peer-<correlation_id>` left a row nothing would ever run (D29's known limit). Now:
+
+- `AgentMailbox` stays unchanged; the answering-side `PgAgentMailbox.reclaim_stale(target, *,
+  lease, exists, now=None)` (reached through the `StaleReclaimer` protocol) lists rows that are
+  `delivered`, unanswered and older than the lease (the database's clock unless `now` is given),
+  asks `exists(correlation_id)` for each, and puts only those with NO workflow back to `queued` in
+  one guarded UPDATE (`redeliveries` + 1, migration `0027`, plus a partial index on the delivered
+  tail). A row whose workflow exists in any state is never touched: it is running, waiting for its
+  human or finished, and that workflow answers it. An `exists` that raises is "unknown" and the
+  row is left alone. A running/finished workflow of the same id would make redelivery a no-op
+  anyway (the id is deterministic), so a reclaim is safe even if it races a late start.
+- `exists` is `PeerTurnStarter.exists` (C1d), so the engine question is asked of DBOS, not of the
+  database. `run_peer_worker(..., lease=)` reclaims for every target at the start of each pass,
+  before claiming; it needs the durable starter and a queue that can reclaim, else `TypeError`.
+- Configuration: `AGENT_CORE_PEER_LEASE_SECONDS` (`Settings.peer_lease_seconds`), default 300, a
+  positive whole number or startup fails. The answer token (C1c) survives redelivery.
+- Deliberately not done: a poison budget (the `redeliveries` counter is where C5 can read it) and
+  reclaiming rows whose workflow exists but is stuck (that is C4/C5 territory).

@@ -46,6 +46,8 @@ import asyncio
 import os
 import re
 import uuid
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
@@ -91,6 +93,10 @@ def _migrated_conninfo() -> str:
     app_conninfo = _app_conninfo(app_db)
     asyncio.run(migrations.run_migrations(app_conninfo))
     asyncio.run(peers_migration.apply_peer_messages_migration(app_conninfo))
+    # Every test starts from an empty table: this module's database persists between runs, and
+    # `claim_next` / `reclaim_stale` act on the OLDEST rows, whoever left them.
+    with psycopg.connect(app_conninfo, autocommit=True) as conn:
+        conn.execute("DELETE FROM peer_messages")
     return app_conninfo
 
 
@@ -353,9 +359,10 @@ def _ask_and_claim(conninfo: str, *, request_key: str) -> PeerAsk:
 
 
 def _drain_queue(conninfo: str) -> None:
-    mailbox = PgAgentMailbox(conninfo)
-    while asyncio.run(mailbox.claim_next(_ASSISTANT)) is not None:
-        pass
+    """An empty table: rows of earlier tests (delivered ones included) must not be claimed or
+    reclaimed by this one. The database is this module's own."""
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        conn.execute("DELETE FROM peer_messages")
 
 
 @pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
@@ -409,3 +416,124 @@ def test_a_replayed_ask_keeps_the_token_the_row_was_first_given() -> None:
 
     other = _ask_and_claim(conninfo, request_key="tc-other")
     assert other.answer_token != claimed.answer_token, "one secret per ask"
+
+
+# --- C3: redelivery lease --------------------------------------------------------------------
+
+_LEASE = timedelta(minutes=5)
+
+
+def _age(conninfo: str, correlation_id: str, delivered_ago: timedelta) -> None:
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE peer_messages SET delivered_at = now() - %s WHERE correlation_id = %s",
+            (delivered_ago, correlation_id),
+        )
+
+
+def _state(conninfo: str, correlation_id: str) -> tuple[str, int]:
+    with psycopg.connect(conninfo) as conn:
+        row = conn.execute(
+            "SELECT state, redeliveries FROM peer_messages WHERE correlation_id = %s",
+            (correlation_id,),
+        ).fetchone()
+    assert row is not None
+    return str(row[0]), int(row[1])
+
+
+def _never_running(calls: list[str]) -> Callable[[str], Awaitable[bool]]:
+    async def exists(correlation_id: str) -> bool:
+        calls.append(correlation_id)
+        return False
+
+    return exists
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_a_delivered_unanswered_row_past_the_lease_with_no_workflow_is_reclaimed_once() -> None:
+    conninfo = _migrated_conninfo()
+    _drain_queue(conninfo)
+    stale = _ask_and_claim(conninfo, request_key="tc-stale")
+    fresh = _ask_and_claim(conninfo, request_key="tc-fresh")
+    _age(conninfo, stale.correlation_id, _LEASE + timedelta(seconds=1))
+    _age(conninfo, fresh.correlation_id, _LEASE - timedelta(seconds=30))
+    mailbox = PgAgentMailbox(conninfo)
+    checked: list[str] = []
+
+    first = asyncio.run(
+        mailbox.reclaim_stale(_ASSISTANT, lease=_LEASE, exists=_never_running(checked))
+    )
+    second = asyncio.run(
+        mailbox.reclaim_stale(_ASSISTANT, lease=_LEASE, exists=_never_running(checked))
+    )
+
+    assert first == (stale.correlation_id,), "only the row past the lease"
+    assert second == (), "reclaimed once: it is queued now, not delivered"
+    assert checked == [stale.correlation_id], "the fresh row was not even looked at"
+    assert _state(conninfo, stale.correlation_id) == ("queued", 1)
+    assert _state(conninfo, fresh.correlation_id) == ("delivered", 0)
+
+    again = asyncio.run(mailbox.claim_next(_ASSISTANT))
+    assert again is not None and again.correlation_id == stale.correlation_id
+    assert again.answer_token == stale.answer_token, "the secret survives redelivery"
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_a_stale_row_whose_workflow_exists_is_not_reclaimed() -> None:
+    conninfo = _migrated_conninfo()
+    _drain_queue(conninfo)
+    claimed = _ask_and_claim(conninfo, request_key="tc-running")
+    _age(conninfo, claimed.correlation_id, _LEASE * 3)
+    mailbox = PgAgentMailbox(conninfo)
+
+    async def running(correlation_id: str) -> bool:
+        return True
+
+    reclaimed = asyncio.run(mailbox.reclaim_stale(_ASSISTANT, lease=_LEASE, exists=running))
+
+    assert reclaimed == ()
+    assert _state(conninfo, claimed.correlation_id) == ("delivered", 0), "no double run"
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_an_answered_row_and_a_failing_existence_check_are_never_reclaimed() -> None:
+    conninfo = _migrated_conninfo()
+    _drain_queue(conninfo)
+    answered = _ask_and_claim(conninfo, request_key="tc-answered")
+    unknown = _ask_and_claim(conninfo, request_key="tc-unknown")
+    mailbox = PgAgentMailbox(conninfo)
+    asyncio.run(
+        mailbox.answer(answered.correlation_id, "done", answer_token=answered.answer_token)
+    )
+    _age(conninfo, answered.correlation_id, _LEASE * 3)
+    _age(conninfo, unknown.correlation_id, _LEASE * 3)
+
+    async def cannot_tell(correlation_id: str) -> bool:
+        raise ConnectionError("dbos unreachable")
+
+    reclaimed = asyncio.run(mailbox.reclaim_stale(_ASSISTANT, lease=_LEASE, exists=cannot_tell))
+
+    assert reclaimed == (), "unknown is not 'does not exist'"
+    assert _state(conninfo, answered.correlation_id)[0] == "answered"
+    assert _state(conninfo, unknown.correlation_id)[0] == "delivered"
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_the_lease_is_judged_at_the_given_time() -> None:
+    """`now` is a parameter so the clock under test is explicit (the default is the DB's)."""
+    conninfo = _migrated_conninfo()
+    _drain_queue(conninfo)
+    claimed = _ask_and_claim(conninfo, request_key="tc-clock")
+    mailbox = PgAgentMailbox(conninfo)
+    checked: list[str] = []
+
+    nothing = asyncio.run(
+        mailbox.reclaim_stale(_ASSISTANT, lease=_LEASE, exists=_never_running(checked))
+    )
+    later = datetime.now(UTC) + _LEASE + timedelta(seconds=5)
+    reclaimed = asyncio.run(
+        mailbox.reclaim_stale(_ASSISTANT, lease=_LEASE, now=later, exists=_never_running(checked))
+    )
+
+    assert nothing == ()
+    assert reclaimed == (claimed.correlation_id,)

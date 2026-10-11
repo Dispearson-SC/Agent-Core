@@ -60,3 +60,19 @@ tell them to ask again. Run `stranded-turns` once more: it must exit 0.
 Do **not** edit `dbos.workflow_status` by hand and do **not** set
 `AGENT_CORE_DBOS_APPLICATION_VERSION` back to the old value to "recover" them against changed
 code.
+
+## Peer redelivery lease
+
+The peer worker claims an ask (`delivered`) and then enqueues the DBOS workflow
+`peer-<correlation_id>`. If the worker dies between the two, nothing runs the ask. Every worker
+pass therefore puts back asks that are `delivered`, unanswered, older than the lease and whose
+workflow does not exist (D31, C3).
+
+- Lease: `AGENT_CORE_PEER_LEASE_SECONDS`, default `300`. A positive whole number; anything else
+  stops startup. Keep it well above the time between a claim and the enqueue, and well below the
+  asking profile's `reply_timeout_seconds`.
+- What to look at: `SELECT correlation_id, state, redeliveries, delivered_at FROM peer_messages
+  WHERE redeliveries > 0;` shows asks that were redelivered. The worker prints
+  `[peer] <agent> reclaimed <id>` for each.
+- A row that stays `delivered` past the lease with a workflow that exists is not reclaimed: look
+  at that workflow (`dbos workflow get peer-<id>`), not at the queue.

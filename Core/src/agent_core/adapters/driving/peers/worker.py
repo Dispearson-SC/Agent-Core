@@ -129,6 +129,7 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Final, Protocol, runtime_checkable
 from uuid import uuid4
@@ -160,6 +161,7 @@ __all__ = [
     "PeerTurnReport",
     "PeerTurnRunner",
     "PeerTurnStarter",
+    "StaleReclaimer",
     "TurnRunner",
     "answer_next_ask",
     "answerable_targets",
@@ -246,6 +248,21 @@ class PeerQueue(Protocol):
     async def answer(
         self, correlation_id: str, answer: str, *, answer_token: str | None = None
     ) -> None: ...
+
+
+@runtime_checkable
+class StaleReclaimer(Protocol):
+    """The redelivery half of the queue (C3), separate from `PeerQueue` so a queue without a
+    lease (the console's, a test's) stays a valid `PeerQueue`. `exists` is the starter's."""
+
+    async def reclaim_stale(
+        self,
+        target: AgentId,
+        *,
+        lease: timedelta,
+        exists: Callable[[str], Awaitable[bool]],
+        now: datetime | None = None,
+    ) -> tuple[str, ...]: ...
 
 
 class PeerTurnRunner(Protocol):
@@ -680,6 +697,7 @@ async def run_peer_worker(
     sleep: Callable[[float], Awaitable[None]] = _sleep,
     keep_going: Callable[[], bool] = _forever,
     write_line: Callable[[str], None] = print,
+    lease: timedelta | None = None,
 ) -> None:
     """Drain the peer queues until told to stop. One ask per target per pass.
 
@@ -700,11 +718,30 @@ async def run_peer_worker(
 
     `sleep` and `keep_going` are seams so this loop can be asserted without real time
     passing. Their defaults are the production behaviour: `asyncio.sleep`, and forever.
+
+    `lease` (C3, durable starter only) turns on redelivery: at the start of every pass, per
+    target, deliveries older than the lease whose workflow `peer-<id>` does not exist are put
+    back on the queue (`StaleReclaimer.reclaim_stale`, asking `starter.exists`), so a claim whose
+    worker died before the start is picked up again instead of waiting for the asker's timeout.
     """
     ordered = tuple(sorted(targets))
+    if lease is not None:
+        if not isinstance(runner, PeerTurnStarter):
+            raise TypeError("a redelivery lease needs the durable PeerTurnStarter seat")
+        if not isinstance(queue, StaleReclaimer):
+            raise TypeError(
+                "a redelivery lease needs a queue with `reclaim_stale`; this one has none"
+            )
     while keep_going():
         handled = False
         for target in ordered:
+            if lease is not None and isinstance(runner, PeerTurnStarter):
+                assert isinstance(queue, StaleReclaimer)  # checked above, for the type checker
+                for reclaimed in await queue.reclaim_stale(
+                    target, lease=lease, exists=runner.exists
+                ):
+                    handled = True
+                    write_line(f"[peer] {target} reclaimed {reclaimed}")
             if isinstance(runner, PeerTurnStarter):
                 report = await dispatch_next_ask(queue, runner, target=target, wake=wake)
             else:

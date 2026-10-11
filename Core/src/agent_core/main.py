@@ -110,6 +110,7 @@ import os
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Protocol
 
 from agent_core.adapters.driving.cli.console import Console
@@ -736,8 +737,10 @@ def run_peer_worker_process(arguments: argparse.Namespace) -> None:
         the callee's turn through the same durable path as any turn, records the answer and
         wakes the asker when it finishes - including after the callee's own human approval -
         so killing this process while B thinks no longer loses the ask, and a callee that
-        suspends is no longer an ask nobody answers. The remaining window is a crash between
-        the claim and the start (the redelivery lease, C3).
+        suspends is no longer an ask nobody answers. The remaining window, a crash between
+        the claim and the start, is closed by the redelivery lease (C3, D31): every pass puts
+        back asks delivered longer ago than `Settings.peer_lease_seconds` whose workflow does
+        not exist.
     """
     container = asyncio.run(start_container())
     refuse_unless_ready(container.settings)
@@ -791,6 +794,7 @@ def run_peer_worker_process(arguments: argparse.Namespace) -> None:
                 targets=targets,
                 wake=signal_peer_answer,
                 idle_seconds=arguments.poll,
+                lease=timedelta(seconds=container.settings.peer_lease_seconds),
             )
         )
     except KeyboardInterrupt:

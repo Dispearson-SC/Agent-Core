@@ -250,6 +250,7 @@ from agent_core.ports.knowledge_admin import KnowledgeAdmin
 from agent_core.ports.transcript_reader import TranscriptReader
 
 __all__ = [
+    "DEFAULT_PEER_LEASE_SECONDS",
     "PINNED_DBOS_APPLICATION_VERSION",
     "TOOL_PACKAGES",
     "Container",
@@ -464,6 +465,9 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # gained the cancel cascade steps (C4), so a turn or peer workflow suspended on .2 is stranded.
 PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.3"
 
+# C3 (D31). Default of `Settings.peer_lease_seconds`: five minutes.
+DEFAULT_PEER_LEASE_SECONDS: Final[int] = 300
+
 # The DBOS application name. It is hashed into the default version and, more importantly,
 # it is a predicate of the recovery query itself (`_sys_db.get_pending_workflows` filters
 # on `application_name`), so two deployments sharing one system database do not recover
@@ -572,6 +576,13 @@ class Settings:
     # is what the pin above makes safe.
     dbos_conductor_key: str | None = None
 
+    # C3 (D31). The peer redelivery lease: a peer ask the worker claimed (`delivered`) and
+    # nobody answered for this long, whose workflow `peer-<id>` does not exist, is put back on
+    # the queue. `AGENT_CORE_PEER_LEASE_SECONDS`, default five minutes: well past the time a
+    # worker needs between its claim and the workflow enqueue, short enough that a lost claim
+    # is retried before the asker's usual reply timeout (an hour).
+    peer_lease_seconds: int = DEFAULT_PEER_LEASE_SECONDS
+
     @property
     def resolved_audit_conninfo(self) -> str:
         return self.app_conninfo if self.audit_conninfo is None else self.audit_conninfo
@@ -636,7 +647,24 @@ class Settings:
             # credential issued by DBOS - the same reasoning `telegram_bot_token` gives
             # for reading `TELEGRAM_BOT` rather than inventing an `AGENT_CORE_` name.
             dbos_conductor_key=env.get("DBOS_CONDUCTOR_KEY"),
+            peer_lease_seconds=_parse_lease_seconds(env.get("AGENT_CORE_PEER_LEASE_SECONDS")),
         )
+
+
+def _parse_lease_seconds(raw: str | None) -> int:
+    """`AGENT_CORE_PEER_LEASE_SECONDS` as a positive integer; unset means the default."""
+    if raw is None:
+        return DEFAULT_PEER_LEASE_SECONDS
+    try:
+        seconds = int(raw)
+    except ValueError:
+        seconds = 0
+    if seconds < 1:
+        raise ValueError(
+            f"AGENT_CORE_PEER_LEASE_SECONDS must be a positive whole number of seconds, "
+            f"got {raw!r}"
+        )
+    return seconds
 
 
 def _parse_channel_ids(raw: str) -> tuple[str, ...]:

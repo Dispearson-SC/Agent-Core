@@ -105,7 +105,9 @@ import asyncio
 import logging
 import re
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any, Final
 
 import psycopg
@@ -190,6 +192,31 @@ _ANSWER_SQL = """
 # Why a delivery that changed no row changed none: nothing there (a stranger), already
 # answered (a retry), or still open and refused (a forged token). Only the last raises.
 _ANSWER_STATE_SQL = "SELECT answered_at IS NOT NULL FROM peer_messages WHERE correlation_id = %s"
+
+# C3. Candidates: delivered, unanswered, past the lease (`delivered_at + lease < now`). The
+# database's clock decides unless a test passes `now`. Oldest first, bounded so one pass never
+# loads the whole backlog.
+_STALE_SQL = """
+    SELECT correlation_id
+    FROM peer_messages
+    WHERE target_agent_id = %s AND state = 'delivered' AND answered_at IS NULL
+      AND delivered_at < COALESCE(%s::timestamptz, now()) - %s
+    ORDER BY delivered_at, correlation_id
+    LIMIT %s
+"""
+
+# The requeue repeats every guard of the candidate query: between the listing and this UPDATE
+# the row may have been answered, or reclaimed by another worker. Only the statement that
+# changes the row decides, so two workers can never both reclaim the same delivery.
+_REQUEUE_SQL = """
+    UPDATE peer_messages
+    SET state = 'queued', delivered_at = NULL, redeliveries = redeliveries + 1
+    WHERE correlation_id = %s AND state = 'delivered' AND answered_at IS NULL
+      AND delivered_at < COALESCE(%s::timestamptz, now()) - %s
+    RETURNING correlation_id
+"""
+
+_RECLAIM_BATCH: Final[int] = 50
 
 _READ_ANSWER_SQL = """
     SELECT answer
@@ -358,10 +385,9 @@ class PgAgentMailbox:
         task instead of polling a queue, and nothing above the port should have to change
         when it does.
 
-        Claiming marks the row delivered. A worker that crashes between claiming and
-        answering leaves it that way; recovering those is deliberately not built here,
-        because a redelivery policy is a decision about duplicate model spend and belongs
-        with the anchor that owns the retry story, not with the queue primitive.
+        Claiming marks the row delivered. A worker that crashes between claiming and starting
+        the workflow leaves it that way; `reclaim_stale` (C3) is the redelivery policy that puts
+        such a row back after the lease, only when its workflow does not exist.
         """
         return await asyncio.to_thread(self._claim_sync, target)
 
@@ -389,6 +415,57 @@ class PgAgentMailbox:
             asker=None if row[7] is None else AgentId(str(row[7])),
             answer_token=None if row[8] is None else str(row[8]),
         )
+
+    async def reclaim_stale(
+        self,
+        target: AgentId,
+        *,
+        lease: timedelta,
+        exists: Callable[[str], Awaitable[bool]],
+        now: datetime | None = None,
+    ) -> tuple[str, ...]:
+        """Put delivered-but-unanswered asks of `target` back on the queue. C3 / D31.
+
+        A claim marks the row `delivered` and nothing ran after it if the worker died between
+        the claim and the workflow start. A row is RECLAIMABLE when it is delivered, unanswered
+        and `delivered_at` is older than `lease`, AND `exists(correlation_id)` says the workflow
+        `peer-<correlation_id>` is unknown to the engine. A row whose workflow exists is never
+        touched (it is running, waiting for its human, or finished: the workflow answers it).
+        Redelivery is safe anyway: the workflow id is deterministic, so a second start is a
+        no-op in DBOS.
+
+        `exists` is asked per candidate, outside any database transaction. If it raises the
+        answer is UNKNOWN and the row is left alone (unknown is not "does not exist"). The
+        requeue is one guarded UPDATE, so concurrent reclaimers cannot both win the same row.
+        Returns the reclaimed correlation ids, oldest first. `now` defaults to the database's
+        clock.
+        """
+        candidates = await asyncio.to_thread(self._stale_sync, target, lease, now)
+        reclaimed: list[str] = []
+        for correlation_id in candidates:
+            try:
+                if await exists(correlation_id):
+                    continue
+            except Exception:
+                _LOG.warning(
+                    "could not tell whether the workflow for peer ask %s exists; not reclaiming",
+                    correlation_id,
+                    exc_info=True,
+                )
+                continue
+            if await asyncio.to_thread(self._requeue_sync, correlation_id, lease, now):
+                reclaimed.append(correlation_id)
+        return tuple(reclaimed)
+
+    def _stale_sync(self, target: AgentId, lease: timedelta, now: datetime | None) -> list[str]:
+        with psycopg.connect(self._conninfo) as conn:
+            rows = conn.execute(_STALE_SQL, (target, now, lease, _RECLAIM_BATCH)).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def _requeue_sync(self, correlation_id: str, lease: timedelta, now: datetime | None) -> bool:
+        with psycopg.connect(self._conninfo, autocommit=True) as conn:
+            row = conn.execute(_REQUEUE_SQL, (correlation_id, now, lease)).fetchone()
+        return row is not None
 
     async def answer(
         self, correlation_id: str, answer: str, *, answer_token: str | None = None

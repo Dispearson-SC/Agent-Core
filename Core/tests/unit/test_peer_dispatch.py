@@ -12,7 +12,9 @@ rest. It never answers a started ask itself.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -246,3 +248,80 @@ def test_when_existence_cannot_be_determined_the_ask_is_left_open_for_redelivery
     woken = _dispatch_failing(starter, queue, RuntimeError)
 
     assert queue.answered == [] and woken == []
+
+
+# --- C3: the worker loop reclaims stale deliveries ---------------------------------------------
+
+
+@dataclass
+class _ReclaimingQueue(_Queue):
+    reclaim_calls: list[tuple[str, timedelta]] = field(default_factory=list)
+    exists_seen: list[bool] = field(default_factory=list)
+
+    async def reclaim_stale(
+        self,
+        target: AgentId,
+        *,
+        lease: timedelta,
+        now: datetime | None = None,
+        exists: Callable[[str], Awaitable[bool]],
+    ) -> tuple[str, ...]:
+        self.reclaim_calls.append((str(target), lease))
+        self.exists_seen.append(await exists("c-stale"))
+        return ("c-stale",)
+
+
+def test_each_pass_reclaims_stale_deliveries_before_claiming_when_a_lease_is_set() -> None:
+    queue, starter, lines = _ReclaimingQueue([_ask("a")]), _Starter(), []
+    passes = iter([True, False])
+
+    asyncio.run(
+        run_peer_worker(
+            queue,
+            starter,
+            targets=[AgentId("specialist")],
+            lease=timedelta(minutes=5),
+            keep_going=lambda: next(passes),
+            write_line=lines.append,
+        )
+    )
+
+    assert queue.reclaim_calls == [("specialist", timedelta(minutes=5))]
+    assert starter.exists_calls == ["c-stale"], "the starter's existence check is what is asked"
+    assert queue.exists_seen == [False]
+    assert any("reclaimed c-stale" in line for line in lines)
+    assert [corr for corr, _, _ in starter.started] == ["a"], "claiming still happens"
+
+
+def test_without_a_lease_nothing_is_reclaimed() -> None:
+    queue, starter = _ReclaimingQueue([]), _Starter()
+    passes = iter([True, False])
+
+    asyncio.run(
+        run_peer_worker(
+            queue,
+            starter,
+            targets=[AgentId("specialist")],
+            keep_going=lambda: next(passes),
+            sleep=_no_sleep,
+        )
+    )
+
+    assert queue.reclaim_calls == []
+
+
+def test_a_lease_needs_a_queue_that_can_reclaim() -> None:
+    with pytest.raises(TypeError, match="reclaim_stale"):
+        asyncio.run(
+            run_peer_worker(
+                _Queue([]),
+                _Starter(),
+                targets=[AgentId("specialist")],
+                lease=timedelta(minutes=5),
+                keep_going=lambda: False,
+            )
+        )
+
+
+async def _no_sleep(seconds: float) -> None:
+    return None

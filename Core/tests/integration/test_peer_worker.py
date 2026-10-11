@@ -416,3 +416,78 @@ def test_the_worker_polls_its_targets_in_a_deterministic_order() -> None:
     assert len(lines) == 1
     assert "c-1" in lines[0]
     assert AskDisposition.ANSWERED.value in lines[0]
+
+
+@dataclass
+class _LostStarter:
+    """A durable starter whose engine has no workflow for the ask until `start` is called."""
+
+    known: set[str] = field(default_factory=set)
+    starts: list[tuple[str, str | None]] = field(default_factory=list)
+
+    async def exists(self, correlation_id: str) -> bool:
+        return correlation_id in self.known
+
+    async def start(
+        self,
+        correlation_id: str,
+        asking_turn_id: TurnId,
+        request: TurnRequest,
+        *,
+        answer_token: str | None = None,
+    ) -> None:
+        self.known.add(correlation_id)
+        self.starts.append((correlation_id, answer_token))
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_a_claim_lost_before_the_start_is_redelivered_by_the_lease_exactly_once() -> None:
+    """C3 end to end on the real table: the worker claimed the row and died before enqueueing
+    the workflow. After the lease the next worker pass reclaims it, claims it and starts the
+    workflow once; the pass after that finds a live workflow and does nothing."""
+    from datetime import timedelta
+
+    conninfo = _migrated_conninfo()
+    _empty_the_queue(conninfo)
+    mailbox = PgAgentMailbox(conninfo)
+    correlation_id = asyncio.run(
+        mailbox.ask(
+            _SUPPORT_POLICY,
+            _BILLING,
+            f"lost claim [{uuid.uuid4()}]",
+            from_session=_asking_session(),
+            turn_id=TurnId(str(uuid.uuid4())),
+            hop=1,
+        )
+    )
+    lost = asyncio.run(mailbox.claim_next(_BILLING))  # the worker that then died
+    assert lost is not None and lost.correlation_id == correlation_id
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE peer_messages SET delivered_at = now() - interval '10 minutes' "
+            "WHERE correlation_id = %s",
+            (correlation_id,),
+        )
+    starter = _LostStarter()
+    lines: list[str] = []
+
+    passes = iter([True, False, True, False])  # two worker passes, one `keep_going` each
+    for _ in range(2):
+        asyncio.run(
+            run_peer_worker(
+                mailbox,
+                starter,
+                targets=[_BILLING],
+                lease=timedelta(minutes=5),
+                keep_going=lambda: next(passes),
+                sleep=_instant,
+                write_line=lines.append,
+            )
+        )
+
+    assert starter.starts == [(correlation_id, lost.answer_token)], "started once, with the secret"
+    assert any(f"reclaimed {correlation_id}" in line for line in lines)
+
+
+async def _instant(seconds: float) -> None:
+    return None
