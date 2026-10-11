@@ -82,10 +82,12 @@ def profiles() -> dict[str, AgentProfile]:
 class Mailbox:
     def __init__(self) -> None:
         self.asks: list[tuple[str, str]] = []
+        self.request_keys: list[str | None] = []
         self.answers: dict[str, str] = {}
         self._ids: dict[tuple[str, str], str] = {}
 
-    async def ask(self, policy: Any, target: AgentId, question: str, **_: Any) -> str:
+    async def ask(self, policy: Any, target: AgentId, question: str, **kwargs: Any) -> str:
+        self.request_keys.append(kwargs.get("request_key"))
         key = (str(target), question)
         if key not in self._ids:  # idempotent per (target, question), like the real one
             self._ids[key] = f"corr-{len(self._ids) + 1}"

@@ -17,7 +17,7 @@ import pytest
 
 from agent_core.adapters.driven.peers.mailbox import PeerAsk
 from agent_core.adapters.driving.peers.worker import answer_next_ask, new_peer_session
-from agent_core.domain.peers import AgentId
+from agent_core.domain.peers import AgentId, peer_session_key
 from agent_core.domain.turn import (
     SessionId,
     SessionRef,
@@ -92,6 +92,27 @@ def test_the_worker_runs_the_answer_in_a_session_derived_from_the_asker() -> Non
     (request,) = runner.seen
     assert request.session.session_id.startswith("peer~case-77~")
     assert request.session.tenant_id == "S030"
+
+
+def test_claiming_the_same_ask_again_files_the_callee_turn_under_the_same_session() -> None:
+    """C2: a worker that picks a row up again after a crash must not fork the conversation."""
+    ask = PeerAsk(
+        correlation_id="c3",
+        target=AgentId("specialist"),
+        question="plan?",
+        from_session=ORIGIN,
+        turn_id=TurnId("t3"),
+        hop=1,
+        asker=AgentId("coordinator"),
+    )
+    runner = _Runner()
+
+    asyncio.run(answer_next_ask(_Queue(ask), runner, target=ask.target))
+    asyncio.run(answer_next_ask(_Queue(ask), runner, target=ask.target))
+
+    first, second = runner.seen
+    assert first.session == second.session
+    assert first.session.session_id == f"peer~case-77~{peer_session_key('c3')}"
 
 
 def _ask() -> PeerAsk:

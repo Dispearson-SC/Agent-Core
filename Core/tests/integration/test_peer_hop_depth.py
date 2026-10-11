@@ -157,6 +157,7 @@ class _RecordingMailbox:
         # test and refuse in production. Recorded like every other argument, because what
         # left is what this double exists to report.
         asker: AgentId | None = None,
+        request_key: str | None = None,
     ) -> str:
         self._next += 1
         correlation_id = f"corr-{self._next}"

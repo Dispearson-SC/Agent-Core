@@ -194,6 +194,7 @@ class _SilentMailbox:
         turn_id: TurnId,
         hop: int,
         asker: AgentId | None = None,
+        request_key: str | None = None,
     ) -> str:
         self.sent.append((target, question, hop))
         return "corr-1"
@@ -252,6 +253,7 @@ def test_every_send_carries_a_required_hop_count() -> None:
         "turn_id",
         "hop",
         "asker",
+        "request_key",
     ], (
         "ask is frozen at the policy that authorises it, the peer, the question, the "
         "originating session and turn, the depth, and who is asking. The policy travels "
@@ -481,6 +483,7 @@ class StubMailbox:
         turn_id: TurnId,
         hop: int,
         asker: AgentId | None = None,
+        request_key: str | None = None,
     ) -> str:
         raise NotImplementedError
 
@@ -557,8 +560,9 @@ class _RecordsWhoAsked:
         turn_id: TurnId,
         hop: int,
         asker: AgentId | None = None,
+        request_key: str | None = None,
     ) -> str:
-        del policy, target, question, from_session, turn_id, hop
+        del policy, target, question, from_session, turn_id, hop, request_key
         self.askers.append(asker)
         return f"corr-{len(self.askers)}"
 
@@ -672,6 +676,7 @@ def test_every_send_names_who_is_asking() -> None:
         "turn_id",
         "hop",
         "asker",
+        "request_key",
     ], (
         "ask is frozen at the policy that authorises it, the peer, the question, the "
         "originating session and turn, the depth, and who is asking. The policy travels "

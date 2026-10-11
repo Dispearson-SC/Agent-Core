@@ -935,6 +935,9 @@ async def _step_ask_peers(
             # allowlist names agents, and CLAUDE.md non-negotiable #9 forbids widening one
             # identity into another on any code path.
             asker=caller,
+            # C2. The tool call that asked names the ask, so a replay of this step derives
+            # the same correlation id and cannot post (or run) a second peer turn.
+            request_key=str(ask.tool_call_id),
         )
         handles.append((correlation_id, ask.tool_call_id))
 

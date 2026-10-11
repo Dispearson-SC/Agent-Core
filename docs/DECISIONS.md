@@ -898,6 +898,32 @@ double click or retried POST arriving after its round resumed) is logged and ski
 duplicate peer wake-up; it never fails the turn. D30 narrows this: only a duplicate of a call an
 EARLIER round issued is ignored; an id no round issued fails the turn.
 
+## D29 · Peer asks have deterministic ids, and a peer turn is a durable workflow
+
+**C2 · deterministic ids.** The correlation id of an ask used to be `secrets.token_urlsafe`, made
+idempotent only by the mailbox's `(turn_id, target, question)` constraint, and the callee's
+session was `peer~<root>~<uuid4>`. Both are now DERIVED, so a DBOS replay of the asking step, or a
+second worker picking up the same row, names the same objects and cannot double-post or fork the
+callee's conversation:
+
+- `AgentMailbox.ask(..., request_key=None)` is new on the port. `_step_ask_peers` passes the
+  `ask_peer` tool call id. With a key, `correlation_id = uuid5(NS, json([turn_id, request_key,
+  target, question]))` (`domain.peers.peer_ask_id`). Target and question are in the name so a
+  provider that reuses a tool call id for a different question cannot collide on the primary key;
+  JSON encoding keeps one field from shifting into the next. Without a key the old random id is
+  kept (callers typed on the port before this change).
+- The mailbox stays idempotent per `(turn, target, question)` (D28): a word-for-word re-ask in a
+  later round, under a NEW tool call id, still returns the first row. Only the primary key and
+  that constraint can conflict, and both conflict together on a replay, so the `DO UPDATE` branch
+  returns the existing id instead of raising.
+- The A2A adapter sends the derived id as the message's `messageId`.
+- The callee session is `peer~<root origin>~<uuid5(NS, correlation_id)>`
+  (`domain.peers.peer_session_key`, `new_peer_session(key=...)`). Root-origin unwrapping and the
+  `~` validation are unchanged.
+
+Replay shape: step names and order are unchanged, only the id a step returns differs. The pinned
+application version is not bumped for this.
+
 ## D30 · Follow-ups of the D28 review: stale answers, stranded versions
 
 **Stale or unknown human answers (`_collect_round`).** D28 logged and skipped any `HumanAnswer`

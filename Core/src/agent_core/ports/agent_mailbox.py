@@ -64,6 +64,7 @@ class AgentMailbox(Protocol):
         turn_id: TurnId,
         hop: int,
         asker: AgentId | None = None,
+        request_key: str | None = None,
     ) -> str:
         """PSEUDO-CODE - F9. Returns a correlation id; the ANSWER arrives via DBOS.recv().
 
@@ -97,6 +98,13 @@ class AgentMailbox(Protocol):
            A customer-service agent must not be able to fish a person's calendar out of
            their assistant.
         4. Enqueue durably, return the correlation id.
+
+           `request_key` MAKES THE ID DETERMINISTIC (C2). The caller passes what identifies
+           this ask within the asking turn (the `ask_peer` tool call id); the correlation id
+           is then derived from `(turn_id, request_key, target, question)` instead of drawn
+           at random, so a DBOS replay of the asking step names the SAME row and can neither
+           double-post nor double-run. `None` keeps the previous behaviour (a random id,
+           idempotent per `(turn_id, target, question)`).
 
         THE ANSWER IS UNTRUSTED CONTENT. Another agent is a third party - it may have read
         something hostile. Wrap it in delimiters like any `mcp_*` result. "Our own agent"

@@ -128,7 +128,7 @@ from typing import Final, Protocol, runtime_checkable
 from uuid import uuid4
 
 from agent_core.adapters.driven.peers.mailbox import PeerAsk
-from agent_core.domain.peers import AgentId
+from agent_core.domain.peers import AgentId, peer_session_key
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     CallerIdentity,
@@ -303,7 +303,9 @@ def new_turn_id() -> TurnId:
     return TurnId(str(uuid4()))
 
 
-def new_peer_session(tenant_id: TenantId, origin: SessionRef | None = None) -> SessionRef:
+def new_peer_session(
+    tenant_id: TenantId, origin: SessionRef | None = None, key: str | None = None
+) -> SessionRef:
     """A brand new session for one answered ask, in the ASKING side's tenant.
 
     Never a session id supplied by a caller and never one reused between asks - see A FRESH
@@ -321,11 +323,18 @@ def new_peer_session(tenant_id: TenantId, origin: SessionRef | None = None) -> S
     (`peer~<root>~<uuid>`, a hop > 1 ask) the root is unwrapped, so the id never nests. An
     id containing `~` that is not a well-formed peer id is refused with `ValueError`, because
     a `~` inside the origin would make the id ambiguous to whoever parses it.
+
+    `key` makes the id DETERMINISTIC (C2): pass `peer_session_key(correlation_id)` and the same
+    ask always gets the same session, so a worker that claims the row again after a crash does
+    not fork the callee's conversation. Without it the suffix is random, as it always was.
     """
+    suffix = key if key is not None else str(uuid4())
+    if "~" in suffix:
+        raise ValueError(f"a peer session key must not contain '~': {suffix!r}")
     if origin is None:
-        return SessionRef(session_id=SessionId(f"peer-{uuid4()}"), tenant_id=tenant_id)
+        return SessionRef(session_id=SessionId(f"peer-{suffix}"), tenant_id=tenant_id)
     root = peer_root_origin(origin.session_id)
-    return SessionRef(session_id=SessionId(f"peer~{root}~{uuid4()}"), tenant_id=tenant_id)
+    return SessionRef(session_id=SessionId(f"peer~{root}~{suffix}"), tenant_id=tenant_id)
 
 
 def peer_root_origin(session_id: str) -> str:
@@ -438,7 +447,11 @@ async def answer_next_ask(
 
     try:
         session = (
-            new_peer_session(ask.from_session.tenant_id, origin=ask.from_session)
+            new_peer_session(
+                ask.from_session.tenant_id,
+                origin=ask.from_session,
+                key=peer_session_key(ask.correlation_id),
+            )
             if mint_session is None
             else mint_session(ask.from_session.tenant_id, ask.from_session)
         )

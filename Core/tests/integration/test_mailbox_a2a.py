@@ -137,6 +137,7 @@ class _FixturePeer:
     def __init__(self) -> None:
         self.next_result: dict[str, Any] = {"state": "completed", "text": "the default answer"}
         self.received_questions: list[str] = []
+        self.received_messages: list[dict[str, Any]] = []
         handler = self._make_handler()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -179,6 +180,7 @@ class _FixturePeer:
                 message = request["params"]["message"]
                 text = message["parts"][0]["text"]
                 peer.received_questions.append(text)
+                peer.received_messages.append(message)
 
                 result: dict[str, Any] = {
                     "id": f"task-{uuid.uuid4()}",
@@ -283,6 +285,38 @@ async def test_ask_round_trips_a_question_and_a_synchronous_answer_over_real_soc
         "third party and 'it is our own agent' is not a trust argument - CLAUDE.md #10"
     )
     assert "yes, free after 3pm" in delivered
+
+
+@pytest.mark.asyncio
+async def test_a_keyed_ask_sends_a_stable_message_id_and_an_unkeyed_one_sends_none(
+    fixture_peer: _FixturePeer,
+) -> None:
+    """C2 on the wire: a replayed send carries the same A2A `messageId`, so a peer that
+    de-duplicates on it runs the task once."""
+    fixture_peer.next_result = {"state": "completed", "text": "ok"}
+    mailbox = await _mailbox()
+    policy = _policy_for(fixture_peer)
+    turn_id = TurnId(str(uuid.uuid4()))
+    question = f"q [{uuid.uuid4()}]"
+
+    async def send(key: str | None) -> None:
+        await mailbox.ask(
+            policy,
+            _ASSISTANT,
+            question,
+            from_session=_session(),
+            turn_id=turn_id,
+            hop=0,
+            request_key=key,
+        )
+
+    await send("tc-1")
+    await send("tc-1")
+    await send(None)
+
+    first, replay, unkeyed = fixture_peer.received_messages
+    assert first["messageId"] == replay["messageId"]
+    assert "messageId" not in unkeyed
 
 
 @pytest.mark.asyncio

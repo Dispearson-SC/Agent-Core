@@ -53,7 +53,7 @@ import pytest
 from agent_core.adapters.driven.agent_pydantic.runner import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
 from agent_core.adapters.driven.peers.mailbox import PeerAsk, PgAgentMailbox
 from agent_core.adapters.driven.persistence_pg import migrations, peers_migration
-from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy
+from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy, peer_ask_id
 from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId
 
 _ADMIN_CONNINFO = os.environ.get(
@@ -191,6 +191,72 @@ def test_a_retried_step_enqueues_one_ask_and_returns_the_same_correlation_id() -
     assert len(rows) == 1, (
         f"{len(rows)} queued rows for one ask; the peer is asked - and billed - twice"
     )
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_a_replayed_keyed_ask_names_the_same_row_and_is_claimed_once() -> None:
+    """C2: the id derives from (turn, tool call, target, question), so a replay of the ask
+    step - on any mailbox instance, in any process - cannot post a second row or run a second
+    peer turn."""
+    conninfo = _migrated_conninfo()
+    session = _session()
+    turn_id = TurnId(str(uuid.uuid4()))
+    question = f"what is the balance? [{uuid.uuid4()}]"
+    target = AgentId(f"assistant-{uuid.uuid4()}")  # its own queue: other tests leave rows behind
+
+    def ask(mailbox: PgAgentMailbox, key: str) -> str:
+        return asyncio.run(
+            mailbox.ask(
+                _POLICY,
+                target,
+                question,
+                from_session=session,
+                turn_id=turn_id,
+                hop=0,
+                request_key=key,
+            )
+        )
+
+    first = ask(PgAgentMailbox(conninfo), "tc-1")
+    replayed = ask(PgAgentMailbox(conninfo), "tc-1")
+
+    assert first == replayed == peer_ask_id(str(turn_id), "tc-1", str(target), question)
+    with psycopg.connect(conninfo) as conn:
+        rows = conn.execute(
+            "SELECT correlation_id FROM peer_messages WHERE turn_id = %s", (turn_id,)
+        ).fetchall()
+    assert [row[0] for row in rows] == [first], "one row for one ask, however often it replays"
+
+    claimed = asyncio.run(PgAgentMailbox(conninfo).claim_next(target))
+    again = asyncio.run(PgAgentMailbox(conninfo).claim_next(target))
+    assert claimed is not None and claimed.correlation_id == first
+    assert again is None, "the peer would run twice"
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_a_repeat_question_under_another_tool_call_still_reuses_the_first_row() -> None:
+    """The mailbox stays idempotent per (turn, target, question) (D28): a word-for-word re-ask
+    in a later round, under a NEW tool call id, gets the handle it already gave out."""
+    conninfo = _migrated_conninfo()
+    session = _session()
+    turn_id = TurnId(str(uuid.uuid4()))
+    question = f"same question [{uuid.uuid4()}]"
+    mailbox = PgAgentMailbox(conninfo)
+
+    def ask(key: str) -> str:
+        return asyncio.run(
+            mailbox.ask(
+                _POLICY,
+                _ASSISTANT,
+                question,
+                from_session=session,
+                turn_id=turn_id,
+                hop=0,
+                request_key=key,
+            )
+        )
+
+    assert ask("tc-1") == ask("tc-2")
 
 
 @pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")

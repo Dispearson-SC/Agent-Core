@@ -111,7 +111,7 @@ from typing import Any, Final
 import psycopg
 
 from agent_core.adapters.driven.agent_pydantic.runner import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
-from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy
+from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy, peer_ask_id
 from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId
 
 # 32 bytes, so the handle carries 256 bits. A correlation id is what an inbound answer
@@ -258,6 +258,7 @@ class PgAgentMailbox:
         turn_id: TurnId,
         hop: int,
         asker: AgentId | None = None,
+        request_key: str | None = None,
     ) -> str:
         """Enqueue durably and return the correlation id the answer will arrive with.
 
@@ -274,6 +275,12 @@ class PgAgentMailbox:
         typed on the port cannot pass it yet. Omitting it stores NULL, records that at
         WARNING, and leaves the answering side with no caller to check - which is the
         truth about that row, and the reason the line is loud.
+
+        `request_key` (C2) derives the correlation id from `(turn_id, request_key, target,
+        question)` with `domain.peers.peer_ask_id`; omitted, the id is random as before. A
+        replayed step with the same key lands on the same primary key AND the same
+        `(turn, target, question)` constraint, so the second INSERT is the no-op `DO UPDATE`
+        and returns the first row's id: one row, one claim, one peer run.
         """
         if asker is None:
             _LOG.warning(
@@ -283,7 +290,7 @@ class PgAgentMailbox:
                 target,
             )
         return await asyncio.to_thread(
-            self._enqueue_sync, target, question, from_session, turn_id, hop, asker
+            self._enqueue_sync, target, question, from_session, turn_id, hop, asker, request_key
         )
 
     def _enqueue_sync(
@@ -294,12 +301,18 @@ class PgAgentMailbox:
         turn_id: TurnId,
         hop: int,
         asker: AgentId | None,
+        request_key: str | None,
     ) -> str:
+        correlation_id = (
+            secrets.token_urlsafe(_CORRELATION_ID_BYTES)
+            if request_key is None
+            else peer_ask_id(str(turn_id), request_key, str(target), question)
+        )
         with psycopg.connect(self._conninfo, autocommit=True) as conn:
             row = conn.execute(
                 _ENQUEUE_SQL,
                 (
-                    secrets.token_urlsafe(_CORRELATION_ID_BYTES),
+                    correlation_id,
                     target,
                     from_session.session_id,
                     from_session.tenant_id,

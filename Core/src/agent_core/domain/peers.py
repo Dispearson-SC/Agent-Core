@@ -25,11 +25,42 @@ A2A ALIGNMENT - SHAPE NOW, PROTOCOL LATER
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import NewType
+from typing import Final, NewType
+from uuid import UUID, uuid5
 
 AgentId = NewType("AgentId", str)
+
+# The namespace of every id DERIVED for a peer ask (C2). A constant of the source: changing it
+# changes every id, so it is never edited. Generated once with uuid4().
+_PEER_ID_NAMESPACE: Final[UUID] = UUID("5b1c1f0e-6f6d-4d53-9a52-0d2c3f6f9a11")
+
+
+def peer_ask_id(turn_id: str, request_key: str, target: str, question: str) -> str:
+    """The correlation id of one ask, derived from what identifies it. Pure.
+
+    `turn_id` is the asking workflow's id, `request_key` the tool call that asked. Target and
+    question are part of the name because the mailbox is also idempotent per
+    `(turn, target, question)` (a word-for-word re-ask in a later round is the same ask, D28):
+    if a provider ever reused a tool call id for a different question the two keys must not
+    collide on the primary key. The fields are JSON-encoded as a list, so no choice of values
+    can shift characters from one field into the next.
+
+    A DBOS replay of the ask step recomputes the same id and so names the same row; nothing
+    here needs a random source (CLAUDE.md non-negotiable #2).
+    """
+    return str(uuid5(_PEER_ID_NAMESPACE, json.dumps([turn_id, request_key, target, question])))
+
+
+def peer_session_key(correlation_id: str) -> str:
+    """The stable suffix of the session an ask's answering turn runs in. Pure.
+
+    Derived from the correlation id, so a worker that picks the same row up again (after a
+    crash) files the callee's turn under the same session, not a fresh one.
+    """
+    return str(uuid5(_PEER_ID_NAMESPACE, correlation_id))
 
 
 class PeerVisibility(StrEnum):

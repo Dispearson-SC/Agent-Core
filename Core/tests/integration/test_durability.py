@@ -499,6 +499,7 @@ class _RecordingMailbox:
         # here would let the answering side's `callee_policy.may_ask(caller)` pass in a
         # test and refuse in production - a double arguing the opposite of the code.
         asker: AgentId | None = None,
+        request_key: str | None = None,
     ) -> str:
         del policy, from_session, turn_id, asker
         self.asks.append((target, question, hop))

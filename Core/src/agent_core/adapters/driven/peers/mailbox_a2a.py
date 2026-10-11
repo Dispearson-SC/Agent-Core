@@ -82,7 +82,7 @@ from typing import Any, Final
 import httpx
 
 from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
-from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy
+from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy, peer_ask_id
 from agent_core.domain.turn import SessionRef, TurnId
 
 _AGENT_CARD_PATH: Final[str] = "/.well-known/agent-card.json"
@@ -142,6 +142,7 @@ class A2AAgentMailbox:
         turn_id: TurnId,
         hop: int,
         asker: AgentId | None = None,
+        request_key: str | None = None,
     ) -> str:
         """Send one A2A `message/send` request and return the task id as correlation id.
 
@@ -157,6 +158,10 @@ class A2AAgentMailbox:
         pass it yet. Omitting it sends no `from_agent_id` key at all rather than a null
         one, and says so at WARNING - an absent claim is not the same message as a claim
         of nobody, and a peer must be able to tell the two apart.
+
+        `request_key` (C2) is sent as the A2A `messageId`, derived with `peer_ask_id`, so a
+        replayed send carries the same id and a peer that de-duplicates on it runs the task
+        once. Omitted, no `messageId` is sent (the previous behaviour).
         """
         endpoint = _endpoint_for(policy, target)
         if asker is None:
@@ -174,6 +179,11 @@ class A2AAgentMailbox:
         }
         if asker is not None:
             metadata["from_agent_id"] = str(asker)
+        message_id: dict[str, str] = (
+            {}
+            if request_key is None
+            else {"messageId": peer_ask_id(str(turn_id), request_key, str(target), question)}
+        )
         payload = {
             "jsonrpc": "2.0",
             "id": str(uuid.uuid4()),
@@ -181,6 +191,7 @@ class A2AAgentMailbox:
             "params": {
                 "message": {
                     "role": "user",
+                    **message_id,
                     "parts": [{"kind": "text", "text": question}],
                     # Not enforced here (see module docstring) - carried so a compliant
                     # peer, or a future receiving-side A2A adapter, can enforce its own
