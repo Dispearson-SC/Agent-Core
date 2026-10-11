@@ -275,7 +275,13 @@ class PeerTurnStarter(Protocol):
     is the production binding (a DBOS workflow with id `peer-<correlation_id>`).
 
     `runtime_checkable` so `run_peer_worker` can accept either seat and pick the path.
+
+    `exists` answers "is the workflow for this ask already enqueued or running?" (C1d). A
+    `start` that raised may have committed first (a lost ack, a shutdown), so the worker asks
+    before it closes the ask as failed.
     """
+
+    async def exists(self, correlation_id: str) -> bool: ...
 
     async def start(
         self,
@@ -510,13 +516,36 @@ async def dispatch_next_ask(
             answer_token=ask.answer_token,
         )
     except (Exception, asyncio.CancelledError):
-        await _answer_failed_ask(queue, ask, wake)
+        # C1d. `start` can fail AFTER its enqueue committed (a lost ack, an engine shutdown
+        # cancelling the call). Closing the ask then would answer the asker with a failure
+        # while the workflow it holds a handle to goes on to answer for real. Close only when
+        # the workflow DEFINITELY does not exist; otherwise leave the row `delivered` (the
+        # redelivery lease, C3, reclaims one that really was lost) and let the error propagate.
+        if await _definitely_not_started(starter, ask.correlation_id):
+            await _answer_failed_ask(queue, ask, wake)
         raise
     return PeerTurnReport(
         correlation_id=ask.correlation_id,
         target=ask.target,
         disposition=AskDisposition.STARTED,
     )
+
+
+async def _definitely_not_started(starter: PeerTurnStarter, correlation_id: str) -> bool:
+    """True only when the starter reports that `peer-<correlation_id>` does not exist.
+
+    An error while asking is "unknown", and unknown is not "no": the caller leaves the ask open.
+    """
+    try:
+        return not await starter.exists(correlation_id)
+    except Exception:
+        logger.warning(
+            "could not tell whether the workflow for peer ask %s was enqueued; leaving the ask "
+            "open for redelivery",
+            correlation_id,
+            exc_info=True,
+        )
+        return False
 
 
 async def answer_next_ask(

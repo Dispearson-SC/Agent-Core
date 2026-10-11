@@ -1018,3 +1018,13 @@ migration have a NULL token and are answered with None, so asks in flight across
 complete; that is the only window where an id alone answers. Not covered: the `PeerAnswer`
 wake-up on the durable topic is addressed by workflow id and still names only the correlation
 id; a forged wake finds no recorded answer and the asker rejects it as before.
+
+**C1d · an ambiguous start does not close the ask.** `dispatch_next_ask` wrote
+`PEER_ASK_FAILED_ANSWER` on any exception or cancellation out of `starter.start`, even when the
+enqueue had already committed (a lost acknowledgement, an engine shutdown): the asker then got a
+failure while `peer-<correlation_id>` went on to answer. `PeerTurnStarter` gained
+`exists(correlation_id)` (`DurablePeerTurnStarter`: `DBOS.get_workflow_status_async` is not
+None). After a failed start the worker closes the ask ONLY when `exists` says the workflow
+definitely does not exist, and re-raises either way (a `CancelledError` is re-raised after the
+same decision). If `exists` itself fails the answer is "unknown", the ask is left `delivered`,
+and the redelivery lease (C3) reclaims it if the workflow really was lost.

@@ -65,7 +65,17 @@ class _Queue:
 class _Starter:
     started: list[tuple[str, TurnId, TurnRequest]] = field(default_factory=list)
     tokens: list[str | None] = field(default_factory=list)
-    error: Exception | None = None
+    error: BaseException | None = None
+    # C1d: the enqueue COMMITTED before the call failed (a lost ack, a shutdown).
+    commits_before_failing: bool = False
+    exists_error: Exception | None = None
+    exists_calls: list[str] = field(default_factory=list)
+
+    async def exists(self, correlation_id: str) -> bool:
+        self.exists_calls.append(correlation_id)
+        if self.exists_error is not None:
+            raise self.exists_error
+        return any(started[0] == correlation_id for started in self.started)
 
     async def start(
         self,
@@ -76,6 +86,8 @@ class _Starter:
         answer_token: str | None = None,
     ) -> None:
         if self.error is not None:
+            if self.commits_before_failing:
+                self.started.append((correlation_id, asking_turn_id, request))
             raise self.error
         self.started.append((correlation_id, asking_turn_id, request))
         self.tokens.append(answer_token)
@@ -179,3 +191,58 @@ def test_closing_a_failed_start_presents_the_token_too() -> None:
         asyncio.run(dispatch_next_ask(queue, starter, target=AgentId("specialist")))
 
     assert queue.tokens == ["tok-c1"]
+
+
+def _dispatch_failing(
+    starter: _Starter, queue: _Queue, error_type: type[BaseException]
+) -> list[tuple[TurnId, str]]:
+    woken: list[tuple[TurnId, str]] = []
+
+    async def wake(turn_id: TurnId, correlation_id: str) -> None:
+        woken.append((turn_id, correlation_id))
+
+    with pytest.raises(error_type):
+        asyncio.run(dispatch_next_ask(queue, starter, target=AgentId("specialist"), wake=wake))
+    return woken
+
+
+def test_a_start_that_committed_before_failing_does_not_close_the_ask() -> None:
+    """C1d. A lost ack after the enqueue committed: the workflow exists and will answer. Closing
+    the ask with the failure text would hand the asker a wrong answer first."""
+    queue = _Queue([_ask()])
+    starter = _Starter(error=RuntimeError("ack lost"), commits_before_failing=True)
+
+    woken = _dispatch_failing(starter, queue, RuntimeError)
+
+    assert starter.exists_calls == ["c1"], "asked whether peer-<id> exists before deciding"
+    assert queue.answered == [] and woken == []
+
+
+def test_a_cancelled_start_whose_workflow_exists_does_not_close_the_ask_and_reraises() -> None:
+    queue = _Queue([_ask()])
+    starter = _Starter(error=asyncio.CancelledError(), commits_before_failing=True)
+
+    woken = _dispatch_failing(starter, queue, asyncio.CancelledError)
+
+    assert queue.answered == [] and woken == []
+
+
+def test_a_cancelled_start_that_definitely_enqueued_nothing_closes_the_ask() -> None:
+    queue = _Queue([_ask()])
+    starter = _Starter(error=asyncio.CancelledError())
+
+    woken = _dispatch_failing(starter, queue, asyncio.CancelledError)
+
+    assert queue.answered == [("c1", PEER_ASK_FAILED_ANSWER)]
+    assert woken == [(TurnId("asker-turn"), "c1")]
+
+
+def test_when_existence_cannot_be_determined_the_ask_is_left_open_for_redelivery() -> None:
+    """Unknown is not 'does not exist': closing could hide a live workflow's answer. The row
+    stays delivered and the C3 lease reclaims it."""
+    queue = _Queue([_ask()])
+    starter = _Starter(error=RuntimeError("down"), exists_error=ConnectionError("db down"))
+
+    woken = _dispatch_failing(starter, queue, RuntimeError)
+
+    assert queue.answered == [] and woken == []

@@ -380,3 +380,26 @@ def test_a_crash_after_the_claim_and_a_second_claim_of_the_row_yield_exactly_one
     ], "exactly one answer on the row"
     asker_resumes = [profile for profile, _ in world.resume.calls if profile == fanout.ASKER]
     assert asker_resumes == [fanout.ASKER], "the asker resumed exactly once"
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_the_durable_starter_knows_whether_a_peer_workflow_was_enqueued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1d: the worker's 'did my failed start commit?' question, against real DBOS."""
+    world = _bind(monkeypatch)
+    starter = turn_workflow.DurablePeerTurnStarter()
+    seen: dict[str, bool] = {}
+
+    async def drive() -> None:
+        async with _Dbos():
+            seen["before"] = await starter.exists("corr-that-was-never-started")
+            await turn_workflow.enqueue_turn(fanout.request(), turn_id=_ASKING_TURN)
+            await _until(lambda: world.mailbox.queued, "the ask to reach the mailbox")
+            assert await _dispatch(world) is AskDisposition.STARTED
+            (corr,) = world.mailbox.rows
+            seen["started"] = await starter.exists(corr)
+
+    asyncio.run(drive())
+
+    assert seen == {"before": False, "started": True}

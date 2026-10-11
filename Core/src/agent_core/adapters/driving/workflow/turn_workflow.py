@@ -2157,6 +2157,10 @@ class DurablePeerTurnStarter:
     the callee thinks or waits for its human, and the workflow, not the worker, answers.
     """
 
+    async def exists(self, correlation_id: str) -> bool:
+        """Whether `peer-<correlation_id>` is already known to DBOS (any state). C1d."""
+        return await DBOS.get_workflow_status_async(peer_workflow_id(correlation_id)) is not None
+
     async def start(
         self,
         correlation_id: str,
