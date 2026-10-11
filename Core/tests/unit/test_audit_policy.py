@@ -124,3 +124,66 @@ def test_presence_fields_store_the_fixed_sentence() -> None:
     sink = _sink({}, {"t": frozenset({"note"})})
 
     assert sink._redact("t", {"note": "secret"}) == {"note": PRESENCE_RECORDED}
+
+
+def test_a_package_cannot_widen_a_builtin_presence_field_to_by_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`case_notes_append.note` is decided by presence; `_redact` reads by-value first."""
+    monkeypatch.setattr(
+        _this_module(), "AUDIT_ALLOW", {"case_notes_append": frozenset({"note"})}, raising=False
+    )
+
+    with pytest.raises(ValueError, match="case_notes_append"):
+        collect_audit_policy({"pkg": _builder})  # type: ignore[dict-item]
+
+
+def test_a_package_cannot_narrow_a_builtin_by_value_field_to_presence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        _this_module(),
+        "AUDIT_PRESENCE_ONLY",
+        {"pricing_apply": frozenset({"order_id"})},
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="pricing_apply"):
+        collect_audit_policy({"pkg": _builder})  # type: ignore[dict-item]
+
+
+def test_two_packages_cannot_decide_one_field_in_different_maps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import types
+
+    mod_a = types.ModuleType("audit_pkg_a")
+    mod_a.AUDIT_ALLOW = {"shared_tool": frozenset({"memo"})}  # type: ignore[attr-defined]
+    mod_b = types.ModuleType("audit_pkg_b")
+    mod_b.AUDIT_PRESENCE_ONLY = {"shared_tool": frozenset({"memo"})}  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "audit_pkg_a", mod_a)
+    monkeypatch.setitem(sys.modules, "audit_pkg_b", mod_b)
+
+    def build_a() -> None: ...
+
+    def build_b() -> None: ...
+
+    build_a.__module__ = "audit_pkg_a"
+    build_b.__module__ = "audit_pkg_b"
+
+    with pytest.raises(ValueError, match="shared_tool"):
+        collect_audit_policy({"a": build_a, "b": build_b})  # type: ignore[dict-item]
+
+
+def test_disjoint_fields_of_one_tool_across_maps_are_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_this_module(), "AUDIT_ALLOW", {"t9": frozenset({"id"})}, raising=False)
+    monkeypatch.setattr(
+        _this_module(), "AUDIT_PRESENCE_ONLY", {"t9": frozenset({"body"})}, raising=False
+    )
+
+    allow, presence = collect_audit_policy({"pkg": _builder})  # type: ignore[dict-item]
+
+    assert allow["t9"] == frozenset({"id"})
+    assert presence["t9"] == frozenset({"body"})

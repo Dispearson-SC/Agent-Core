@@ -438,7 +438,9 @@ declare:
 - `AUDIT_ALLOW` / `AUDIT_PRESENCE_ONLY`: `{tool_name: frozenset({argument, ...})}`. Arguments
   stored by value / by presence in the audit trail; an empty set is a decision ("this tool
   takes nothing worth recording"). A package may not change a tool that already has a
-  different decision (`ValueError` at startup). Everything else is dropped, and an
+  different decision (`ValueError` at startup), and a field it declares must sit in one map
+  only: it cannot move a built-in or another package's field between by-value and by-presence.
+  Everything else is dropped, and an
   undecided tool is logged once.
 
 - Channel / modality style: a profile may declare `channel_instructions: {whatsapp: "..."}`

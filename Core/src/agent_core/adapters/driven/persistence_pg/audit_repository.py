@@ -211,11 +211,14 @@ def collect_audit_policy(
 
     A package may not change a tool another source already decided: a different set for the
     same tool name raises `ValueError`, because silently widening what an existing tool
-    records would be a data-exposure path. An identical repeat is accepted. Returns
+    records would be a data-exposure path. The same holds across the two maps: a field a
+    package declares must not also be decided in the other map by a built-in or another
+    package. An identical repeat is accepted. Returns
     `(by_value, by_presence)`.
     """
     allow = dict(ARGUMENT_ALLOWLIST)
     presence = dict(ARGUMENT_PRESENCE_ONLY)
+    contributed_fields: dict[tuple[str, str], set[str]] = {}
     for target, attribute in ((allow, "AUDIT_ALLOW"), (presence, "AUDIT_PRESENCE_ONLY")):
         for package, builder in packages.items():
             contributed = _package_policy(getattr(builder, "__module__", ""), attribute)
@@ -226,6 +229,18 @@ def collect_audit_policy(
                         "already has a different audit decision"
                     )
                 target[tool] = fields
+                for field in fields:
+                    contributed_fields.setdefault((tool, field), set()).add(attribute)
+    # `_redact` reads by-value first, so a field a package puts in AUDIT_ALLOW overrides a
+    # presence decision elsewhere (widening), and the reverse silently narrows a built-in.
+    # Any field a package touched must therefore sit in exactly one map. (A built-in field
+    # listed in both maps on purpose is not a package contribution and is left alone.)
+    for (tool, field), _attributes in sorted(contributed_fields.items()):
+        if field in allow.get(tool, frozenset()) and field in presence.get(tool, frozenset()):
+            raise ValueError(
+                f"audit policy for {tool!r}.{field!r} is declared both by value and by "
+                "presence; a package may not change another source's decision across maps"
+            )
     return allow, presence
 
 
