@@ -610,6 +610,11 @@ tool the agent cannot resolve locally
 
 `AgentMailbox` exists only for addressing and routing, not for waiting.
 
+The model may emit several `ask_peer` calls in one step. The workflow dispatches them all,
+waits until every one is answered (or the asker's `reply_timeout_seconds` passes, giving an
+error result for only the unanswered calls) and resumes the turn once with all results in
+`tool_call_id` order. Pydantic AI cannot continue on a subset. See DECISIONS D28.
+
 ### A2A: shape now, wire protocol in D2
 
 Agent2Agent reached **v1.0 under the Linux Foundation**, backed by Google, Microsoft and

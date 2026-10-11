@@ -843,3 +843,31 @@ serve a global sweep by age, which is a sequential scan of the whole table. The 
 its own `created_at`-leading index, or it must run per session. That belongs to whoever
 owns the sweep; the claim in the docstring is wrong today and is recorded here so the sweep
 is not written against it.
+
+## D28 · Several `ask_peer` calls in one model step: collect every answer, resume once
+
+**Defect.** Pydantic AI continues a run that stopped on N deferred calls only when it is
+handed results for all N (`UserError: Tool call results need to be provided for all
+deferred tool calls`). The workflow woke on each `PeerAnswer` and resumed with that one
+answer, so the first reply to a two-ask step failed the turn. A vertical masked it in the
+tool (one `ask_peer` per step); the cause is in the workflow.
+
+**Decision.** When a round's pending set is more than one call and every call is a
+delegation (`PendingKind.DELEGATION`), the workflow body collects results (peer answers,
+gate refusals, timeouts) and runs a single `_step_resume_peers` once all are in, in
+`tool_call_id` order. All asks are dispatched before the wait, so the peers run
+concurrently and the round costs the slowest peer.
+
+- **Deadline.** The asking profile's `PeerPolicy.reply_timeout_seconds`, counted from the
+  moment the asks left. An ask still unanswered at the deadline gets an error text for that
+  call only; answers that arrived are delivered. Time comes from a recorded step
+  (`_step_peer_clock`), so replay recomputes the same remaining time.
+- **Late replies.** A reply to a timed-out ask is skipped by later waits (its call was
+  already answered), instead of resuming the turn on it.
+- **Unchanged.** Hop gate per ask, mailbox idempotency, answer wrapping at one place, audit.
+
+**Deliberately not changed (conservative scope).** A single ask, and a round that mixes a
+human's request (approval or evidence) with peer asks, keep the previous per-answer path
+and its 3-day wait. The mixed case has the same partial-resume defect; fixing it means
+collecting human answers too and is a separate decision. The single-ask path therefore does
+not honour `reply_timeout_seconds` yet, which `PeerPolicy` documents.
