@@ -235,3 +235,35 @@ def test_a_refused_answer_does_not_wake_the_asker_or_fail_the_workflow(
     _run()
 
     assert recorder.signals == []
+
+
+def test_a_genuine_answer_that_equals_a_sentinel_sentence_is_still_an_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1e. 'Closed unanswered' comes from the typed `_TurnEnd.closed` only. A callee whose real
+    answer happens to read like the abandon/expire text must not be rewritten."""
+    recorder = _setup(monkeypatch, start_step=_finishes(turn_workflow._NO_ANSWER))
+
+    _run()
+
+    assert recorder.world.mailbox.answer_calls == [(CORRELATION, turn_workflow._NO_ANSWER)]
+
+
+def test_a_callee_that_expires_inside_a_collected_round_is_closed_unanswered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1e. The mixed round (a person's approval plus an ask the gate refuses) goes through
+    `_collect_round`; its expiry must be typed as closed too, not detected by comparing text."""
+
+    async def suspends(turn_id: TurnId, request: TurnRequest) -> TurnOutcome:
+        return TurnOutcome(
+            turn_id=turn_id, pending=(_approval(), fanout.ask("tc-sub", target=fanout.ASKER))
+        )
+
+    recorder = _setup(
+        monkeypatch, start_step=suspends, script=[fanout.nobody_answers(turn_workflow.THREE_DAYS)]
+    )
+
+    _run()
+
+    assert recorder.world.mailbox.answer_calls == [(CORRELATION, PEER_ASK_CLOSED_ANSWER)]

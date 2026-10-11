@@ -1028,3 +1028,14 @@ None). After a failed start the worker closes the ask ONLY when `exists` says th
 definitely does not exist, and re-raises either way (a `CancelledError` is re-raised after the
 same decision). If `exists` itself fails the answer is "unknown", the ask is left `delivered`,
 and the redelivery lease (C3) reclaims it if the workflow really was lost.
+
+**C1e · readability.** The peer workflow decides "closed unanswered" from the typed
+`_TurnEnd.closed` only; the comparison of the reply text with the `_NO_ANSWER` /
+`_TOO_MANY_ROUNDS` sentences is gone (a genuine answer could read the same). That needed
+`_collect_round` to return a `_TurnEnd`: a person not deciding inside a collected round now ends
+the turn as `closed`, which was previously visible only through the text. Side effect for an
+ordinary turn: expiry inside a collected round no longer runs the delivery and compaction steps,
+exactly like the per-answer path (an expired turn is the turn giving up, not answering). The
+private `_FAILED_ASK_ANSWER` alias in the worker was removed (the domain constant is used), and
+`cli/stranded_turns.py` has the `first_line` helper and documents that
+`dbos.workflow_status.created_at` is epoch MILLISECONDS (`row_to_stranded`).

@@ -47,6 +47,8 @@ __all__ = [
     "find_stranded_workflows",
     "render_report",
     "run_stranded_check",
+    "first_line",
+    "row_to_stranded",
     "system_conninfo",
 ]
 
@@ -106,18 +108,35 @@ def find_stranded_workflows(settings: Settings) -> tuple[StrandedWorkflow, ...]:
         # str(error) carries no password (psycopg does not echo it), but name the class.
         raise StrandedCheckUnavailableError(
             f"could not read the DBOS system database ({type(unreachable).__name__}): "
-            f"{str(unreachable).strip().splitlines()[0] if str(unreachable).strip() else ''}"
+            f"{first_line(str(unreachable))}"
         ) from unreachable
-    return tuple(
-        StrandedWorkflow(
-            workflow_id=str(row[0]),
-            name=str(row[1]),
-            status=str(row[2]),
-            application_version=str(row[3]),
-            queue_name=None if row[4] is None else str(row[4]),
-            created_at=datetime.fromtimestamp(int(row[5]) / 1000, tz=UTC),
-        )
-        for row in rows
+    return tuple(row_to_stranded(row) for row in rows)
+
+
+def first_line(message: str) -> str:
+    """The first line of a driver error, or '' when there is none.
+
+    Driver errors can run to several lines (hints, the failing statement); the operator report
+    needs the headline only.
+    """
+    stripped = message.strip()
+    return stripped.splitlines()[0] if stripped else ""
+
+
+def row_to_stranded(row: tuple[Any, ...]) -> StrandedWorkflow:
+    """One `_SELECT_STRANDED` row as a `StrandedWorkflow`.
+
+    `dbos.workflow_status.created_at` is BIGINT epoch MILLISECONDS (not seconds, not a
+    timestamp), hence the `/ 1000`; a column that changed unit would shift every date here by
+    a factor of a thousand, which is what the unit test of this function pins.
+    """
+    return StrandedWorkflow(
+        workflow_id=str(row[0]),
+        name=str(row[1]),
+        status=str(row[2]),
+        application_version=str(row[3]),
+        queue_name=None if row[4] is None else str(row[4]),
+        created_at=datetime.fromtimestamp(int(row[5]) / 1000, tz=UTC),
     )
 
 

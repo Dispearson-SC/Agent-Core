@@ -106,3 +106,32 @@ def test_the_subcommand_is_wired_and_its_code_is_the_process_exit_code(
         main.main(["stranded-turns"])
 
     assert exit_info.value.code == 1
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("connection refused\nHINT: is the server running?", "connection refused"),
+        ("  \n  ", ""),
+        ("", ""),
+        ("one line", "one line"),
+    ],
+)
+def test_the_first_line_of_a_driver_error_is_all_the_report_shows(
+    message: str, expected: str
+) -> None:
+    assert stranded_turns.first_line(message) == expected
+
+
+def test_a_stranded_workflow_row_converts_the_epoch_milliseconds_of_the_dbos_column() -> None:
+    """`dbos.workflow_status.created_at` is BIGINT epoch MILLISECONDS."""
+    row = (
+        "wf-1", "run_turn_workflow", "PENDING", "agent-core-turns.1", "agent-core-turns",
+        1_791_000_000_000,
+    )  # fmt: skip
+
+    converted = stranded_turns.row_to_stranded(row)
+
+    assert converted.created_at == datetime.fromtimestamp(1_791_000_000, tz=UTC)
+    assert converted.queue_name == "agent-core-turns"
+    assert stranded_turns.row_to_stranded((*row[:4], None, row[5])).queue_name is None

@@ -1179,8 +1179,11 @@ async def _collect_round(
     peer_calls: dict[str, ToolCallId],
     timed_out: set[str],
     earlier_calls: frozenset[str] = frozenset(),
-) -> TurnOutcome:
+) -> _TurnEnd:
     """Wait for EVERY result of one model step, then resume the turn once.
+
+    Returns a `_TurnEnd`: `closed=True` when a person did not decide in time and the turn
+    expired (C1e), so the peer workflow can tell "gave up" from "answered" by type.
 
     Called from the workflow body: it makes no decision that is not a function of step
     results and the recorded `recv_async` values (the clock and the reply timeout are
@@ -1255,7 +1258,7 @@ async def _collect_round(
         if answer is None:
             now = await _step_round_clock()
             if human_missing and (human_deadline <= now or human_deadline == nearest):
-                return await _step_expire(turn_id)
+                return _TurnEnd(await _step_expire(turn_id), closed=True)
             for corr, tool_call_id in awaiting.items():
                 timed_out.add(corr)
                 peer_results[tool_call_id] = _PEER_TIMED_OUT.format(
@@ -1324,12 +1327,14 @@ async def _collect_round(
         _, wrapped = await _step_read_peer_answer(turn_id, answer, asked_id)
         peer_results[asked_id] = wrapped
 
-    return await _step_resume_round(
-        turn_id,
-        request,
-        tuple(ask.tool_call_id for ask in asks),
-        tuple(peer_results.items()),
-        tuple(decisions.values()),
+    return _TurnEnd(
+        await _step_resume_round(
+            turn_id,
+            request,
+            tuple(ask.tool_call_id for ask in asks),
+            tuple(peer_results.items()),
+            tuple(decisions.values()),
+        )
     )
 
 
@@ -1635,9 +1640,12 @@ async def _drive_turn(request: TurnRequest) -> _TurnEnd:
         # deferred calls, and a peer wait is bounded by the asker's reply timeout.
         # A round with no peer ask keeps the per-answer wait below.
         if _for_a_peer(ordered):
-            outcome = await _collect_round(
+            collected = await _collect_round(
                 turn_id, request, ordered, dispatch, peer_calls, timed_out_peers, earlier_calls
             )
+            if collected.closed:
+                return collected
+            outcome = collected.outcome
             continue
 
         # Only human-only rounds reach here (a round with any peer ask went through
@@ -1858,8 +1866,11 @@ async def run_peer_turn_workflow(job: PeerTurnJob) -> TurnOutcome:
         await _close_peer_ask(job, PEER_ASK_FAILED_ANSWER)
         raise
     result = end.outcome.result
-    closed = end.closed or result is None or result.text in (_NO_ANSWER, _TOO_MANY_ROUNDS)
-    text = PEER_ASK_CLOSED_ANSWER if closed or result is None else result.text
+    # C1e. "Closed unanswered" is the TYPED `_TurnEnd.closed` (abandoned after too many rounds,
+    # expired waiting for a person - on the per-answer path and inside a collected round alike),
+    # never a comparison with the sentinel sentences: a callee's genuine answer may read the same.
+    # `result is None` cannot happen for a finished turn (I2) and only narrows the type.
+    text = PEER_ASK_CLOSED_ANSWER if end.closed or result is None else result.text
     await _close_peer_ask(job, text)
     return end.outcome
 
