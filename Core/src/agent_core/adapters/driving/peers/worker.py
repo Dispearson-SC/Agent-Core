@@ -119,6 +119,7 @@ WHAT THIS FILE DOES NOT DECIDE
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
@@ -157,6 +158,7 @@ __all__ = [
     "answerable_targets",
     "build_peer_identity",
     "new_peer_session",
+    "peer_root_origin",
     "new_turn_id",
     "peer_turn_request",
     "run_peer_worker",
@@ -246,9 +248,7 @@ class PeerTurnRunner(Protocol):
     starts will read it back; `DirectTurnRunner` does that by rebuilding the request.
     """
 
-    async def execute(
-        self, turn_id: TurnId, request: TurnRequest, *, hop: int
-    ) -> TurnOutcome: ...
+    async def execute(self, turn_id: TurnId, request: TurnRequest, *, hop: int) -> TurnOutcome: ...
 
 
 class TurnRunner(Protocol):
@@ -288,9 +288,7 @@ class DirectTurnRunner:
 
     start_turn: TurnRunner
 
-    async def execute(
-        self, turn_id: TurnId, request: TurnRequest, *, hop: int
-    ) -> TurnOutcome:
+    async def execute(self, turn_id: TurnId, request: TurnRequest, *, hop: int) -> TurnOutcome:
         return await self.start_turn.execute(turn_id, replace(request, hop=hop))
 
 
@@ -317,13 +315,48 @@ def new_peer_session(tenant_id: TenantId, origin: SessionRef | None = None) -> S
     question text, which the asking model wrote). When given, its id travels inside the new
     one as `peer~<origin id>~<uuid>`, so a vertical's tools can act on behalf of the asking
     conversation without the model naming it. The history is still fresh - only the NAME
-    carries the origin. Origin ids must not contain `~`.
+    carries the origin.
+
+    The origin is always the ROOT one: when the asker is itself a peer session
+    (`peer~<root>~<uuid>`, a hop > 1 ask) the root is unwrapped, so the id never nests. An
+    id containing `~` that is not a well-formed peer id is refused with `ValueError`, because
+    a `~` inside the origin would make the id ambiguous to whoever parses it.
     """
     if origin is None:
         return SessionRef(session_id=SessionId(f"peer-{uuid4()}"), tenant_id=tenant_id)
-    return SessionRef(
-        session_id=SessionId(f"peer~{origin.session_id}~{uuid4()}"), tenant_id=tenant_id
+    root = peer_root_origin(origin.session_id)
+    return SessionRef(session_id=SessionId(f"peer~{root}~{uuid4()}"), tenant_id=tenant_id)
+
+
+def peer_root_origin(session_id: str) -> str:
+    """The case a session id stands for: itself, or the root inside a peer session id.
+
+    Raises `ValueError` for an id containing `~` that is not `peer~<origin>~<uuid>`.
+    """
+    if "~" not in session_id:
+        return session_id
+    parts = session_id.split("~")
+    if len(parts) == 3 and parts[0] == "peer" and parts[1] and parts[2]:
+        return parts[1]
+    raise ValueError(
+        f"session id {session_id!r} contains '~' but is not a peer~<origin>~<uuid> id; "
+        "'~' is reserved as the peer origin separator"
     )
+
+
+def _check_minter_arity(mint_session: Callable[..., SessionRef]) -> None:
+    """Refuse a minter that cannot take `(tenant, origin)` BEFORE any ask is claimed.
+
+    A wrong-arity callable would otherwise fail per ask, after the claim, every time.
+    """
+    try:
+        inspect.signature(mint_session).bind(
+            TenantId("t"), SessionRef(session_id=SessionId("s"), tenant_id=TenantId("t"))
+        )
+    except TypeError as exc:
+        raise TypeError(f"mint_session must accept (tenant_id, origin_session): {exc}") from exc
+    except ValueError:  # signature not introspectable (some builtins): trust it
+        return
 
 
 def build_peer_identity(tenant_id: TenantId) -> CallerIdentity:
@@ -397,6 +430,8 @@ async def answer_next_ask(
     console path has no workflow to wake at all, and a required seat would have to be
     satisfied there by a no-op, which is the same hole with a stub in front of it.
     """
+    if mint_session is not None:
+        _check_minter_arity(mint_session)
     ask = await queue.claim_next(target)
     if ask is None:
         return None
@@ -410,7 +445,7 @@ async def answer_next_ask(
         # EVERY PATH NAMES THE SESSION `peer~<asker>~<uuid>`: a minter that drops the
         # origin would make the specialist lose its case, so it is refused before any turn
         # runs.
-        expected_prefix = f"peer~{ask.from_session.session_id}~"
+        expected_prefix = f"peer~{peer_root_origin(ask.from_session.session_id)}~"
         if not session.session_id.startswith(expected_prefix):
             raise ValueError(
                 f"a minted peer session must be named {expected_prefix}<uuid>, "
@@ -419,7 +454,9 @@ async def answer_next_ask(
         outcome = await runner.execute(
             mint_turn_id(), peer_turn_request(ask, session=session), hop=ask.hop
         )
-    except Exception:
+    except (Exception, asyncio.CancelledError):
+        # CancelledError is a BaseException: without naming it the claimed ask would be
+        # stranded when the worker is cancelled mid-turn. Close it, then re-raise.
         await _answer_failed_ask(queue, ask, wake)
         raise
 
@@ -454,9 +491,7 @@ async def answer_next_ask(
 _FAILED_ASK_ANSWER = "The question could not be answered: the answering agent failed."
 
 
-async def _answer_failed_ask(
-    queue: PeerQueue, ask: PeerAsk, wake: PeerAnswerSignal | None
-) -> None:
+async def _answer_failed_ask(queue: PeerQueue, ask: PeerAsk, wake: PeerAnswerSignal | None) -> None:
     """Close a claimed ask whose turn raised, so the asker is not left waiting.
 
     `claim_next` marks the row delivered and nothing redelivers it (`mailbox.py`), so an
@@ -486,9 +521,7 @@ def answerable_targets(profiles: Mapping[str, AgentProfile]) -> tuple[AgentId, .
     """
     return tuple(
         sorted(
-            AgentId(profile_id)
-            for profile_id, profile in profiles.items()
-            if profile.peers.enabled
+            AgentId(profile_id) for profile_id, profile in profiles.items() if profile.peers.enabled
         )
     )
 
@@ -541,8 +574,6 @@ async def run_peer_worker(
             if report is None:
                 continue
             handled = True
-            write_line(
-                f"[peer] {report.target} {report.correlation_id} {report.disposition.value}"
-            )
+            write_line(f"[peer] {report.target} {report.correlation_id} {report.disposition.value}")
         if not handled:
             await sleep(idle_seconds)

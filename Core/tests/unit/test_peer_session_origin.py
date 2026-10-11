@@ -177,3 +177,85 @@ def test_a_refused_minter_also_answers_the_ask_instead_of_stranding_it() -> None
         )
 
     assert [c for c, _ in queue.answered] == ["c2"]
+
+
+# --- T2b: nested origin, `~` enforcement, cancellation, minter arity ---------------------
+
+
+def test_a_nested_ask_keeps_the_root_origin() -> None:
+    """Hop > 1: the asker is itself a peer session; the minted id must name the ROOT case."""
+    first = new_peer_session(TenantId("S030"), origin=ORIGIN)
+    second = new_peer_session(TenantId("S030"), origin=first)
+
+    assert second.session_id.startswith("peer~case-77~")
+    assert second.session_id.count("~") == 2
+    assert second.session_id != first.session_id
+
+
+def test_an_origin_containing_a_tilde_that_is_not_a_peer_id_is_refused() -> None:
+    bad = SessionRef(session_id=SessionId("case~77"), tenant_id=TenantId("S030"))
+
+    with pytest.raises(ValueError, match="~"):
+        new_peer_session(TenantId("S030"), origin=bad)
+
+
+def test_a_malformed_peer_id_origin_is_refused() -> None:
+    bad = SessionRef(session_id=SessionId("peer~a~b~c"), tenant_id=TenantId("S030"))
+
+    with pytest.raises(ValueError, match="~"):
+        new_peer_session(TenantId("S030"), origin=bad)
+
+
+def test_the_worker_names_a_nested_peer_session_after_the_root_case() -> None:
+    nested = new_peer_session(TenantId("S030"), origin=ORIGIN)
+    ask = PeerAsk(
+        correlation_id="c3",
+        target=AgentId("specialist"),
+        question="plan?",
+        from_session=nested,
+        turn_id=TurnId("t3"),
+        hop=2,
+        asker=AgentId("coordinator"),
+    )
+    runner = _Runner()
+
+    asyncio.run(answer_next_ask(_Queue(ask), runner, target=ask.target))
+
+    (request,) = runner.seen
+    assert request.session.session_id.startswith("peer~case-77~")
+    assert request.session.session_id.count("~") == 2
+
+
+class _CancellingRunner:
+    async def execute(self, turn_id: TurnId, request: TurnRequest, *, hop: int) -> TurnOutcome:
+        raise asyncio.CancelledError
+
+
+def test_a_cancellation_after_the_claim_closes_the_ask_and_reraises() -> None:
+    ask, wake = _ask(), _Wake()
+    queue = _Queue(ask)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(answer_next_ask(queue, _CancellingRunner(), target=ask.target, wake=wake))
+
+    ((correlation_id, text),) = queue.answered
+    assert correlation_id == "c2"
+    assert "could not be answered" in text
+    assert wake.woken == [("t2", "c2")]
+
+
+def test_a_wrong_arity_minter_fails_loudly_before_the_claim() -> None:
+    ask = _ask()
+    queue = _Queue(ask)
+
+    with pytest.raises(TypeError, match="mint_session"):
+        asyncio.run(
+            answer_next_ask(
+                queue,
+                _Runner(),
+                target=ask.target,
+                mint_session=lambda tenant: new_peer_session(tenant),  # type: ignore[arg-type]
+            )
+        )
+
+    assert queue.answered == []
