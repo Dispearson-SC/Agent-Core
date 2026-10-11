@@ -455,7 +455,11 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 #
 # BUMP IT DELIBERATELY, AND ONLY FOR THE ONE REASON NAMED IN `dbos_config`: a deploy whose
 # workflow signature or step sequence is incompatible with the workflows already in flight.
-PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.1"
+#
+# History: .1 -> .2 with D28 (docs/DECISIONS.md): `_step_refuse_peers` / `_step_resume_peers`
+# removed, peer rounds collected in `_collect_round` (new step order), `_step_peer_clock`
+# renamed `_step_round_clock`. A turn suspended on .1 is stranded, not replayed into .2.
+PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.2"
 
 # The DBOS application name. It is hashed into the default version and, more importantly,
 # it is a predicate of the recovery query itself (`_sys_db.get_pending_workflows` filters

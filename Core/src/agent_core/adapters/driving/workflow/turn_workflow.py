@@ -141,6 +141,7 @@ NOT EVERY SUSPENSION IS A QUESTION FOR A HUMAN
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -215,6 +216,8 @@ __all__ = [
 # dbos 2.31.1, docs/FIELD-NOTES.md). Taking the default would turn the durable wait for a
 # human into a one-minute wait, and the test that proves the wait works would still pass
 # on a fast machine.
+_LOG = logging.getLogger(__name__)
+
 THREE_DAYS: Final[int] = 3 * 24 * 60 * 60
 
 # A resumed turn may suspend AGAIN - an approval unlocks a tool whose result triggers an
@@ -1038,8 +1041,7 @@ async def _step_answer_peer(
             "issued, which Pydantic AI drops in silence while the agent asks forever."
         )
 
-    seat = _require_peer_seat()
-    wrapped = await seat.mailbox.read_answer(answer.correlation_id)
+    wrapped = await _read_wrapped_answer(answer.correlation_id)
     if wrapped is None:
         raise UnusableResumeAnswerError(
             f"the turn was woken for peer handle {answer.correlation_id!r} and the mailbox "
@@ -1051,8 +1053,9 @@ async def _step_answer_peer(
 
 
 @DBOS.step()
-async def _step_peer_clock() -> float:
-    """Seconds since the epoch, recorded. The ONLY clock the peer wait reads.
+async def _step_round_clock() -> float:
+    """Seconds since the epoch, recorded. The ONLY clock a round's waits read (peer reply
+    deadline and the human's three days alike).
 
     A step, so a replay reads back the value the first run saw and the remaining time of the
     wait is the same arithmetic on the same numbers (CLAUDE.md non-negotiable #2).
@@ -1085,7 +1088,7 @@ async def _step_read_peer_answer(
             f"a peer answer for turn {answer.turn_id!r} was delivered to turn {turn_id!r}. "
             "Applying it would resume this turn on an answer given to another one."
         )
-    wrapped = await _require_peer_seat().mailbox.read_answer(answer.correlation_id)
+    wrapped = await _read_wrapped_answer(answer.correlation_id)
     if wrapped is None:
         raise UnusableResumeAnswerError(
             f"the turn was woken for peer handle {answer.correlation_id!r} and the mailbox "
@@ -1095,6 +1098,15 @@ async def _step_read_peer_answer(
     return tool_call_id, wrapped
 
 
+async def _read_wrapped_answer(correlation_id: str) -> str | None:
+    """The one place a stored peer answer is read for the model: the mailbox port returns
+    it already wrapped as untrusted content (CLAUDE.md non-negotiable #10), and nothing in
+    this module wraps again or reads the mailbox around it. Both the normal redemption
+    (`_step_read_peer_answer`) and the re-ask peek (`_step_peek_peer_answer`) go through it,
+    so the two cannot hand the model different shapes."""
+    return await _require_peer_seat().mailbox.read_answer(correlation_id)
+
+
 @DBOS.step()
 async def _step_peek_peer_answer(correlation_id: str) -> str | None:
     """The wrapped answer already stored under a handle, or None. Read-only, no resume.
@@ -1102,8 +1114,9 @@ async def _step_peek_peer_answer(correlation_id: str) -> str | None:
     For a re-ask whose handle was given up on earlier (`timed_out`): the mailbox is
     idempotent per (target, question), so the re-ask gets the same handle back, and the
     reply may have landed - and its wake-up been skipped - before the re-ask was made.
+    Same payload as a received answer: see `_read_wrapped_answer`.
     """
-    return await _require_peer_seat().mailbox.read_answer(correlation_id)
+    return await _read_wrapped_answer(correlation_id)
 
 
 @DBOS.step()
@@ -1201,7 +1214,7 @@ async def _collect_round(
     peer_deadline = human_deadline = 0.0
     if awaiting or human_missing:
         seconds = await _step_peer_reply_timeout(request) if awaiting else 0
-        started = await _step_peer_clock()
+        started = await _step_round_clock()
         peer_deadline = started + seconds
         human_deadline = started + THREE_DAYS
 
@@ -1210,14 +1223,14 @@ async def _collect_round(
             [human_deadline] if human_missing else []
         )
         nearest = min(deadlines)
-        remaining = nearest - await _step_peer_clock()
+        remaining = nearest - await _step_round_clock()
         answer = (
             await DBOS.recv_async(RESUME_TOPIC, timeout_seconds=remaining)
             if remaining > 0
             else None
         )
         if answer is None:
-            now = await _step_peer_clock()
+            now = await _step_round_clock()
             if human_missing and (human_deadline <= now or human_deadline == nearest):
                 return await _step_expire(turn_id)
             for corr, tool_call_id in awaiting.items():
@@ -1238,12 +1251,17 @@ async def _collect_round(
             if answer.tool_call_id in decisions:
                 continue  # a double-click or a retried POST: the first decision stands
             if answer.tool_call_id not in human_missing:
-                raise UnusableResumeAnswerError(
-                    f"a decision arrived for tool call {answer.tool_call_id!r} and this "
-                    "round is not waiting on a person for it. Resolving it would name a "
-                    "tool_call_id the model never issued, which Pydantic AI drops in "
-                    "silence."
+                # A decision for a call this round is not waiting on: in practice a
+                # double click or retried POST whose first copy already resumed an earlier
+                # round. Ignored like a duplicate peer wake-up; failing the turn on it
+                # would punish a person for clicking twice. It resolves nothing.
+                _LOG.warning(
+                    "ignored a decision for tool call %r on turn %r: this round is not "
+                    "waiting on a person for it (stale or duplicate answer)",
+                    answer.tool_call_id,
+                    turn_id,
                 )
+                continue
             human_missing.discard(answer.tool_call_id)
             decisions[answer.tool_call_id] = answer
             continue
@@ -1613,12 +1631,10 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
             )
             continue
 
-        # (A refused ask is resolved inside `_collect_round` with the round's other results:
-        # it has no answer coming, so it never enters a wait.)
-        # The durable wait, entered whether or not anybody was asked: a peer ask suspends
-        # the turn exactly as an approval does and its answer arrives on this same topic.
-        # Explicitly THREE_DAYS - the 60-second default is the trap, and a peer may itself
-        # suspend on a human, so this wait is measured in hours rather than seconds.
+        # Only human-only rounds reach here (a round with any peer ask went through
+        # `_collect_round` above, which also resolves refused asks in-band). One wait per
+        # human answer, explicitly THREE_DAYS - the 60-second default is the trap, and a
+        # person decides in hours, not seconds.
         while True:
             answer = await DBOS.recv_async(RESUME_TOPIC, timeout_seconds=THREE_DAYS)
             if isinstance(answer, PeerAnswer) and answer.correlation_id in timed_out_peers:

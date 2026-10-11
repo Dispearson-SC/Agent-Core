@@ -515,10 +515,11 @@ class _RecordingMailbox:
 class _InBandResume:
     """`ResumeTurn` as `_step_resume_round` reaches it, recording what it was handed.
 
-    `_step_resume` is swapped out by `_install`, so this is resolved on ONE path only: a
-    peer ask the gate refused, resolved in-band rather than waited on. It returns the same
-    outcome the caller's `resumes_to` produces, so the body reaches an answer down either
-    route and the decision sequence stays the thing under test.
+    `_step_resume` is swapped out by `_install`, but a round with any peer ask resumes
+    through `_step_resume_round` (D28): peer answers, refusals, timeouts and humans'
+    decisions in ONE batch. This fake receives that batch. It returns the same outcome the
+    caller's `resumes_to` produces, so the body reaches an answer down either route and the
+    decision sequence stays the thing under test.
     """
 
     def __init__(self, resumes_to: Callable[[TurnId], TurnOutcome]) -> None:
@@ -819,10 +820,10 @@ def test_a_peer_ask_is_never_put_in_front_of_a_human(
         can answer - and a refused ask has no answer coming, so the body resolves it IN
         BAND (in the collected round's single resume) instead of entering a wait for it.
 
-        So this test no longer reaches `recv_async` at all, and asserting that it does
-        would be asserting the opposite of the behaviour that keeps a turn from spending
-        three days waiting on a question that was never asked. What survives unweakened is
-        the property this test exists for: neither delegation was put in front of a person.
+        The refused ask never enters a wait, so the turn waits only for the human and the
+        live peer (two collecting waits, the first bounded by the asker's reply timeout).
+        What survives unweakened is the property this test exists for: neither delegation
+        was put in front of a person.
     """
     body = _workflow_body()
 
@@ -863,8 +864,8 @@ def test_a_peer_ask_is_never_put_in_front_of_a_human(
     assert [r.approved for r in wiring.resume.resolutions] == [True, True, True]
     assert wiring.resume.resolutions[2].payload == wrap_peer_answer("it is Tuesday")
     recv_waits = [label for name, label in log.decisions if name == "recv_async"]
-    assert len(recv_waits) == 2 and not any(
-        label.endswith(f":{turn_workflow.THREE_DAYS}") for label in recv_waits[:1]
+    assert len(recv_waits) == 2 and not recv_waits[0].endswith(
+        f":{turn_workflow.THREE_DAYS}"
     ), (
         f"the collecting waits ran with {recv_waits}. The first is bounded by the nearest "
         "deadline (the asker's reply timeout), not by the three-day human wait."

@@ -865,7 +865,7 @@ slowest call.
   arrived are delivered. Humans: `THREE_DAYS` from the same moment, unchanged in meaning -
   the peer timeout is never applied to the person, and a person who has not decided by
   then expires the turn (nothing is resumed on a partial set). Each wait is bounded by the
-  nearest live deadline; time comes from a recorded step (`_step_peer_clock`), so replay
+  nearest live deadline; time comes from a recorded step (`_step_round_clock`), so replay
   recomputes the same remaining time.
 - **Late replies.** A reply to a timed-out ask is skipped by later waits (its call was
   already answered), instead of resuming the turn on it.
@@ -881,3 +881,18 @@ slowest call.
 keeps the previous wait: one `THREE_DAYS` wait per answer. Several human-only requests in
 one step have the same partial-resume defect and are a separate decision. Timed-out ask
 rows stay open in the mailbox (no close verb).
+
+**Deploying D28 (replay shape).** D28 removed the steps `_step_refuse_peers` and
+`_step_resume_peers`, added `_collect_round` (a new step order for single-ask and mixed
+rounds) and renamed the clock step to `_step_round_clock`. A turn suspended on the old code
+would replay against a different step sequence. The repo pins the DBOS application version
+(`composition.PINNED_DBOS_APPLICATION_VERSION`, t-f2-12) so recovery survives ordinary
+deploys; this change is the incompatible case that pin's rule names, so the version moved
+`agent-core-turns.1` -> `.2`. Consequence: turns still suspended at deploy time (waiting on
+a peer or a person) are NOT recovered by the new build; they stay PENDING under `.1`. Before
+deploying, drain them (let in-flight turns finish or expire) or accept that they are
+abandoned. A unit test pins that the version is no longer `.1`.
+
+**Ignored on purpose.** A `HumanAnswer` for a call the current round is not waiting on (a
+double click or retried POST arriving after its round resumed) is logged and skipped, like a
+duplicate peer wake-up; it never fails the turn.
