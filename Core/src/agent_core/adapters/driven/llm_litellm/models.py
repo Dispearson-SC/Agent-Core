@@ -58,7 +58,9 @@ THE LIBRARY-MODE GOTCHA THAT DOES *NOT* APPLY HERE, AND WHEN IT WOULD
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, cast
+import os
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 if TYPE_CHECKING:
     from pydantic_ai.models.openai import OpenAIChatModel
@@ -77,6 +79,48 @@ class ProviderChatConfig(Protocol):
     def get_api_base(self, api_base: str | None = None) -> str | None: ...
 
     def get_api_key(self, api_key: str | None = None) -> str | None: ...
+
+
+# Providers whose litellm chat config does not expose `get_api_base`/`get_api_key` (Gemini's
+# does neither) but which publish an OpenAI-compatible endpoint, which is what the client
+# below speaks. Only providers listed here get a built-in base: any other provider with no
+# resolvable base is still refused, so the check keeps its teeth.
+_OPENAI_COMPATIBLE_BASES: Final[Mapping[str, str]] = {
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+}
+
+# Credential names accepted besides `<PROVIDER>_API_KEY`, which is documented and wins.
+# `MINIMAX_API` is this repository's own spelling (`.env`); accepting it here means a process
+# that only has that name still works. Names only - values are never logged.
+_CREDENTIAL_ALIASES: Final[Mapping[str, tuple[str, ...]]] = {
+    "MINIMAX_API_KEY": ("MINIMAX_API",),
+}
+
+
+def credential_present(variable: str, environ: Mapping[str, str]) -> bool:
+    """Does `variable`, or an accepted alias of it, hold a non-empty value in `environ`?"""
+    return any(environ.get(name) for name in (variable, *_CREDENTIAL_ALIASES.get(variable, ())))
+
+
+def _env_credential(provider: str) -> str | None:
+    variable = f"{provider.upper()}_API_KEY"
+    for name in (variable, *_CREDENTIAL_ALIASES.get(variable, ())):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
+def _from_config(config: ProviderChatConfig | None, method: str) -> str | None:
+    """What litellm's own config resolves, or None when it cannot.
+
+    "Cannot" means exactly: there is no config object, or it has no such method (Gemini).
+    A config that HAS the method is trusted as before, and an exception from it is not
+    swallowed. None is not a refusal here - `library_mode_model` still refuses when neither
+    litellm nor the environment supplies the value.
+    """
+    resolve: Callable[[], str | None] | None = getattr(config, method, None)
+    return resolve() if resolve is not None else None
 
 
 class ModelEndpointUnavailableError(RuntimeError):
@@ -131,10 +175,16 @@ def library_mode_model(
     wire_model, provider = _resolved(model_id)
     config = _chat_config(wire_model, provider)
 
-    # litellm's own resolution, so `MINIMAX_API_BASE` and its registered default both work
-    # without this file knowing either one.
-    api_base = config.get_api_base()
-    api_key = config.get_api_key()
+    # Order for both values: litellm's own resolution (so `MINIMAX_API_BASE` and its
+    # registered default work without this file knowing either), then the provider's
+    # environment variables, then - base only - the compatible endpoint listed above.
+    # Anything still unresolved is refused below.
+    api_base = (
+        _from_config(config, "get_api_base")
+        or os.environ.get(f"{provider.upper()}_API_BASE")
+        or _OPENAI_COMPATIBLE_BASES.get(provider)
+    )
+    api_key = _from_config(config, "get_api_key") or _env_credential(provider)
 
     if not api_base:
         raise ModelEndpointUnavailableError(
@@ -194,8 +244,13 @@ def model_for(
     return proxy_model(model_id, base_url, settings=settings)
 
 
-def _chat_config(wire_model: str, provider: str) -> ProviderChatConfig:
-    """litellm's config object for one provider, or refuse. See `ProviderChatConfig`."""
+def _chat_config(wire_model: str, provider: str) -> ProviderChatConfig | None:
+    """litellm's config object for one provider, or refuse. See `ProviderChatConfig`.
+
+    Refuses only when litellm cannot build a config at all. A config that is missing, or
+    that lacks `get_api_base`/`get_api_key` (Gemini), is returned as is: `_from_config`
+    treats it as "resolves nothing" and `library_mode_model` falls back to the environment.
+    """
     from litellm.types.utils import LlmProviders
     from litellm.utils import ProviderConfigManager
 
@@ -209,11 +264,4 @@ def _chat_config(wire_model: str, provider: str) -> ProviderChatConfig:
             "docs/TASKS.md#t-f0-04"
         ) from unresolved
 
-    if config is None or not hasattr(config, "get_api_base") or not hasattr(config, "get_api_key"):
-        raise ModelEndpointUnavailableError(
-            f"litellm's configuration for provider {provider!r} does not resolve an "
-            "endpoint and a credential on its own. Point the day-2 proxy at it instead, or "
-            f"set {provider.upper()}_API_BASE and {provider.upper()}_API_KEY. "
-            "docs/TASKS.md#t-f0-04"
-        )
-    return cast("ProviderChatConfig", config)
+    return cast("ProviderChatConfig | None", config)

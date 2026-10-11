@@ -46,7 +46,15 @@ def _clean_provider_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     Without this the refusal test passes or fails depending on whose laptop it runs on,
     which is the least useful shape a security assertion can take.
     """
-    for name in ("MINIMAX_API_KEY", "MINIMAX_API_BASE", "OPENAI_API_KEY", "OPENAI_BASE_URL"):
+    for name in (
+        "MINIMAX_API_KEY",
+        "MINIMAX_API",
+        "MINIMAX_API_BASE",
+        "GEMINI_API_KEY",
+        "GEMINI_API_BASE",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -130,3 +138,111 @@ def test_the_dispatcher_picks_the_mode_from_the_gateways_base_url(
 
     assert "minimax" in str(day_one.client.base_url)
     assert "litellm.internal:4000" in str(day_two.client.base_url)
+
+
+_GEMINI_MODEL = "gemini/gemini-3-flash-preview"
+_FAKE_GEMINI_KEY = "sk-fake-gemini-for-tests"
+
+
+def test_gemini_resolves_in_library_mode_through_its_openai_compatible_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """litellm's Gemini config has no `get_api_base`; Google's OpenAI-compatible route
+    is used instead, with the wire model name and the `GEMINI_API_KEY` credential."""
+    monkeypatch.setenv("GEMINI_API_KEY", _FAKE_GEMINI_KEY)
+
+    model = models.library_mode_model(_GEMINI_MODEL)
+
+    assert "generativelanguage.googleapis.com" in str(model.client.base_url)
+    assert model.client.api_key == _FAKE_GEMINI_KEY
+    assert model.model_name == "gemini-3-flash-preview"
+
+
+def test_gemini_base_can_be_overridden_by_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", _FAKE_GEMINI_KEY)
+    monkeypatch.setenv("GEMINI_API_BASE", "http://gemini.internal:9000/v1")
+
+    model = models.library_mode_model(_GEMINI_MODEL)
+
+    assert "gemini.internal:9000" in str(model.client.base_url)
+
+
+@pytest.mark.silent
+def test_gemini_without_a_credential_is_still_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", _FAKE_OPENAI_KEY)
+
+    with pytest.raises(models.ModelEndpointUnavailableError) as raised:
+        models.library_mode_model(_GEMINI_MODEL)
+
+    assert "GEMINI_API_KEY" in str(raised.value)
+    assert _FAKE_OPENAI_KEY not in str(raised.value)
+
+
+def test_minimax_accepts_the_repository_credential_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`MINIMAX_API` (the repository's name) works even when it was never mapped to
+    `MINIMAX_API_KEY`; the documented `MINIMAX_API_KEY` wins when both are set."""
+    monkeypatch.setenv("MINIMAX_API", _FAKE_MINIMAX_KEY)
+
+    assert models.library_mode_model(_MINIMAX_MODEL).client.api_key == _FAKE_MINIMAX_KEY
+
+    monkeypatch.setenv("MINIMAX_API_KEY", "sk-fake-documented-name")
+    assert models.library_mode_model(_MINIMAX_MODEL).client.api_key == "sk-fake-documented-name"
+
+
+def test_credential_aliases_are_reported_by_name_only() -> None:
+    assert models.credential_present("MINIMAX_API_KEY", {"MINIMAX_API": "x"})
+    assert models.credential_present("MINIMAX_API_KEY", {"MINIMAX_API_KEY": "x"})
+    assert not models.credential_present("MINIMAX_API_KEY", {})
+    assert not models.credential_present("GEMINI_API_KEY", {"MINIMAX_API": "x"})
+
+
+class _ConfigWithoutEndpointMethods:
+    """A litellm chat config that exposes neither `get_api_base` nor `get_api_key`."""
+
+
+def _acme_without_endpoint_methods(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(models, "_resolved", lambda model_id: ("m", "acme"))
+    monkeypatch.setattr(
+        models, "_chat_config", lambda wire, provider: _ConfigWithoutEndpointMethods()
+    )
+
+
+@pytest.mark.silent
+def test_an_unlisted_provider_without_an_endpoint_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback is for providers named in `_OPENAI_COMPATIBLE_BASES` (or an explicit
+    `<PROVIDER>_API_BASE`), not for every config that lacks the methods: a credential alone
+    must not point the client anywhere, least of all at api.openai.com."""
+    _acme_without_endpoint_methods(monkeypatch)
+    monkeypatch.setenv("ACME_API_KEY", "sk-fake-acme")
+    monkeypatch.setenv("OPENAI_API_KEY", _FAKE_OPENAI_KEY)
+
+    with pytest.raises(models.ModelEndpointUnavailableError, match="ACME_API_BASE"):
+        models.library_mode_model("acme/m")
+
+
+def test_an_unlisted_provider_resolves_when_base_and_key_are_set_explicitly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _acme_without_endpoint_methods(monkeypatch)
+    monkeypatch.setenv("ACME_API_KEY", "sk-fake-acme")
+    monkeypatch.setenv("ACME_API_BASE", "http://acme.internal:1/v1")
+
+    model = models.library_mode_model("acme/m")
+
+    assert "acme.internal" in str(model.client.base_url)
+    assert model.client.api_key == "sk-fake-acme"
+
+
+@pytest.mark.silent
+def test_a_provider_litellm_does_not_know_is_refused_not_defaulted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a config that EXISTS but cannot resolve falls back. A provider litellm cannot
+    configure at all (or cannot resolve from the model id) is refused outright."""
+    monkeypatch.setenv("NOSUCH_API_KEY", "sk-fake")
+    monkeypatch.setenv("NOSUCH_API_BASE", "http://nosuch.internal/v1")
+
+    with pytest.raises(models.ModelEndpointUnavailableError):
+        models.library_mode_model("nosuchprovider/m")

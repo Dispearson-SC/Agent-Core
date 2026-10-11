@@ -95,6 +95,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from agent_core.adapters.driven.llm_litellm.models import (
     ModelEndpointUnavailableError,
+    credential_present,
     model_for,
 )
 from agent_core.adapters.driven.mcp.toolsets import server_prefix
@@ -695,7 +696,7 @@ def _credential_checks(
             if (name := _credential_variable(profile.model)) is not None
         }
     ):
-        present = bool(environ.get(variable))
+        present = credential_present(variable, environ)
         checks.append(
             Check(
                 category=_CREDENTIAL,
