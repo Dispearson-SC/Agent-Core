@@ -365,6 +365,9 @@ def build_app(
         signal_evidence=(
             container.signal_evidence if signal_evidence is None else signal_evidence
         ),
+        # Always the container's own registry: a turn on a channel it cannot deliver on is
+        # refused at the door instead of failing after the model call.
+        channels=container.channels,
     )
 
     # t-f11-33. THE DEBT THIS COMMENT USED TO RECORD IS PAID. Both of these were built

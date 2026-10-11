@@ -122,6 +122,7 @@ from typing import Annotated, Literal, Protocol
 from fastapi import FastAPI, File, Header, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel, Field
 
+from agent_core.adapters.driving.channels.registry import ChannelRegistry
 from agent_core.adapters.driving.workflow.turn_workflow import (
     DEFAULT_WINDOW_SECONDS,
     enqueue_turn_window,
@@ -378,6 +379,7 @@ def create_app(
     ingest_media: IngestMedia | None = None,
     resolve_evidence: EvidenceCorrelate | None = None,
     signal_evidence: EvidenceSignal | None = None,
+    channels: ChannelRegistry | None = None,
 ) -> FastAPI:
     """The HTTP surface, wired to one way of starting a turn.
 
@@ -400,6 +402,22 @@ def create_app(
     """
     app = FastAPI(title="agent-core")
 
+    def refuse_unregistered_channel(caller: CallerIdentity) -> None:
+        """422 for a channel the registry cannot deliver on, BEFORE a turn is started.
+
+        Without this the turn runs, the model is paid for, and `_step_deliver` fails with
+        `UnknownChannelError`. `channels=None` means this app was built without a registry
+        (a library embedding or a test) and nothing is checked.
+        """
+        if channels is not None and caller.channel not in channels.channel_ids():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"channel {caller.channel!r} is not registered; registered: "
+                    f"{list(channels.channel_ids())}. Add it to AGENT_CORE_PULL_CHANNELS."
+                ),
+            )
+
     @app.post("/turns", status_code=status.HTTP_202_ACCEPTED)
     async def post_turns(
         body: StartTurnBody,
@@ -418,6 +436,7 @@ def create_app(
         # Identity first, before anything downstream is touched. An unidentified request
         # must leave no half-started turn behind for an operator to puzzle over.
         caller = _authenticate(x_subject_id, x_tenant_id, x_channel, x_roles)
+        refuse_unregistered_channel(caller)
 
         request = TurnRequest(
             session=SessionRef(

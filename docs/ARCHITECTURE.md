@@ -441,6 +441,10 @@ declare:
   different decision (`ValueError` at startup). Everything else is dropped, and an
   undecided tool is logged once.
 
+Deployment configuration, not code: `AGENT_CORE_PULL_CHANNELS=a,b` registers extra pull-mode
+channels (a vertical's backend polling `GET /turns/{id}`). `POST /turns` answers 422 for a
+channel the registry does not hold, before the turn is enqueued and so before any model call.
+
 ---
 
 ## 9. Known risks

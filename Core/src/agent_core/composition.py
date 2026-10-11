@@ -546,6 +546,12 @@ class Settings:
     # has wired.
     human_gateway_channel_id: str | None = None
 
+    # Extra PULL-mode channel ids (`AGENT_CORE_PULL_CHANNELS=a,b`). A vertical's backend
+    # that starts a turn on its own channel and polls `GET /turns/{id}` needs an entry here,
+    # not an edit to this file: without one the answer has nowhere to go and the turn used
+    # to fail in `_step_deliver`, after the model call. `http` and `cli` are always there.
+    pull_channels: tuple[str, ...] = ()
+
     # t-f2-12. What the durable engine is told about itself. See `dbos_config`.
     #
     # `dbos_application_version` defaults to the SOURCE constant on purpose: a pin that
@@ -614,6 +620,7 @@ class Settings:
             channel_tenant_id=TenantId(env.get("AGENT_CORE_CHANNEL_TENANT_ID", "default")),
             channel_profile_id=env.get("AGENT_CORE_CHANNEL_PROFILE_ID"),
             human_gateway_channel_id=env.get("AGENT_CORE_HUMAN_GATEWAY_CHANNEL_ID"),
+            pull_channels=_parse_channel_ids(env.get("AGENT_CORE_PULL_CHANNELS", "")),
             dbos_app_name=env.get("AGENT_CORE_DBOS_APP_NAME", _DBOS_APP_NAME),
             dbos_application_version=env.get(
                 "AGENT_CORE_DBOS_APPLICATION_VERSION", PINNED_DBOS_APPLICATION_VERSION
@@ -623,6 +630,11 @@ class Settings:
             # for reading `TELEGRAM_BOT` rather than inventing an `AGENT_CORE_` name.
             dbos_conductor_key=env.get("DBOS_CONDUCTOR_KEY"),
         )
+
+
+def _parse_channel_ids(raw: str) -> tuple[str, ...]:
+    """`"a, b,,a"` -> `("a", "b")`: trimmed, empties dropped, first occurrence kept."""
+    return tuple(dict.fromkeys(part.strip() for part in raw.split(",") if part.strip()))
 
 
 def dbos_config(settings: Settings | None = None) -> DbosConfig:
@@ -1123,16 +1135,27 @@ def build_channel_registry(settings: Settings) -> ChannelRegistry:
     was configured for still raises `UnknownChannelError` on `get` - loudly, at the
     lookup, never a silent `None` for a caller three layers up to mistake for delivered.
 
+    `settings.pull_channels` adds further pull-mode ids (a vertical's backend channel) with
+    no code change; naming `http` or `cli` there is harmless, and naming a push channel's id
+    is a `DuplicateChannelError` at startup rather than a silent override.
+
     `http` and `cli` are always here and the two push channels are conditional. That
     asymmetry is the difference between a channel that needs a credential to reach a
     platform and one whose delivery is the caller coming back for the stored result - see
     `PullModeChannel`, and `_cli_channel` for why the console is the second of those.
     """
+    always_on = (_http_channel(), _cli_channel())
+    taken = {channel_id for channel_id, _ in always_on}
+    configured_pull = tuple(
+        (channel_id, PullModeChannel())
+        for channel_id in settings.pull_channels
+        if channel_id not in taken
+    )
     pairs = (
         pair
         for pair in (
-            _http_channel(),
-            _cli_channel(),
+            *always_on,
+            *configured_pull,
             _telegram_channel(settings),
             _whatsapp_channel(settings),
         )
