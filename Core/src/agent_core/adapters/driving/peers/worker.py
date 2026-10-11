@@ -243,7 +243,9 @@ class PeerQueue(Protocol):
 
     async def claim_next(self, target: AgentId) -> PeerAsk | None: ...
 
-    async def answer(self, correlation_id: str, answer: str) -> None: ...
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None: ...
 
 
 class PeerTurnRunner(Protocol):
@@ -276,7 +278,12 @@ class PeerTurnStarter(Protocol):
     """
 
     async def start(
-        self, correlation_id: str, asking_turn_id: TurnId, request: TurnRequest
+        self,
+        correlation_id: str,
+        asking_turn_id: TurnId,
+        request: TurnRequest,
+        *,
+        answer_token: str | None = None,
     ) -> None: ...
 
 
@@ -497,7 +504,10 @@ async def dispatch_next_ask(
     try:
         session = _session_for(ask, mint_session)
         await starter.start(
-            ask.correlation_id, ask.turn_id, peer_turn_request(ask, session=session)
+            ask.correlation_id,
+            ask.turn_id,
+            peer_turn_request(ask, session=session),
+            answer_token=ask.answer_token,
         )
     except (Exception, asyncio.CancelledError):
         await _answer_failed_ask(queue, ask, wake)
@@ -568,7 +578,7 @@ async def answer_next_ask(
     # VERBATIM. The wrapping is `read_answer`'s - see WHAT THIS FILE DOES NOT DECIDE.
     # `result.media` is not carried: the queue row holds text, and an answer that silently
     # lost half of itself would be worse than one that never claimed to carry media.
-    await queue.answer(ask.correlation_id, result.text)
+    await queue.answer(ask.correlation_id, result.text, answer_token=ask.answer_token)
 
     # RECORD, THEN WAKE - in that order, and the order is the whole of it. Waking first is
     # a race with one loser and no error: the workflow resumes, redeems its correlation id
@@ -585,9 +595,6 @@ async def answer_next_ask(
     )
 
 
-_FAILED_ASK_ANSWER = PEER_ASK_FAILED_ANSWER
-
-
 async def _answer_failed_ask(queue: PeerQueue, ask: PeerAsk, wake: PeerAnswerSignal | None) -> None:
     """Close a claimed ask whose turn raised, so the asker is not left waiting.
 
@@ -602,7 +609,9 @@ async def _answer_failed_ask(queue: PeerQueue, ask: PeerAsk, wake: PeerAnswerSig
     that matters and propagates from the caller.
     """
     try:
-        await queue.answer(ask.correlation_id, _FAILED_ASK_ANSWER)
+        await queue.answer(
+            ask.correlation_id, PEER_ASK_FAILED_ANSWER, answer_token=ask.answer_token
+        )
         if wake is not None:
             await wake(ask.turn_id, ask.correlation_id)
     except Exception:

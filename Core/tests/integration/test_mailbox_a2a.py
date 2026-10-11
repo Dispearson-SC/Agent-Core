@@ -379,12 +379,23 @@ async def test_an_async_task_has_no_answer_until_one_arrives_and_is_then_idempot
         "'completed' - an answer that was never sent must not appear delivered"
     )
 
-    await mailbox.answer(correlation_id, "yes, back Monday")
+    # C1c. The id alone does not authorise a delivery: the secret the peer was handed with the
+    # message does.
+    from agent_core.domain.peers import PeerAnswerRefusedError
+
+    token = fixture_peer.received_messages[-1]["metadata"]["answer_token"]
+    with pytest.raises(PeerAnswerRefusedError):
+        await mailbox.answer(correlation_id, "forged", answer_token="guess")
+    with pytest.raises(PeerAnswerRefusedError):
+        await mailbox.answer(correlation_id, "forged")
+    assert await mailbox.read_answer(correlation_id) is None
+
+    await mailbox.answer(correlation_id, "yes, back Monday", answer_token=token)
     first = await mailbox.read_answer(correlation_id)
     assert first is not None and "yes, back Monday" in first
 
     # Idempotent per correlation id: a retried delivery must not rewrite the answer.
-    await mailbox.answer(correlation_id, "a different answer")
+    await mailbox.answer(correlation_id, "a different answer", answer_token=token)
     assert await mailbox.read_answer(correlation_id) == first, (
         "a second delivery for one correlation id overwrote the answer; a retry must be a "
         "no-op, not a way to change what a suspended turn resumes with"

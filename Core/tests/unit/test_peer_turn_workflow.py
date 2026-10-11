@@ -56,7 +56,10 @@ def _job() -> turn_workflow.PeerTurnJob:
         hop=1,
     )
     return turn_workflow.PeerTurnJob(
-        request=request, correlation_id=CORRELATION, asking_turn_id=ASKING_TURN
+        request=request,
+        correlation_id=CORRELATION,
+        asking_turn_id=ASKING_TURN,
+        answer_token="secret-token",
     )
 
 
@@ -101,9 +104,11 @@ def _setup(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> _Recorder:
 
     original = world.mailbox.answer
 
-    async def answer(correlation_id: str, text: str) -> None:
+    async def answer(
+        correlation_id: str, text: str, *, answer_token: str | None = None
+    ) -> None:
         recorder.events.append("answer")
-        await original(correlation_id, text)
+        await original(correlation_id, text, answer_token=answer_token)
 
     monkeypatch.setattr(world.mailbox, "answer", answer)
     monkeypatch.setattr(turn_workflow, "signal_peer_answer", signal)
@@ -207,3 +212,26 @@ def test_an_asker_that_is_gone_does_not_fail_a_recorded_answer(
 
 def test_the_peer_workflow_id_is_derived_from_the_correlation_id() -> None:
     assert turn_workflow.peer_workflow_id("abc") == "peer-abc"
+
+
+def test_the_workflow_presents_the_answer_token_when_it_records_the_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _setup(monkeypatch, start_step=_finishes("ok"))
+
+    _run()
+
+    assert recorder.world.mailbox.answer_tokens == ["secret-token"]
+
+
+def test_a_refused_answer_does_not_wake_the_asker_or_fail_the_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row refused the answer (wrong token, or the ask was cancelled): nothing was
+    recorded, so waking the asker would resume it on an empty row."""
+    recorder = _setup(monkeypatch, start_step=_finishes("ok"))
+    recorder.world.mailbox.refuse_answers = True
+
+    _run()
+
+    assert recorder.signals == []

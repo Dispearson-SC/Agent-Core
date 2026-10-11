@@ -105,13 +105,19 @@ import asyncio
 import logging
 import re
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final
 
 import psycopg
 
 from agent_core.adapters.driven.agent_pydantic.runner import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
-from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy, peer_ask_id
+from agent_core.domain.peers import (
+    AgentId,
+    AgentRef,
+    PeerAnswerRefusedError,
+    PeerPolicy,
+    peer_ask_id,
+)
 from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId
 
 # 32 bytes, so the handle carries 256 bits. A correlation id is what an inbound answer
@@ -119,6 +125,8 @@ from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId
 # same bearer-token reasoning as `human/gateway.py`, and `secrets` for the same reason:
 # never `random`, never a uuid4 rendered to look unguessable.
 _CORRELATION_ID_BYTES: Final[int] = 32
+# The per-ask answer secret (C1c): the same strength, for the same bearer-token reason.
+_ANSWER_TOKEN_BYTES: Final[int] = 32
 
 _LOG = logging.getLogger(__name__)
 
@@ -137,8 +145,8 @@ _FORGED_DELIMITER: Final[str] = "[delimiter removed]"
 _ENQUEUE_SQL = """
     INSERT INTO peer_messages
         (correlation_id, target_agent_id, from_session_id, from_tenant_id,
-         turn_id, hop, question, from_agent_id)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+         turn_id, hop, question, from_agent_id, answer_token)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT ON CONSTRAINT uq_peer_messages_turn_target_question DO UPDATE
         SET target_agent_id = peer_messages.target_agent_id
     RETURNING correlation_id
@@ -161,18 +169,27 @@ _CLAIM_SQL = """
         LIMIT 1
     )
     RETURNING correlation_id, target_agent_id, from_session_id, from_tenant_id,
-              turn_id, hop, question, from_agent_id
+              turn_id, hop, question, from_agent_id, answer_token
 """
 
 # `answered_at IS NULL` is the idempotency guard and it lives in the WHERE clause rather
 # than in a preceding SELECT, for the reason every other guard in this module does: two
 # deliveries can both read "unanswered" before either writes. A retried delivery matches
 # no row and changes nothing - it does not raise, because a retry is normal.
+#
+# C1c: the delivery must present the row's `answer_token` (`IS NOT DISTINCT FROM`, so a legacy
+# row with a NULL token is answered with None and a forged None against a real token matches
+# nothing). The guard is in the WHERE clause for the same race reason as `answered_at`.
 _ANSWER_SQL = """
     UPDATE peer_messages
     SET answer = %s, state = 'answered', answered_at = now()
     WHERE correlation_id = %s AND answered_at IS NULL
+      AND answer_token IS NOT DISTINCT FROM %s
 """
+
+# Why a delivery that changed no row changed none: nothing there (a stranger), already
+# answered (a retry), or still open and refused (a forged token). Only the last raises.
+_ANSWER_STATE_SQL = "SELECT answered_at IS NOT NULL FROM peer_messages WHERE correlation_id = %s"
 
 _READ_ANSWER_SQL = """
     SELECT answer
@@ -210,6 +227,9 @@ class PeerAsk:
     turn_id: TurnId
     hop: int
     asker: AgentId | None = None
+    # C1c. The per-ask secret the answering side must present to `answer`. repr=False so a
+    # log line or traceback of the ask never prints it.
+    answer_token: str | None = field(default=None, repr=False)
 
 
 def wrap_peer_answer(answer: str) -> str:
@@ -320,6 +340,9 @@ class PgAgentMailbox:
                     hop,
                     question,
                     asker,
+                    # Minted per call but only kept by the first insert: a replayed ask hits
+                    # the `DO UPDATE` branch, which leaves every column of the row alone.
+                    secrets.token_urlsafe(_ANSWER_TOKEN_BYTES),
                 ),
             ).fetchone()
         if row is None:  # pragma: no cover - DO UPDATE always returns the surviving row
@@ -364,10 +387,18 @@ class PgAgentMailbox:
             hop=int(row[5]),
             question=str(row[6]),
             asker=None if row[7] is None else AgentId(str(row[7])),
+            answer_token=None if row[8] is None else str(row[8]),
         )
 
-    async def answer(self, correlation_id: str, answer: str) -> None:
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
         """Record the peer's answer against its correlation id. Idempotent.
+
+        REQUIRES THE ROW'S `answer_token` (C1c). The correlation id is derived and so is an
+        address, not a credential; a delivery without the token minted for this ask raises
+        `PeerAnswerRefusedError` and writes nothing (the ask stays open for the real callee).
+        An answered row stays a silent no-op for anyone, so a retry never errors.
 
         The first answer wins and later ones are no-ops rather than errors: a delivery is
         retried by the network and by DBOS alike, and a second attempt that OVERWROTE the
@@ -380,11 +411,16 @@ class PgAgentMailbox:
         Recording is all this does. Waking the workflow is `DBOS.send()`, in the workflow
         layer - see NO WAITING HAPPENS HERE at the top of this module.
         """
-        await asyncio.to_thread(self._answer_sync, correlation_id, answer)
+        await asyncio.to_thread(self._answer_sync, correlation_id, answer, answer_token)
 
-    def _answer_sync(self, correlation_id: str, answer: str) -> None:
+    def _answer_sync(self, correlation_id: str, answer: str, answer_token: str | None) -> None:
         with psycopg.connect(self._conninfo, autocommit=True) as conn:
-            conn.execute(_ANSWER_SQL, (answer, correlation_id))
+            cursor = conn.execute(_ANSWER_SQL, (answer, correlation_id, answer_token))
+            if cursor.rowcount == 1:
+                return
+            row = conn.execute(_ANSWER_STATE_SQL, (correlation_id,)).fetchone()
+        if row is not None and not row[0]:
+            raise PeerAnswerRefusedError(correlation_id, "the answer token did not match")
 
     async def read_answer(self, correlation_id: str) -> str | None:
         """The peer's answer, WRAPPED as untrusted content, or None if it has not answered.

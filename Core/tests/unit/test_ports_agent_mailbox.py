@@ -199,7 +199,9 @@ class _SilentMailbox:
         self.sent.append((target, question, hop))
         return "corr-1"
 
-    async def answer(self, correlation_id: str, answer: str) -> None:
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
         return None
 
     async def read_answer(self, correlation_id: str) -> str | None:
@@ -311,7 +313,7 @@ def test_protocol_exposes_no_blocking_receive() -> None:
         "without waiting, and the wait would not be durable."
     )
 
-    assert _parameters("answer") == ["correlation_id", "answer"]
+    assert _parameters("answer") == ["correlation_id", "answer", "answer_token"]
     answer_hints = _hints("answer")
     assert answer_hints["correlation_id"] is str
     assert answer_hints["answer"] is str
@@ -370,7 +372,8 @@ def _pg_mailbox(monkeypatch: pytest.MonkeyPatch) -> AgentMailbox:
 def _a2a_mailbox(monkeypatch: pytest.MonkeyPatch) -> AgentMailbox:
     """The A2A adapter holding one delivered answer. No wire traffic is generated."""
     mailbox = A2AAgentMailbox(httpx.AsyncClient())
-    asyncio.run(mailbox.answer("corr-1", HOSTILE_ANSWER))
+    mailbox._tokens["corr-1"] = "token-1"  # as `ask` would have recorded it (C1c)
+    asyncio.run(mailbox.answer("corr-1", HOSTILE_ANSWER, answer_token="token-1"))
     return mailbox
 
 
@@ -487,7 +490,9 @@ class StubMailbox:
     ) -> str:
         raise NotImplementedError
 
-    async def answer(self, correlation_id: str, answer: str) -> None:
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
         raise NotImplementedError
 {redemption if read_answer else ""}
 
@@ -566,7 +571,9 @@ class _RecordsWhoAsked:
         self.askers.append(asker)
         return f"corr-{len(self.askers)}"
 
-    async def answer(self, correlation_id: str, answer: str) -> None:
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
         return None
 
     async def read_answer(self, correlation_id: str) -> str | None:

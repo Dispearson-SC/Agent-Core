@@ -54,7 +54,9 @@ class _Queue:
     async def claim_next(self, target: AgentId) -> PeerAsk | None:
         return self.ask
 
-    async def answer(self, correlation_id: str, answer: str) -> None:
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
         self.answered.append((correlation_id, answer))
 
 

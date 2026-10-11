@@ -368,7 +368,9 @@ class _ScriptedQueue:
             return self.ask
         return None
 
-    async def answer(self, correlation_id: str, answer: str) -> None:
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
         self.answered.append((correlation_id, answer))
 
 

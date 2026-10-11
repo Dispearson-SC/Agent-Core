@@ -112,10 +112,20 @@ class AgentMailbox(Protocol):
         """
         ...
 
-    async def answer(self, correlation_id: str, answer: str) -> None:
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
         """Deliver an answer back. The adapter signals the waiting workflow.
 
         Idempotent per correlation id: a retried delivery must not resume a turn twice.
+
+        THE CORRELATION ID IS AN ADDRESS, NOT A CREDENTIAL (C1c). It is derived from inputs
+        (`peer_ask_id`), so anyone who knows them can compute it. Each ask therefore also has a
+        random `answer_token`, minted when the ask is enqueued and handed ONLY to the party
+        entitled to answer (the claimed `PeerAsk`, the A2A message metadata). A delivery that
+        does not present it raises `PeerAnswerRefusedError` and writes nothing. So does a
+        delivery for an ask that was cancelled (C4). A retry of an already answered ask is
+        still a silent no-op, and an unknown id is too (strangers deliver).
         """
         ...
 

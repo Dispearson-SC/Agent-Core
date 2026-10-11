@@ -21,7 +21,7 @@ import pytest
 from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
 from agent_core.adapters.driving.channels.registry import ChannelRegistry
 from agent_core.adapters.driving.workflow import turn_workflow
-from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy
+from agent_core.domain.peers import AgentId, AgentRef, PeerAnswerRefusedError, PeerPolicy
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     CallerIdentity,
@@ -84,6 +84,8 @@ class Mailbox:
         self.asks: list[tuple[str, str]] = []
         self.request_keys: list[str | None] = []
         self.answer_calls: list[tuple[str, str]] = []
+        self.answer_tokens: list[str | None] = []
+        self.refuse_answers = False
         self.answers: dict[str, str] = {}
         self._ids: dict[tuple[str, str], str] = {}
 
@@ -95,9 +97,15 @@ class Mailbox:
             self.asks.append(key)
         return self._ids[key]
 
-    async def answer(self, correlation_id: str, answer: str) -> None:
-        """The answering half, first answer wins like the real row. Logged in call order."""
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
+        """The answering half, first answer wins like the real row. Logged in call order.
+        `refuse_answers` makes it refuse like the real row does for a forged or cancelled one."""
         self.answer_calls.append((correlation_id, answer))
+        self.answer_tokens.append(answer_token)
+        if self.refuse_answers:
+            raise PeerAnswerRefusedError(correlation_id)
         self.answers.setdefault(correlation_id, answer)
 
     async def read_answer(self, correlation_id: str) -> str | None:

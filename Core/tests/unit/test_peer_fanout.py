@@ -524,6 +524,9 @@ def test_the_replay_shape_change_moved_the_pinned_application_version() -> None:
     recovered into this one (docs/DECISIONS.md, 'Deploying D28')."""
     from agent_core import composition
 
-    assert composition.PINNED_DBOS_APPLICATION_VERSION != "agent-core-turns.1"
+    assert composition.PINNED_DBOS_APPLICATION_VERSION not in (
+        "agent-core-turns.1",
+        "agent-core-turns.2",
+    ), "D31 changed the peer job input and the round step order: the version moved past .2"
     for gone in ("_step_refuse_peers", "_step_resume_peers", "_step_peer_clock"):
         assert not hasattr(turn_workflow, gone), f"{gone} came back: bump the pinned version"

@@ -76,13 +76,20 @@ WHAT `hop`, `turn_id` AND `from_session` DO HERE
 from __future__ import annotations
 
 import logging
+import secrets
 import uuid
 from typing import Any, Final
 
 import httpx
 
 from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
-from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy, peer_ask_id
+from agent_core.domain.peers import (
+    AgentId,
+    AgentRef,
+    PeerAnswerRefusedError,
+    PeerPolicy,
+    peer_ask_id,
+)
 from agent_core.domain.turn import SessionRef, TurnId
 
 _AGENT_CARD_PATH: Final[str] = "/.well-known/agent-card.json"
@@ -97,7 +104,7 @@ class A2AAgentMailbox:
     Postgres adapter there is no synchronous driver to push into `asyncio.to_thread`.
     """
 
-    __slots__ = ("_client", "_answers")
+    __slots__ = ("_answers", "_client", "_tokens")
 
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._client = client
@@ -106,6 +113,9 @@ class A2AAgentMailbox:
         # id), value is the peer's answer VERBATIM: wrapping happens on read, exactly as
         # in PgAgentMailbox, so the stored text and an audit trail of it always agree.
         self._answers: dict[str, str] = {}
+        # C1c. correlation id -> the secret sent to the peer in the message metadata. A later
+        # `answer` delivery must present it; compared in constant time.
+        self._tokens: dict[str, str] = {}
 
     async def discover(self, policy: PeerPolicy) -> tuple[AgentRef, ...]:
         """Refresh `policy.peers` from each reachable peer's live agent card.
@@ -164,6 +174,7 @@ class A2AAgentMailbox:
         once. Omitted, no `messageId` is sent (the previous behaviour).
         """
         endpoint = _endpoint_for(policy, target)
+        answer_token = secrets.token_urlsafe(32)
         if asker is None:
             _LOG.warning(
                 "an A2A peer ask is being sent to %r with no asking agent id, so the "
@@ -176,6 +187,7 @@ class A2AAgentMailbox:
             "from_tenant_id": str(from_session.tenant_id),
             "turn_id": str(turn_id),
             "hop": hop,
+            "answer_token": answer_token,
         }
         if asker is not None:
             metadata["from_agent_id"] = str(asker)
@@ -205,20 +217,36 @@ class A2AAgentMailbox:
         envelope: dict[str, Any] = response.json()
         result: dict[str, Any] = envelope["result"]
         correlation_id = str(result["id"])
+        self._tokens.setdefault(correlation_id, answer_token)
         if result["status"]["state"] == "completed":
             artifacts: list[dict[str, Any]] = result.get("artifacts", [])
             if artifacts:
                 self._answers[correlation_id] = str(artifacts[0]["parts"][0]["text"])
         return correlation_id
 
-    async def answer(self, correlation_id: str, answer: str) -> None:
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
         """Record a delivered answer against its correlation id. Idempotent.
+
+        C1c. The delivery must present the `answer_token` sent to the peer with the message
+        (`metadata.answer_token`); otherwise `PeerAnswerRefusedError`. A task this adapter
+        never sent has no token on file and is not accepted either.
 
         `setdefault` makes the first delivery win, exactly like `PgAgentMailbox.answer`'s
         `answered_at IS NULL` guard: a retried delivery for one correlation id must not
         change what a suspended turn resumes with.
         """
-        self._answers.setdefault(correlation_id, answer)
+        if correlation_id in self._answers:
+            return
+        expected = self._tokens.get(correlation_id)
+        if (
+            expected is None
+            or answer_token is None
+            or not secrets.compare_digest(expected.encode(), answer_token.encode())
+        ):
+            raise PeerAnswerRefusedError(correlation_id, "the answer token did not match")
+        self._answers[correlation_id] = answer
 
     async def read_answer(self, correlation_id: str) -> str | None:
         """The peer's answer, WRAPPED as untrusted content, or None if none has arrived.

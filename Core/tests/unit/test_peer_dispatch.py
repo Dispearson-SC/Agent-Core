@@ -32,7 +32,7 @@ from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId, Turn
 ORIGIN = SessionRef(session_id=SessionId("case-77"), tenant_id=TenantId("S030"))
 
 
-def _ask(corr: str = "c1", hop: int = 1) -> PeerAsk:
+def _ask(corr: str = "c1", hop: int = 1, token: str | None = "tok-c1") -> PeerAsk:
     return PeerAsk(
         correlation_id=corr,
         target=AgentId("specialist"),
@@ -41,6 +41,7 @@ def _ask(corr: str = "c1", hop: int = 1) -> PeerAsk:
         turn_id=TurnId("asker-turn"),
         hop=hop,
         asker=AgentId("coordinator"),
+        answer_token=token,
     )
 
 
@@ -48,25 +49,36 @@ def _ask(corr: str = "c1", hop: int = 1) -> PeerAsk:
 class _Queue:
     asks: list[PeerAsk]
     answered: list[tuple[str, str]] = field(default_factory=list)
+    tokens: list[str | None] = field(default_factory=list)
 
     async def claim_next(self, target: AgentId) -> PeerAsk | None:
         return self.asks.pop(0) if self.asks else None
 
-    async def answer(self, correlation_id: str, answer: str) -> None:
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
         self.answered.append((correlation_id, answer))
+        self.tokens.append(answer_token)
 
 
 @dataclass
 class _Starter:
     started: list[tuple[str, TurnId, TurnRequest]] = field(default_factory=list)
+    tokens: list[str | None] = field(default_factory=list)
     error: Exception | None = None
 
     async def start(
-        self, correlation_id: str, asking_turn_id: TurnId, request: TurnRequest
+        self,
+        correlation_id: str,
+        asking_turn_id: TurnId,
+        request: TurnRequest,
+        *,
+        answer_token: str | None = None,
     ) -> None:
         if self.error is not None:
             raise self.error
         self.started.append((correlation_id, asking_turn_id, request))
+        self.tokens.append(answer_token)
 
 
 def test_a_claimed_ask_starts_the_callee_turn_as_the_target_and_is_not_answered_by_the_worker() -> (
@@ -147,3 +159,23 @@ def test_the_worker_loop_uses_the_starter_when_it_is_given_one() -> None:
 
 def test_a_starter_is_recognised_by_shape() -> None:
     assert isinstance(_Starter(), PeerTurnStarter)
+
+
+def test_the_answer_token_travels_from_the_claim_to_the_workflow_start() -> None:
+    """C1c. The secret is on the claimed row and goes to the durable starter, which hands it
+    to the workflow that is the only legitimate answerer."""
+    starter = _Starter()
+
+    asyncio.run(dispatch_next_ask(_Queue([_ask()]), starter, target=AgentId("specialist")))
+
+    assert starter.tokens == ["tok-c1"]
+
+
+def test_closing_a_failed_start_presents_the_token_too() -> None:
+    queue = _Queue([_ask()])
+    starter = _Starter(error=RuntimeError("down"))
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(dispatch_next_ask(queue, starter, target=AgentId("specialist")))
+
+    assert queue.tokens == ["tok-c1"]

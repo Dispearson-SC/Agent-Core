@@ -179,7 +179,9 @@ class _RecordingMailbox:
         )
         return correlation_id
 
-    async def answer(self, correlation_id: str, answer: str) -> None:
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
         self._answers.setdefault(correlation_id, answer)
 
     async def read_answer(self, correlation_id: str) -> str | None:

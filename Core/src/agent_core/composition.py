@@ -459,7 +459,10 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # History: .1 -> .2 with D28 (docs/DECISIONS.md): `_step_refuse_peers` / `_step_resume_peers`
 # removed, peer rounds collected in `_collect_round` (new step order), `_step_peer_clock`
 # renamed `_step_round_clock`. A turn suspended on .1 is stranded, not replayed into .2.
-PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.2"
+# .2 -> .3 with D31 (agent-comms v2 wave 1 follow-ups, ONE bump for the batch): the peer
+# workflow's input `PeerTurnJob` gained `answer_token` (C1c) and `_collect_round` / `_step_expire`
+# gained the cancel cascade steps (C4), so a turn or peer workflow suspended on .2 is stranded.
+PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.3"
 
 # The DBOS application name. It is hashed into the default version and, more importantly,
 # it is a predicate of the recovery query itself (`_sys_db.get_pending_workflows` filters

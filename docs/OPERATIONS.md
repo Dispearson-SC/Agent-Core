@@ -5,9 +5,12 @@ changes. Decisions behind them are in `docs/DECISIONS.md`.
 
 ## Bumping the DBOS application version
 
-`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.2`) is bumped when a
+`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.3`) is bumped when a
 change makes turns that are already in flight incompatible with the new code: a workflow step
-added, removed, renamed or reordered, or a changed workflow argument (D28 took `.1` to `.2`).
+added, removed, renamed or reordered, or a changed workflow argument (D28 took `.1` to `.2`;
+D31 took `.2` to `.3`: the peer job gained `answer_token` and the round gained the cancel
+cascade steps. Peer asks in flight on `.2` are stranded too: `stranded-turns` lists them, and
+their mailbox rows stay `delivered` until the lease in D31 reclaims them under `.3`).
 
 DBOS recovers a PENDING workflow only when its row names the version the recovering process
 claims. After a bump, a turn that was suspended under the old version (waiting for a person or

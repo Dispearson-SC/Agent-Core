@@ -983,3 +983,38 @@ claims, by one SELECT on `dbos.workflow_status` of the DBOS system database. It 
 (clean / stranded / could not check) so a deploy script can gate on it. It reads only: launching
 DBOS would start recovery in the checking process, and cancelling is a different act. The
 drain/cancel procedure is in `docs/OPERATIONS.md` (`dbos workflow cancel`).
+
+## D31 · Agent-comms v2, wave 1 follow-ups: boundary checks, answer secret, redelivery, cancel
+
+Follow-ups of the approved review of 0e5dc8f (C1b-C1e) and the reliability tasks C3 and C4. One
+DBOS application version bump covers the whole batch (`agent-core-turns.2` -> `.3`, see
+OPERATIONS.md).
+
+**C1b · a bad decision cannot kill a live turn.** D30 made a `HumanAnswer` for a tool call no
+round issued raise inside the workflow, so one bad send was a denial of service. Two layers now:
+
+- *API boundary.* `DecideApproval` takes a `pending` check (`PendingCheck`, bound in composition
+  to `human_requests`): the (turn, tool call) the handle resolves to must be a live request
+  published to a person (`kind <> 'delegation'`, unexpired). Otherwise it raises
+  `UnknownCorrelationError` (a 404) BEFORE the audit row and BEFORE the signal. It is a
+  composition-level SQL for the reason `_REQUESTER_LOOKUP_SQL` is: the `HumanGateway` port
+  already answers its one question.
+- *Workflow.* `_collect_round` logs at WARNING and skips a decision whose id this round is not
+  waiting on, whether an earlier round issued it (a double click, as before) or no round did (was
+  fatal). D30's `UnusableResumeAnswerError` for that case is gone; the peer-answer wake-up
+  checks are unchanged.
+
+**C1c · an answer needs more than the correlation id.** The id is `uuid5(turn, tool_call_id,
+target, question)`: an address anyone with those inputs can compute, and answers were matched by
+it alone. Each ask row now has a random 256-bit `answer_token` (migration `0026`), minted by
+`PgAgentMailbox.ask` on first insert (a replayed insert is the `DO UPDATE` no-op and keeps the
+first token, so replay never changes it), returned only on the claimed `PeerAsk`
+(`repr=False`), carried in `PeerTurnJob`, and presented by `answer(..., answer_token=)`.
+`AgentMailbox.answer` raises `PeerAnswerRefusedError` and writes nothing when it does not match;
+`_step_record_peer_reply` logs the refusal and does not wake the asker. A retry of an answered
+ask and an unknown id stay silent no-ops. The A2A adapter mints the token per message, sends it
+as `metadata.answer_token` and checks it (constant time) on `answer`. Rows enqueued before the
+migration have a NULL token and are answered with None, so asks in flight across the upgrade
+complete; that is the only window where an id alone answers. Not covered: the `PeerAnswer`
+wake-up on the durable topic is addressed by workflow id and still names only the correlation
+id; a forged wake finds no recorded answer and the asker rejects it as before.

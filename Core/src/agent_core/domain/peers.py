@@ -50,6 +50,21 @@ PEER_ASK_CLOSED_ANSWER: Final[str] = (
 )
 
 
+class PeerAnswerRefusedError(Exception):
+    """An answer was NOT recorded: the row refused it.
+
+    Raised by `AgentMailbox.answer` when the delivery does not hold the per-ask `answer_token`
+    the row was minted with (the correlation id is derived and so is an address, not a
+    credential, C1c) or when the ask was cancelled (C4). Nothing was written, so nothing may be
+    woken. The message names the correlation id only: never the token, never the answer.
+    """
+
+    def __init__(self, correlation_id: str, reason: str = "the answer was refused") -> None:
+        super().__init__(f"{reason} for peer ask {correlation_id!r}")
+        self.correlation_id = correlation_id
+        self.reason = reason
+
+
 def peer_ask_id(turn_id: str, request_key: str, target: str, question: str) -> str:
     """The correlation id of one ask, derived from what identifies it. Pure.
 

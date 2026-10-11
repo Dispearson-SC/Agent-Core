@@ -627,6 +627,10 @@ wakes the asking turn. The ask's correlation id, the callee session and the work
 derived from the ask, so a replay or a second claim of the same row cannot run the callee
 twice. See DECISIONS D29.
 
+An inbound answer must also present the ask's random `answer_token` (the correlation id is
+derived, so it is an address and not a credential); a decision for a call that is not a live
+human request is refused at the API before it reaches the workflow. See DECISIONS D31.
+
 ### A2A: shape now, wire protocol in D2
 
 Agent2Agent reached **v1.0 under the Linux Foundation**, backed by Google, Microsoft and

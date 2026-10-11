@@ -62,8 +62,11 @@ def test_only_a_live_human_request_of_the_turn_passes_the_boundary_check() -> No
 
     pending = composition._pg_pending_human_request(conninfo)
 
+    async def ask(turn_id: str, call: str) -> bool:
+        return await pending(TurnId(turn_id), ToolCallId(call))
+
     def check(turn_id: str, call: str) -> bool:
-        return asyncio.run(pending(TurnId(turn_id), ToolCallId(call)))
+        return asyncio.run(ask(turn_id, call))
 
     assert check(turn, "tc-approval")
     assert check(turn, "tc-evidence")

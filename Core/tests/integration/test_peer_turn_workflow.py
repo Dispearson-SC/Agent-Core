@@ -156,7 +156,9 @@ class _Mailbox:
         """What a redelivery would do to a row whose worker died after the claim."""
         self.queued.append(corr)
 
-    async def answer(self, correlation_id: str, answer: str) -> None:
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
         self.answer_calls.append((correlation_id, answer))
         self.answers.setdefault(correlation_id, answer)
 

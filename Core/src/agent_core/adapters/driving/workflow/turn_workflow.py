@@ -161,6 +161,7 @@ from agent_core.domain.peers import (
     PEER_ASK_CLOSED_ANSWER,
     PEER_ASK_FAILED_ANSWER,
     AgentId,
+    PeerAnswerRefusedError,
     PeerPolicy,
 )
 from agent_core.domain.profile import AgentProfile
@@ -1764,6 +1765,9 @@ class PeerTurnJob:
     request: TurnRequest
     correlation_id: str
     asking_turn_id: TurnId
+    # C1c. The per-ask secret from the claimed row. It is part of the durable input (so a
+    # recovered workflow still holds it) and is what lets this workflow, and only it, answer.
+    answer_token: str | None = field(default=None, repr=False)
 
 
 PEER_WORKFLOW_PREFIX: Final[str] = "peer-"
@@ -1782,13 +1786,25 @@ def peer_workflow_id(correlation_id: str) -> str:
 
 
 @DBOS.step()
-async def _step_record_peer_reply(correlation_id: str, text: str) -> None:
+async def _step_record_peer_reply(
+    correlation_id: str, text: str, answer_token: str | None = None
+) -> bool:
     """Write the callee's answer on the mailbox row the asker holds a handle to.
 
     Idempotent in the mailbox (the first answer wins), so a retried step is a no-op. The
     text is the callee's bytes VERBATIM: wrapping is `read_answer`'s (CLAUDE.md #10).
+
+    Presents the row's `answer_token` (C1c). Returns False when the row REFUSED the answer
+    (a wrong token, or the ask was cancelled, C4): nothing was written, so the caller must not
+    wake the asker. A refusal is logged, not raised: failing this workflow would not change
+    what the row decided, and a cancelled ask is an expected end.
     """
-    await _require_peer_seat().mailbox.answer(correlation_id, text)
+    try:
+        await _require_peer_seat().mailbox.answer(correlation_id, text, answer_token=answer_token)
+    except PeerAnswerRefusedError as refused:
+        _LOG.warning("peer ask %r refused the callee's answer: %s", correlation_id, refused.reason)
+        return False
+    return True
 
 
 async def _close_peer_ask(job: PeerTurnJob, text: str) -> None:
@@ -1800,7 +1816,8 @@ async def _close_peer_ask(job: PeerTurnJob, text: str) -> None:
     this database) the send fails, and failing THIS workflow would not bring it back; the
     answer is on the row either way.
     """
-    await _step_record_peer_reply(job.correlation_id, text)
+    if not await _step_record_peer_reply(job.correlation_id, text, job.answer_token):
+        return
     try:
         await signal_peer_answer(job.asking_turn_id, job.correlation_id)
     except Exception:
@@ -2141,11 +2158,19 @@ class DurablePeerTurnStarter:
     """
 
     async def start(
-        self, correlation_id: str, asking_turn_id: TurnId, request: TurnRequest
+        self,
+        correlation_id: str,
+        asking_turn_id: TurnId,
+        request: TurnRequest,
+        *,
+        answer_token: str | None = None,
     ) -> None:
         await enqueue_peer_turn(
             PeerTurnJob(
-                request=request, correlation_id=correlation_id, asking_turn_id=asking_turn_id
+                request=request,
+                correlation_id=correlation_id,
+                asking_turn_id=asking_turn_id,
+                answer_token=answer_token,
             )
         )
 
