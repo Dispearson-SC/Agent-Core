@@ -400,3 +400,30 @@ async def test_an_async_task_has_no_answer_until_one_arrives_and_is_then_idempot
         "a second delivery for one correlation id overwrote the answer; a retry must be a "
         "no-op, not a way to change what a suspended turn resumes with"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_a2a_task_refuses_a_late_delivery(fixture_peer: _FixturePeer) -> None:
+    """C4: cancelling an ask refuses its late answer even when the sender holds the token."""
+    from agent_core.domain.peers import PeerAnswerRefusedError
+
+    fixture_peer.next_result = {"state": "submitted"}
+    mailbox = await _mailbox()
+    turn_id = TurnId(str(uuid.uuid4()))
+    correlation_id = await mailbox.ask(
+        _policy_for(fixture_peer),
+        _ASSISTANT,
+        "cancel me",
+        from_session=_session(),
+        turn_id=turn_id,
+        hop=0,
+    )
+    token = fixture_peer.received_messages[-1]["metadata"]["answer_token"]
+
+    assert await mailbox.cancel(correlation_id, "reply timeout") is True
+    assert await mailbox.cancel(correlation_id, "again") is False
+    assert await mailbox.is_cancelled(correlation_id) is True
+    with pytest.raises(PeerAnswerRefusedError, match="cancelled"):
+        await mailbox.answer(correlation_id, "late", answer_token=token)
+    assert await mailbox.read_answer(correlation_id) is None
+    assert await mailbox.cancel_open(str(turn_id), "x") == (), "already cancelled: history"

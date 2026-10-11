@@ -124,9 +124,38 @@ class AgentMailbox(Protocol):
         random `answer_token`, minted when the ask is enqueued and handed ONLY to the party
         entitled to answer (the claimed `PeerAsk`, the A2A message metadata). A delivery that
         does not present it raises `PeerAnswerRefusedError` and writes nothing. So does a
-        delivery for an ask that was cancelled (C4). A retry of an already answered ask is
+        delivery for an ask that was cancelled (`cancel`, C4). A retry of an already answered ask is
         still a silent no-op, and an unknown id is too (strangers deliver).
         """
+        ...
+
+    async def cancel(self, correlation_id: str, reason: str) -> bool:
+        """The asker gives up on one ask: mark it `cancelled`. True if THIS call ended it.
+
+        An open ask (queued or delivered, unanswered) becomes cancelled; an answered, already
+        cancelled or unknown ask is left alone and False is returned. A cancelled ask is never
+        claimed, never redelivered, and REFUSES a later `answer` (`PeerAnswerRefusedError`): the
+        asker has moved on, so a late reply must not be written or wake anybody. Idempotent.
+        `reason` is for the operator (a short fixed phrase, never the question or an answer).
+
+        This is the row half of the cascade; cancelling the callee's running workflow is the
+        caller's job (it is engine state, not mailbox state). Designed to be reused by any
+        policy that abandons an ask (fan-out `fail_fast`, C10).
+        """
+        ...
+
+    async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
+        """Cancel every open ask made by the asking turn `turn_id`; return their ids, sorted.
+
+        For a turn that expires or is cancelled as a whole. Already answered or cancelled asks
+        are not returned (they are history).
+        """
+        ...
+
+    async def is_cancelled(self, correlation_id: str) -> bool:
+        """Whether the ask ended `cancelled`. Lets a re-ask of the same question (the mailbox
+        is idempotent per `(turn, target, question)`, so it names the same row) tell a dead ask
+        from a live one without waiting for a reply that cannot come."""
         ...
 
     async def read_answer(self, correlation_id: str) -> str | None:

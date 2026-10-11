@@ -1059,3 +1059,34 @@ private `_FAILED_ASK_ANSWER` alias in the worker was removed (the domain constan
   positive whole number or startup fails. The answer token (C1c) survives redelivery.
 - Deliberately not done: a poison budget (the `redeliveries` counter is where C5 can read it) and
   reclaiming rows whose workflow exists but is stuck (that is C4/C5 territory).
+
+**C4 · cancel and expire cascade.** D28 left timed-out ask rows open, so a callee kept running
+(and paying for model calls) for an asker that had moved on. Now an ask the asker gives up on is
+CANCELLED, both halves:
+
+- *Row.* New end state `cancelled` of `peer_messages.state` (migration `0028` adds
+  `cancel_reason`, `cancelled_at` and a partial index on open asks per turn). Port verbs
+  `cancel(correlation_id, reason) -> bool` (True when this call ended an open ask; answered or
+  already cancelled is False, idempotent), `cancel_open(turn_id, reason)` (every open ask of one
+  asking turn, ids sorted) and `is_cancelled`. A cancelled row is never claimed, never reclaimed
+  by the lease, and `answer` on it raises `PeerAnswerRefusedError` (not written; the peer
+  workflow then does not wake the asker). The answer UPDATE excludes `cancelled`, so an answer
+  and a cancel racing each other have exactly one winner.
+- *Callee workflow.* `DBOS.cancel_workflow_async("peer-<id>")`. `_step_cancel_peer_asks` is ONE
+  recorded step (row first, then the engine, idempotent so a retried step finishes the job; a
+  workflow already gone is logged, not an error). `cancel_turn(turn_id, reason)` is the same
+  cascade for a whole turn, run from outside a workflow: it cancels the asker first and then
+  `cancel_open`. A bare `dbos workflow cancel` of an asker does not cascade.
+- *When.* In `_collect_round`: at the reply deadline for exactly the asks still awaiting (an
+  answered ask in the same round is untouched, "cancel only that ask"); and when a person does
+  not decide in time and the turn expires, for every ask still outstanding. `fail_fast` (C10)
+  calls the same step with the siblings of the failed ask.
+- *Re-ask supersedes D28.* The mailbox is idempotent per `(turn, target, question)`, so a
+  word-for-word re-ask after a timeout names the cancelled row. It used to be able to deliver
+  late; it now resolves at once with a "cancelled earlier" text instead of waiting a second
+  timeout for a reply that cannot come. Repeats become fresh asks with C13.
+- *Limits.* A cancel that races the worker between its claim and `start` marks the row
+  cancelled, but the workflow may still start and run; its answer is refused. The A2A adapter
+  cancels locally only (the wire `tasks/cancel` is D2). Asks a cancelled callee made to third
+  agents are not cascaded: `peer_messages.turn_id` is a UUID column and a callee's turn id
+  (`peer-<id>`) is not one, so such an ask cannot even be enqueued today (see the report).

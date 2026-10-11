@@ -359,24 +359,25 @@ def test_in_a_mixed_round_an_unanswered_human_expires_the_turn(
 # --- re-asking after a timeout ---------------------------------------------------------------
 
 
-def test_a_word_for_word_re_ask_after_a_timeout_can_deliver_its_reply(
+def test_a_word_for_word_re_ask_after_a_timeout_resolves_at_once_as_cancelled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The mailbox is idempotent per (target, question), so the re-ask gets the SAME handle."""
+    """C4 supersedes D28 here. A timed-out ask is CANCELLED (row and callee workflow), so the
+    mailbox's idempotent re-ask names a dead row; waiting a second full timeout for it would
+    be waiting for nothing. It resolves immediately (C13 will make repeats fresh asks)."""
     world = fanout.install(
         monkeypatch,
         (fanout.ask("tc-1"),),
-        [
-            fanout.nobody_answers(fanout.REPLY_TIMEOUT),  # round 1: times out
-            fanout.answer("corr-1", "second time lucky"),  # round 2: the same question, same handle
-        ],
+        [fanout.nobody_answers(fanout.REPLY_TIMEOUT)],  # round 1 times out; round 2 must not wait
     )
     world.resume.then = [TurnOutcome(turn_id=TurnId("turn-1"), pending=(fanout.ask("tc-1"),))]
 
     outcome = _run(world)
 
     assert outcome.result is not None
-    assert world.resume.calls[1] == (("tc-1", wrap_peer_answer("second time lucky")),)
+    assert world.recv_timeouts == [fanout.REPLY_TIMEOUT], "no second wait for the cancelled ask"
+    ((tool_call_id, payload),) = world.resume.calls[1]
+    assert tool_call_id == "tc-1" and "cancelled" in str(payload)
 
 
 def test_a_re_ask_whose_reply_already_sits_in_the_mailbox_does_not_wait(

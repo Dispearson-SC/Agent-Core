@@ -104,7 +104,7 @@ class A2AAgentMailbox:
     Postgres adapter there is no synchronous driver to push into `asyncio.to_thread`.
     """
 
-    __slots__ = ("_answers", "_client", "_tokens")
+    __slots__ = ("_answers", "_cancelled", "_client", "_tokens", "_turns")
 
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._client = client
@@ -116,6 +116,11 @@ class A2AAgentMailbox:
         # C1c. correlation id -> the secret sent to the peer in the message metadata. A later
         # `answer` delivery must present it; compared in constant time.
         self._tokens: dict[str, str] = {}
+        # C4. Local bookkeeping: which asking turn made each task, and which were cancelled.
+        # The A2A wire has `tasks/cancel`; sending it needs the endpoint and is D2's. Until
+        # then a cancelled ask refuses a late `answer` here and the peer is not told.
+        self._turns: dict[str, str] = {}
+        self._cancelled: set[str] = set()
 
     async def discover(self, policy: PeerPolicy) -> tuple[AgentRef, ...]:
         """Refresh `policy.peers` from each reachable peer's live agent card.
@@ -218,6 +223,7 @@ class A2AAgentMailbox:
         result: dict[str, Any] = envelope["result"]
         correlation_id = str(result["id"])
         self._tokens.setdefault(correlation_id, answer_token)
+        self._turns.setdefault(correlation_id, str(turn_id))
         if result["status"]["state"] == "completed":
             artifacts: list[dict[str, Any]] = result.get("artifacts", [])
             if artifacts:
@@ -239,6 +245,8 @@ class A2AAgentMailbox:
         """
         if correlation_id in self._answers:
             return
+        if correlation_id in self._cancelled:
+            raise PeerAnswerRefusedError(correlation_id, "the ask was cancelled")
         expected = self._tokens.get(correlation_id)
         if (
             expected is None
@@ -247,6 +255,30 @@ class A2AAgentMailbox:
         ):
             raise PeerAnswerRefusedError(correlation_id, "the answer token did not match")
         self._answers[correlation_id] = answer
+
+    async def cancel(self, correlation_id: str, reason: str) -> bool:
+        """Mark an unanswered task cancelled (local only, see `_cancelled`). True if it was
+        open: known to this adapter, not answered, not already cancelled."""
+        if (
+            correlation_id not in self._tokens
+            or correlation_id in self._answers
+            or correlation_id in self._cancelled
+        ):
+            return False
+        self._cancelled.add(correlation_id)
+        return True
+
+    async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
+        open_ids = sorted(
+            corr
+            for corr, turn in self._turns.items()
+            if turn == turn_id and corr not in self._answers and corr not in self._cancelled
+        )
+        self._cancelled.update(open_ids)
+        return tuple(open_ids)
+
+    async def is_cancelled(self, correlation_id: str) -> bool:
+        return correlation_id in self._cancelled
 
     async def read_answer(self, correlation_id: str) -> str | None:
         """The peer's answer, WRAPPED as untrusted content, or None if none has arrived.

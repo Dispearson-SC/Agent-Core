@@ -537,3 +537,106 @@ def test_the_lease_is_judged_at_the_given_time() -> None:
 
     assert nothing == ()
     assert reclaimed == (claimed.correlation_id,)
+
+
+# --- C4: cancel ---------------------------------------------------------------------------------
+
+
+def _ask(conninfo: str, *, request_key: str, turn_id: TurnId | None = None) -> tuple[str, TurnId]:
+    mailbox = PgAgentMailbox(conninfo)
+    turn = turn_id or TurnId(str(uuid.uuid4()))
+    correlation_id = asyncio.run(
+        mailbox.ask(
+            _POLICY,
+            _ASSISTANT,
+            f"cancel question {uuid.uuid4()}",
+            from_session=_session(),
+            turn_id=turn,
+            hop=0,
+            request_key=request_key,
+        )
+    )
+    return correlation_id, turn
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_a_cancelled_queued_ask_is_never_claimed_and_is_marked_with_its_reason() -> None:
+    conninfo = _migrated_conninfo()
+    mailbox = PgAgentMailbox(conninfo)
+    correlation_id, _ = _ask(conninfo, request_key="tc-q")
+
+    assert asyncio.run(mailbox.cancel(correlation_id, "reply timeout")) is True
+    assert asyncio.run(mailbox.cancel(correlation_id, "again")) is False, "idempotent"
+    assert asyncio.run(mailbox.is_cancelled(correlation_id)) is True
+    assert asyncio.run(mailbox.claim_next(_ASSISTANT)) is None, "a cancelled ask is not claimed"
+    assert _state(conninfo, correlation_id)[0] == "cancelled"
+    with psycopg.connect(conninfo) as conn:
+        row = conn.execute(
+            "SELECT cancel_reason, cancelled_at IS NOT NULL FROM peer_messages "
+            "WHERE correlation_id = %s",
+            (correlation_id,),
+        ).fetchone()
+    assert row == ("reply timeout", True)
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_no_answer_is_written_after_the_cancel_even_with_the_right_token() -> None:
+    from agent_core.domain.peers import PeerAnswerRefusedError
+
+    conninfo = _migrated_conninfo()
+    mailbox = PgAgentMailbox(conninfo)
+    correlation_id, _ = _ask(conninfo, request_key="tc-run")
+    claimed = asyncio.run(mailbox.claim_next(_ASSISTANT))  # the callee is RUNNING
+    assert claimed is not None and claimed.correlation_id == correlation_id
+
+    assert asyncio.run(mailbox.cancel(correlation_id, "asker expired")) is True
+    with pytest.raises(PeerAnswerRefusedError, match="cancelled"):
+        asyncio.run(
+            mailbox.answer(correlation_id, "too late", answer_token=claimed.answer_token)
+        )
+
+    assert asyncio.run(mailbox.read_answer(correlation_id)) is None
+    assert _state(conninfo, correlation_id)[0] == "cancelled"
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_cancel_leaves_an_answered_ask_alone_and_a_cancelled_row_is_not_reclaimed() -> None:
+    conninfo = _migrated_conninfo()
+    mailbox = PgAgentMailbox(conninfo)
+    answered_id, _ = _ask(conninfo, request_key="tc-a")
+    claimed = asyncio.run(mailbox.claim_next(_ASSISTANT))
+    assert claimed is not None
+    asyncio.run(mailbox.answer(answered_id, "done", answer_token=claimed.answer_token))
+    cancelled_id, _ = _ask(conninfo, request_key="tc-c")
+    again = asyncio.run(mailbox.claim_next(_ASSISTANT))
+    assert again is not None
+    asyncio.run(mailbox.cancel(cancelled_id, "gone"))
+    _age(conninfo, cancelled_id, _LEASE * 3)
+
+    assert asyncio.run(mailbox.cancel(answered_id, "too late")) is False
+    assert _state(conninfo, answered_id)[0] == "answered"
+    assert asyncio.run(mailbox.cancel("no-such-ask", "x")) is False
+    reclaimed = asyncio.run(
+        mailbox.reclaim_stale(_ASSISTANT, lease=_LEASE, exists=_never_running([]))
+    )
+    assert reclaimed == (), "a cancelled ask is never redelivered"
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_cancel_open_ends_every_open_ask_of_one_turn_and_only_that_turn() -> None:
+    conninfo = _migrated_conninfo()
+    mailbox = PgAgentMailbox(conninfo)
+    first, turn = _ask(conninfo, request_key="tc-1")
+    second, _ = _ask(conninfo, request_key="tc-2", turn_id=turn)
+    other, _ = _ask(conninfo, request_key="tc-3")
+    claimed = asyncio.run(mailbox.claim_next(_ASSISTANT))  # one of them is running
+    assert claimed is not None
+    answered = claimed.correlation_id
+    asyncio.run(mailbox.answer(answered, "done", answer_token=claimed.answer_token))
+
+    cancelled = asyncio.run(mailbox.cancel_open(str(turn), "asking turn cancelled"))
+
+    open_ones = sorted({first, second} - {answered})
+    assert cancelled == tuple(open_ones), "the answered one is history, the other turn untouched"
+    assert _state(conninfo, other)[0] in ("queued", "delivered")
+    assert asyncio.run(mailbox.cancel_open("peer-not-a-uuid", "x")) == (), "no UUID, no asks"

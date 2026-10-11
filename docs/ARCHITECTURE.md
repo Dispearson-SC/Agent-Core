@@ -631,6 +631,11 @@ An inbound answer must also present the ask's random `answer_token` (the correla
 derived, so it is an address and not a credential); a decision for a call that is not a live
 human request is refused at the API before it reaches the workflow. See DECISIONS D31.
 
+An ask the asker gives up on - it timed out in a round, or the asking turn expired or was
+cancelled - is cancelled: the mailbox row ends `cancelled` (no later answer is accepted) and the
+callee workflow `peer-<id>` is cancelled. A claim lost before its workflow started is redelivered
+after a lease. See DECISIONS D31 (C3, C4).
+
 ### A2A: shape now, wire protocol in D2
 
 Agent2Agent reached **v1.0 under the Linux Foundation**, backed by Google, Microsoft and

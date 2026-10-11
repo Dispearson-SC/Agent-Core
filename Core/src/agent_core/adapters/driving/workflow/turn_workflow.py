@@ -189,6 +189,7 @@ __all__ = [
     "WINDOW_QUEUE_NAME",
     "CompactionSeat",
     "DurablePeerTurnStarter",
+    "cancel_turn",
     "HumanAnswer",
     "HumanPayload",
     "NotInsideAWorkflowError",
@@ -308,6 +309,16 @@ _PEER_TIMED_OUT: Final[str] = (
     "The peer {target!r} did not answer within {seconds} seconds, so no answer is coming "
     "for this ask. Tell the person it is unavailable or carry on without it."
 )
+# The result for ONE ask that was already cancelled when it was asked again: the first copy
+# timed out (C4 cancelled its row and its callee), and the mailbox names the same row for a
+# word-for-word repeat. OUR text, not wrapped.
+_PEER_ASK_CANCELLED: Final[str] = (
+    "The peer {target!r} ask was cancelled earlier because it did not answer in time, so no "
+    "answer is coming for this repeat of it. Tell the person it is unavailable or carry on "
+    "without it."
+)
+_CANCEL_TIMED_OUT: Final[str] = "reply timeout: the asking round gave up waiting"
+_CANCEL_EXPIRED: Final[str] = "asking turn expired before a person decided"
 _MALFORMED_ASK: Final[str] = (
     "The peer ask was refused before it was sent: the call carried no usable target and "
     "question, so there was nothing to ask and nobody to ask it of."
@@ -1134,6 +1145,65 @@ async def _step_peek_peer_answer(correlation_id: str) -> str | None:
 
 
 @DBOS.step()
+async def _step_peer_ask_cancelled(correlation_id: str) -> bool:
+    """Whether the ask ended `cancelled` (C4). Read in a step so a replay sees the same answer."""
+    return await _require_peer_seat().mailbox.is_cancelled(correlation_id)
+
+
+async def _cancel_callees(correlation_ids: tuple[str, ...], reason: str) -> tuple[str, ...]:
+    """The cascade proper: close each ask's row, then cancel its callee workflow. NOT a step.
+
+    Shared by the replay-safe step below and by `cancel_turn` (called from outside a workflow).
+    Order matters: the row first, so an answer racing the cancel is refused, then the engine.
+    A row that was answered meanwhile is history and its workflow is left alone. A workflow that
+    is already gone, finished or never started is not an error (the row is what protects the
+    asker); nothing here may fail the turn that is cancelling.
+    """
+    seat = _require_peer_seat()
+    cancelled: list[str] = []
+    for correlation_id in sorted(correlation_ids):
+        ended = await seat.mailbox.cancel(correlation_id, reason)
+        if not ended and not await seat.mailbox.is_cancelled(correlation_id):
+            continue  # answered: nothing to cancel
+        cancelled.append(correlation_id)
+        try:
+            await DBOS.cancel_workflow_async(peer_workflow_id(correlation_id))
+        except Exception:
+            _LOG.warning(
+                "could not cancel the callee workflow for peer ask %r; its row is cancelled so "
+                "any answer it writes is refused",
+                correlation_id,
+                exc_info=True,
+            )
+    return tuple(cancelled)
+
+
+@DBOS.step()
+async def _step_cancel_peer_asks(correlation_ids: tuple[str, ...], reason: str) -> tuple[str, ...]:
+    """Cancel these asks (rows, then callee workflows) as ONE recorded step. C4 / D31.
+
+    Called from the body at the points where the asker gives up on asks it made: a reply timeout
+    in a round, the asking turn expiring. Idempotent, so a step retried after a crash between
+    the row and the workflow finishes the job: an already-cancelled row still gets its workflow
+    cancelled. `fail_fast` (C10) calls this with the siblings of the ask that failed.
+    """
+    return await _cancel_callees(correlation_ids, reason)
+
+
+async def cancel_turn(turn_id: TurnId, reason: str) -> tuple[str, ...]:
+    """Cancel a turn and everything it is waiting on. The operator/driving-side entry (C4).
+
+    Cancels the asking workflow FIRST (so it cannot resume or ask again), then every open ask
+    it made (rows and callee workflows). Returns the correlation ids it cancelled. Not a step:
+    it runs outside any workflow. A bare `dbos workflow cancel` of an asker does NOT cascade
+    (the engine knows nothing of mailbox rows); use this.
+    """
+    await DBOS.cancel_workflow_async(str(turn_id))
+    open_asks = await _require_peer_seat().mailbox.cancel_open(str(turn_id), reason)
+    return await _cancel_callees(open_asks, reason)
+
+
+@DBOS.step()
 async def _step_resume_round(
     turn_id: TurnId,
     request: TurnRequest,
@@ -1235,6 +1305,10 @@ async def _collect_round(
         stored = await _step_peek_peer_answer(corr)
         if stored is not None:
             peer_results[awaiting.pop(corr)] = stored
+        elif await _step_peer_ask_cancelled(corr):
+            # C4: the timeout cancelled this row and its callee, so a repeat names a dead ask.
+            tool_call_id = awaiting.pop(corr)
+            peer_results[tool_call_id] = _PEER_ASK_CANCELLED.format(target=targets[tool_call_id])
 
     seconds = 0
     peer_deadline = human_deadline = 0.0
@@ -1258,13 +1332,20 @@ async def _collect_round(
         if answer is None:
             now = await _step_round_clock()
             if human_missing and (human_deadline <= now or human_deadline == nearest):
+                # C4: asks still out when the turn gives up must not keep running.
+                if awaiting:
+                    await _step_cancel_peer_asks(tuple(sorted(awaiting)), _CANCEL_EXPIRED)
                 return _TurnEnd(await _step_expire(turn_id), closed=True)
+            timeouts = tuple(sorted(awaiting))
             for corr, tool_call_id in awaiting.items():
                 timed_out.add(corr)
                 peer_results[tool_call_id] = _PEER_TIMED_OUT.format(
                     target=targets[tool_call_id], seconds=seconds
                 )
             awaiting.clear()
+            # C4: only the asks that timed out (the answered ones already left `awaiting`).
+            if timeouts:
+                await _step_cancel_peer_asks(timeouts, _CANCEL_TIMED_OUT)
             continue
 
         if isinstance(answer, HumanAnswer):

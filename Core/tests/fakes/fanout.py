@@ -86,6 +86,8 @@ class Mailbox:
         self.answer_calls: list[tuple[str, str]] = []
         self.answer_tokens: list[str | None] = []
         self.refuse_answers = False
+        self.cancelled: dict[str, str] = {}  # correlation id -> reason, in cancel order
+        self.turn_of: dict[str, str] = {}
         self.answers: dict[str, str] = {}
         self._ids: dict[tuple[str, str], str] = {}
 
@@ -95,7 +97,28 @@ class Mailbox:
         if key not in self._ids:  # idempotent per (target, question), like the real one
             self._ids[key] = f"corr-{len(self._ids) + 1}"
             self.asks.append(key)
+            self.turn_of[self._ids[key]] = str(kwargs.get("turn_id"))
         return self._ids[key]
+
+    async def cancel(self, correlation_id: str, reason: str) -> bool:
+        """Open -> cancelled; False when answered or already cancelled (like the real row)."""
+        if correlation_id in self.answers or correlation_id in self.cancelled:
+            return False
+        self.cancelled[correlation_id] = reason
+        return True
+
+    async def is_cancelled(self, correlation_id: str) -> bool:
+        return correlation_id in self.cancelled
+
+    async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
+        ids = sorted(
+            corr
+            for corr, turn in self.turn_of.items()
+            if turn == str(turn_id) and corr not in self.answers and corr not in self.cancelled
+        )
+        for corr in ids:
+            self.cancelled[corr] = reason
+        return tuple(ids)
 
     async def answer(
         self, correlation_id: str, answer: str, *, answer_token: str | None = None
@@ -104,7 +127,7 @@ class Mailbox:
         `refuse_answers` makes it refuse like the real row does for a forged or cancelled one."""
         self.answer_calls.append((correlation_id, answer))
         self.answer_tokens.append(answer_token)
-        if self.refuse_answers:
+        if self.refuse_answers or correlation_id in self.cancelled:
             raise PeerAnswerRefusedError(correlation_id)
         self.answers.setdefault(correlation_id, answer)
 
@@ -134,6 +157,7 @@ class World:
     mailbox: Mailbox = field(default_factory=Mailbox)
     resume: Resume = field(default_factory=Resume)
     recv_timeouts: list[float] = field(default_factory=list)
+    cancelled_workflows: list[str] = field(default_factory=list)
     clock: list[float] = field(default_factory=lambda: [1000.0])
     script: list[Any] = field(default_factory=list)
 
@@ -169,6 +193,10 @@ def install(
         return TurnOutcome(turn_id=turn_id, result=TurnResult(text="expired"))
 
     class _Dbos:
+        @staticmethod
+        async def cancel_workflow_async(workflow_id: str, **_: Any) -> None:
+            world.cancelled_workflows.append(workflow_id)
+
         @staticmethod
         async def recv_async(topic: str | None = None, timeout_seconds: float = 60) -> Any:
             world.recv_timeouts.append(timeout_seconds)

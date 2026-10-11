@@ -105,6 +105,7 @@ import asyncio
 import logging
 import re
 import secrets
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -185,13 +186,34 @@ _CLAIM_SQL = """
 _ANSWER_SQL = """
     UPDATE peer_messages
     SET answer = %s, state = 'answered', answered_at = now()
-    WHERE correlation_id = %s AND answered_at IS NULL
+    WHERE correlation_id = %s AND answered_at IS NULL AND state <> 'cancelled'
       AND answer_token IS NOT DISTINCT FROM %s
 """
 
 # Why a delivery that changed no row changed none: nothing there (a stranger), already
 # answered (a retry), or still open and refused (a forged token). Only the last raises.
-_ANSWER_STATE_SQL = "SELECT answered_at IS NOT NULL FROM peer_messages WHERE correlation_id = %s"
+_ANSWER_STATE_SQL = (
+    "SELECT answered_at IS NOT NULL, state FROM peer_messages WHERE correlation_id = %s"
+)
+
+# C4. Open (queued or delivered, unanswered) -> cancelled. One guarded statement, like the
+# answer: an answer that wins the race leaves nothing for the cancel to change, and a cancel
+# that wins leaves nothing for the answer (its WHERE excludes `cancelled`).
+_CANCEL_SQL = """
+    UPDATE peer_messages
+    SET state = 'cancelled', cancel_reason = %s, cancelled_at = now()
+    WHERE correlation_id = %s AND state IN ('queued', 'delivered') AND answered_at IS NULL
+    RETURNING correlation_id
+"""
+
+_CANCEL_OPEN_SQL = """
+    UPDATE peer_messages
+    SET state = 'cancelled', cancel_reason = %s, cancelled_at = now()
+    WHERE turn_id = %s::uuid AND state IN ('queued', 'delivered') AND answered_at IS NULL
+    RETURNING correlation_id
+"""
+
+_IS_CANCELLED_SQL = "SELECT state = 'cancelled' FROM peer_messages WHERE correlation_id = %s"
 
 # C3. Candidates: delivered, unanswered, past the lease (`delivered_at + lease < now`). The
 # database's clock decides unless a test passes `now`. Oldest first, bounded so one pass never
@@ -497,7 +519,42 @@ class PgAgentMailbox:
                 return
             row = conn.execute(_ANSWER_STATE_SQL, (correlation_id,)).fetchone()
         if row is not None and not row[0]:
+            if row[1] == "cancelled":
+                raise PeerAnswerRefusedError(correlation_id, "the ask was cancelled")
             raise PeerAnswerRefusedError(correlation_id, "the answer token did not match")
+
+    async def cancel(self, correlation_id: str, reason: str) -> bool:
+        """Mark one open ask `cancelled` (C4). True if this call did it. See the port."""
+        return await asyncio.to_thread(self._cancel_sync, correlation_id, reason)
+
+    def _cancel_sync(self, correlation_id: str, reason: str) -> bool:
+        with psycopg.connect(self._conninfo, autocommit=True) as conn:
+            return conn.execute(_CANCEL_SQL, (reason, correlation_id)).fetchone() is not None
+
+    async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
+        """Cancel every open ask of the asking turn; the ids, sorted. See the port.
+
+        `turn_id` is a UUID column: a workflow id that is not one (a callee's `peer-<id>`)
+        cannot have asks in it, so it answers "none" instead of failing the cast.
+        """
+        try:
+            uuid.UUID(turn_id)
+        except ValueError:
+            return ()
+        return await asyncio.to_thread(self._cancel_open_sync, turn_id, reason)
+
+    def _cancel_open_sync(self, turn_id: str, reason: str) -> tuple[str, ...]:
+        with psycopg.connect(self._conninfo, autocommit=True) as conn:
+            rows = conn.execute(_CANCEL_OPEN_SQL, (reason, turn_id)).fetchall()
+        return tuple(sorted(str(row[0]) for row in rows))
+
+    async def is_cancelled(self, correlation_id: str) -> bool:
+        return await asyncio.to_thread(self._is_cancelled_sync, correlation_id)
+
+    def _is_cancelled_sync(self, correlation_id: str) -> bool:
+        with psycopg.connect(self._conninfo) as conn:
+            row = conn.execute(_IS_CANCELLED_SQL, (correlation_id,)).fetchone()
+        return row is not None and bool(row[0])
 
     async def read_answer(self, correlation_id: str) -> str | None:
         """The peer's answer, WRAPPED as untrusted content, or None if it has not answered.

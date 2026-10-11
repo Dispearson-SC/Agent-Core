@@ -282,9 +282,19 @@ def test_protocol_exposes_no_blocking_receive() -> None:
     """
     members = sorted(_protocol_members())
 
-    assert members == ["answer", "ask", "discover", "read_answer"], (
+    assert members == [
+        "answer",
+        "ask",
+        "cancel",
+        "cancel_open",
+        "discover",
+        "is_cancelled",
+        "read_answer",
+    ], (
         "AgentMailbox answers one question - how does one agent ask another - through "
-        f"exactly discover + ask + answer + read_answer. Found: {members}. Asking and "
+        "discover + ask + answer + read_answer, plus the asker's way out of an ask it no "
+        "longer wants (C4: cancel, cancel_open, is_cancelled). "
+        f"Found: {members}. Asking and "
         "reading the reply back are two halves of ONE question, and a port that declares "
         "only the first half forces application code to name a concrete adapter to get "
         "the second (t-f9-09). The durable wait is still DBOS.recv() in "
@@ -442,7 +452,7 @@ def test_a_mailbox_that_cannot_read_an_answer_back_is_not_an_agent_mailbox(
     """
     conforming = _type_check(_stub(read_answer=True), tmp_path)
     assert conforming.returncode == 0, (
-        "A stub carrying discover/ask/answer/read_answer must satisfy AgentMailbox.\n"
+        "A stub carrying every AgentMailbox member must satisfy it.\n"
         f"{conforming.stdout}{conforming.stderr}"
     )
 
@@ -493,6 +503,15 @@ class StubMailbox:
     async def answer(
         self, correlation_id: str, answer: str, *, answer_token: str | None = None
     ) -> None:
+        raise NotImplementedError
+
+    async def cancel(self, correlation_id: str, reason: str) -> bool:
+        raise NotImplementedError
+
+    async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
+        raise NotImplementedError
+
+    async def is_cancelled(self, correlation_id: str) -> bool:
         raise NotImplementedError
 {redemption if read_answer else ""}
 

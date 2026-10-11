@@ -37,7 +37,7 @@ from agent_core.adapters.driven.peers.mailbox import PeerAsk, wrap_peer_answer
 from agent_core.adapters.driving.channels.registry import ChannelRegistry, OutboundMessage
 from agent_core.adapters.driving.peers.worker import AskDisposition, dispatch_next_ask
 from agent_core.adapters.driving.workflow import turn_workflow
-from agent_core.domain.peers import AgentId, PeerPolicy, peer_ask_id
+from agent_core.domain.peers import AgentId, PeerAnswerRefusedError, PeerPolicy, peer_ask_id
 from agent_core.domain.turn import (
     CallerIdentity,
     PendingKind,
@@ -117,6 +117,30 @@ class _Mailbox:
     queued: list[str] = field(default_factory=list)
     answers: dict[str, str] = field(default_factory=dict)
     answer_calls: list[tuple[str, str]] = field(default_factory=list)
+    cancelled: dict[str, str] = field(default_factory=dict)
+
+    async def cancel(self, correlation_id: str, reason: str) -> bool:
+        if correlation_id in self.answers or correlation_id in self.cancelled:
+            return False
+        self.cancelled[correlation_id] = reason
+        if correlation_id in self.queued:
+            self.queued.remove(correlation_id)
+        return True
+
+    async def is_cancelled(self, correlation_id: str) -> bool:
+        return correlation_id in self.cancelled
+
+    async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
+        ids = sorted(
+            corr
+            for corr, ask in self.rows.items()
+            if str(ask.turn_id) == str(turn_id)
+            and corr not in self.answers
+            and corr not in self.cancelled
+        )
+        for corr in ids:
+            await self.cancel(corr, reason)
+        return tuple(ids)
 
     async def ask(
         self,
@@ -160,6 +184,8 @@ class _Mailbox:
         self, correlation_id: str, answer: str, *, answer_token: str | None = None
     ) -> None:
         self.answer_calls.append((correlation_id, answer))
+        if correlation_id in self.cancelled:
+            raise PeerAnswerRefusedError(correlation_id, "the ask was cancelled")
         self.answers.setdefault(correlation_id, answer)
 
     async def read_answer(self, correlation_id: str) -> str | None:
@@ -403,3 +429,107 @@ def test_the_durable_starter_knows_whether_a_peer_workflow_was_enqueued(
     asyncio.run(drive())
 
     assert seen == {"before": False, "started": True}
+
+
+async def _status(workflow_id: str) -> str | None:
+    from dbos import DBOS
+
+    status = await DBOS.get_workflow_status_async(workflow_id)
+    return None if status is None else status.status
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_cancelling_the_asking_turn_cancels_the_running_callee_and_no_answer_is_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C4 on real DBOS: the callee is RUNNING (suspended on its human). `cancel_turn` cancels
+    the asker, marks its open ask cancelled and cancels `peer-<id>`; the late approval that
+    would have finished the callee leaves no answer and wakes nobody."""
+    world = _bind(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    async def drive() -> None:
+        async with _Dbos():
+            await turn_workflow.enqueue_turn(fanout.request(), turn_id=_ASKING_TURN)
+            await _until(lambda: world.mailbox.queued, "the ask to reach the mailbox")
+            assert await _dispatch(world) is AskDisposition.STARTED
+            callee = _callee_turn(world)
+            await _until(lambda: world.gateway.published, "the callee's approval request")
+
+            seen["cancelled"] = await turn_workflow.cancel_turn(_ASKING_TURN, "operator cancel")
+            seen["asker"] = await _status(str(_ASKING_TURN))
+            seen["callee"] = await _status(str(callee))
+
+            # the callee's human approves after the fact: the workflow is gone
+            await turn_workflow.signal_decision(callee, _APPROVAL_CALL, True, None)
+            await asyncio.sleep(1.5)
+
+    asyncio.run(drive())
+
+    (corr,) = world.mailbox.rows
+    assert seen["cancelled"] == (corr,)
+    assert seen["asker"] == "CANCELLED" and seen["callee"] == "CANCELLED"
+    assert world.mailbox.cancelled == {corr: "operator cancel"}
+    assert world.mailbox.answer_calls == [], "no answer was even attempted after the cancel"
+    assert world.mailbox.answers == {}
+    assert [p for p, _ in world.resume.calls if p == fanout.PEER] == [], "the callee never resumed"
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_cancelling_a_turn_whose_ask_is_still_queued_stops_the_worker_from_running_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _bind(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    async def drive() -> None:
+        async with _Dbos():
+            await turn_workflow.enqueue_turn(fanout.request(), turn_id=_ASKING_TURN)
+            await _until(lambda: world.mailbox.queued, "the ask to reach the mailbox")
+
+            seen["cancelled"] = await turn_workflow.cancel_turn(_ASKING_TURN, "operator cancel")
+            seen["dispatch"] = await _dispatch(world)  # the worker finds nothing to claim
+
+    asyncio.run(drive())
+
+    (corr,) = world.mailbox.rows
+    assert seen["cancelled"] == (corr,)
+    assert seen["dispatch"] is None, "a cancelled ask is not claimed"
+    assert world.start.callee_starts() == 0
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_a_reply_timeout_in_a_round_cancels_the_running_callee_through_the_recorded_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C4 on real DBOS, the in-workflow path: the asker's round times out, the recorded cancel
+    step marks the row and cancels `peer-<id>` from inside a step, and the asker resumes with the
+    timeout text and finishes."""
+    world = _bind(monkeypatch)
+
+    async def one_second(request: TurnRequest) -> int:
+        return 1
+
+    monkeypatch.setattr(turn_workflow, "_step_peer_reply_timeout", one_second)
+    seen: dict[str, Any] = {}
+
+    async def drive() -> None:
+        async with _Dbos():
+            await turn_workflow.enqueue_turn(fanout.request(), turn_id=_ASKING_TURN)
+            await _until(lambda: world.mailbox.queued, "the ask to reach the mailbox")
+            assert await _dispatch(world) is AskDisposition.STARTED
+            callee = _callee_turn(world)
+            outcome = await _asker_result()
+            assert outcome.result is not None and outcome.result.text == "all done"
+            seen["callee"] = await _status(str(callee))
+
+    asyncio.run(drive())
+
+    (corr,) = world.mailbox.rows
+    assert seen["callee"] == "CANCELLED"
+    assert list(world.mailbox.cancelled) == [corr]
+    ((asker_profile, (resolution,)),) = [
+        call for call in world.resume.calls if call[0] == fanout.ASKER
+    ]
+    assert "did not answer" in str(resolution.payload)
+    assert world.mailbox.answers == {}
