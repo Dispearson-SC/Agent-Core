@@ -142,21 +142,27 @@ def test_an_adapter_built_from_a_conninfo_gets_its_own_connections() -> None:
     assert isinstance(PgEventPublisher("postgresql://x/y")._connections, EventConnections)  # noqa: SLF001
 
 
-def test_the_container_shares_one_events_pool_and_closes_it_with_the_others() -> None:
+def test_the_publisher_has_a_pool_of_its_own_so_reads_never_starve_it() -> None:
+    """C1q: the feed's long reads (and the task graph's) and the publisher used to share one pool of
+    four; four slow reads could make every publish wait for a checkout. The publisher now owns its
+    pool; the readers share another; `close_pools` closes both."""
     from typing import cast
 
     from tests.unit.test_composition import _composition, _RecordingPool
 
     container = _composition().build_container(pool_factory=cast(Any, _RecordingPool))
 
-    shared = container.events_connections
-    assert isinstance(shared, EventConnections)
-    assert container.events._connections is shared  # noqa: SLF001
-    assert container.event_feed._reader._connections is shared  # noqa: SLF001
-    assert container.task_graph._connections is shared  # noqa: SLF001
-    pool = _Pool("postgresql://x/y")
-    shared._pool = pool  # noqa: SLF001
+    readers = container.events_connections
+    publisher = container.events_publisher_connections
+    assert isinstance(readers, EventConnections) and isinstance(publisher, EventConnections)
+    assert publisher is not readers, "reads and publishes must not share a pool"
+    assert container.events._connections is publisher  # noqa: SLF001
+    assert container.event_feed._reader._connections is readers  # noqa: SLF001
+    assert container.task_graph._connections is readers  # noqa: SLF001
+    reader_pool, publisher_pool = _Pool("postgresql://x/y"), _Pool("postgresql://x/y")
+    readers._pool = reader_pool  # noqa: SLF001
+    publisher._pool = publisher_pool  # noqa: SLF001
 
     container.close_pools()
 
-    assert pool.closed == 1
+    assert reader_pool.closed == 1 and publisher_pool.closed == 1

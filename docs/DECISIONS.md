@@ -2297,3 +2297,31 @@ root turn's reply now travels over the C22 feed while the model writes it.
   tool, the sentence is a `delta` of response 0 and the final answer is response 1; the snapshot's
   `reply_text` shows the last response only. A client that speaks as chunks arrive may speak the
   preamble; the persona (not this layer) decides whether the model writes one.
+
+## D60 - Slice 15 advisories (C1q): quiet failures, honest counts, a publisher that never waits
+
+Five small corrections to the event stream; none adds a workflow step or changes a recorded value,
+so `PINNED_DBOS_APPLICATION_VERSION` stays `agent-core-turns.10`.
+
+- **A failed snapshot read does not end the stream.** The idle snapshot (and the lag and
+  terminal-event snapshots) are read through one guard: a failure is logged and the stream carries
+  on; the next idle period reads again, and that snapshot is what decides whether the tree settled.
+- **A truncated ask window is not settled.** The ask read is oldest-first and bounded, so the asks
+  it omitted are the newest ones and none is known to be finished. `open_asks` is the open asks
+  read plus `omitted`. This errs towards keeping the stream open (it may report an ask as open that
+  has finished); the alternative errs towards telling a client nothing is left while a peer works.
+  Counting in SQL was not needed.
+- **The reply is published off the model's path.** `ReplyStreamHandler` queues chunks (at most 32)
+  and a background task publishes them; the end of each model-response stream flushes what is
+  pending, bounded by 5 s (a store that does not answer by then disables the stream for the run,
+  like a failing one). When the queue is full, new text is merged into the newest pending chunk of
+  the same response up to the 2000-character delta bound; past that it is dropped with one log line.
+  The stream is a courtesy copy, so a hole under a stalled store is acceptable; memory is not.
+- **The response counter counts model responses.** A response starts at its part index 0 (every
+  response has exactly one); the text parts of one response share its number and their chunk
+  indexes continue. Before, each text part was a new "response", so a reply with text on both sides
+  of a tool call inside ONE response showed only its last part in a snapshot.
+- **The publisher has a pool of its own.** `Container.events_publisher_connections` (max 4) serves
+  `PgEventPublisher`; `events_connections` (max 4) serves the feed's reader and the task graph. A
+  slow read can no longer make a publish wait for a checkout. The LISTEN wake-up already had its
+  own connection.

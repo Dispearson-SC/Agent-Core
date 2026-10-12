@@ -1234,6 +1234,8 @@ class Container:
     # C1p (D55). The event adapters' own pool, opened on first use; the process that runs the
     # container closes it (`main` does, next to the other two pools).
     events_connections: EventConnections | None = None
+    # C1q. The publisher's own pool, so the feed's long reads never make a publish wait.
+    events_publisher_connections: EventConnections | None = None
 
     def close_pools(self) -> None:
         """Close every pool this container owns (the order `main` has always used)."""
@@ -1241,6 +1243,8 @@ class Container:
         self.domain_pool.close()
         if self.events_connections is not None:
             self.events_connections.close()
+        if self.events_publisher_connections is not None:
+            self.events_publisher_connections.close()
 
 
 def build_pools(
@@ -1870,10 +1874,13 @@ def build_container(
     audit_allow, audit_presence = collect_audit_policy(TOOL_PACKAGES)
     # C21 (D52). `tool_called` events ride on the audit trail: the decorator writes the audit row
     # first and then tells the feed, and a feed that fails never fails the audited call.
-    # ONE small pool of its own for everything that reads or writes events (C1p, D55): opened on
-    # first use, closed by the process that runs the container (`Container.events_connections`).
+    # Two small pools of their own for the event adapters (C1p, D55; split in C1q): one for the
+    # READERS (the feed's reads and the task graph, which can be slow) and one for the PUBLISHER, so
+    # a publish never waits for a checkout behind reads. Both open on first use and are closed by
+    # the process that runs the container.
     events_connections = EventConnections(resolved.app_conninfo)
-    events = PgEventPublisher(events_connections)
+    events_publisher_connections = EventConnections(resolved.app_conninfo)
+    events = PgEventPublisher(events_publisher_connections)
     audit = EventingAuditSink(
         PgAuditSink(
             PoolConnections(audit_pool),
@@ -1994,6 +2001,7 @@ def build_container(
         knowledge_admin=knowledge_admin,
         mailbox=mailbox,
         events_connections=events_connections,
+        events_publisher_connections=events_publisher_connections,
         runner=runner,
         tools=tools,
         context=context,
