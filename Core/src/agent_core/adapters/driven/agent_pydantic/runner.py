@@ -83,7 +83,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final
@@ -119,7 +119,8 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from agent_core.adapters.driven.mcp.toolsets import result_budget_for
-from agent_core.adapters.driven.tools.context import TurnContext
+from agent_core.adapters.driven.peers.catalogue import build_peer_catalogue
+from agent_core.adapters.driven.tools.context import PeerEntry, TurnContext
 from agent_core.application.ingest_media import sniff_media
 from agent_core.domain.compaction import CompactionPolicy, ContextState
 from agent_core.domain.knowledge import KnowledgeHit, TenantKnowledgePolicy
@@ -1387,6 +1388,7 @@ class PydanticAgentRunner:
         token_estimator: TokenEstimator = ladder_token_estimator,
         model_factory: ModelFactory = litellm_model_factory,
         clock: Callable[[], datetime] = _utc_now,
+        peer_profiles: Mapping[str, AgentProfile] | None = None,
     ) -> None:
         self._model = model
         self._policy = policy
@@ -1398,6 +1400,9 @@ class PydanticAgentRunner:
         self._token_estimator = token_estimator
         self._model_factory = model_factory
         self._clock = clock
+        # C14. Every loaded profile, so the `ask_peer` tool can be generated per turn from who the
+        # asker may actually ask. `None` keeps the tool static.
+        self._peer_profiles = peer_profiles
         self._agents: dict[tuple[str, str, str], Agent[Any, RunOutput]] = {}
 
     def usage_limits_for(self, profile: AgentProfile) -> UsageLimits:
@@ -1476,6 +1481,7 @@ class PydanticAgentRunner:
                     caller=request.caller,
                     session=request.session,
                     agent_id=request.profile_id,
+                    peer_catalogue=self._peer_catalogue(profile, rules),
                 ),
                 usage_limits=self.usage_limits_for(profile),
             )
@@ -1614,7 +1620,12 @@ class PydanticAgentRunner:
                 instructions=_turn_instructions(profile, caller),
                 capabilities=capabilities,
                 toolsets=self._per_turn_toolsets(caller, profile),
-                deps=TurnContext(caller=caller, session=session, agent_id=profile.id),
+                deps=TurnContext(
+                    caller=caller,
+                    session=session,
+                    agent_id=profile.id,
+                    peer_catalogue=self._peer_catalogue(profile, rules),
+                ),
                 usage_limits=self.usage_limits_for(profile),
             )
         except UsageLimitExceeded as exhausted:
@@ -1681,6 +1692,26 @@ class PydanticAgentRunner:
                 text=str(output),
                 usage=_domain_usage(result.usage),
                 finished_at=self._clock(),
+            ),
+        )
+
+    def _peer_catalogue(
+        self, profile: AgentProfile, rules: RuleSet
+    ) -> tuple[PeerEntry, ...] | None:
+        """The peers `ask_peer` may name this turn (C14), or None when no directory is wired.
+
+        The caller's rules decide per target: a DENY for `ask_peer` with `{"target": id}` hides
+        that peer (a NEEDS_APPROVAL one stays, a person just has to agree). Today rules match on
+        the tool name only, so one verdict covers every target; per-peer rules (C15) arrive
+        through the same call.
+        """
+        if self._peer_profiles is None:
+            return None
+        return build_peer_catalogue(
+            profile,
+            self._peer_profiles,
+            permits=lambda target: (
+                self._policy.decide(rules, "ask_peer", {"target": target}).effect is not Effect.DENY
             ),
         )
 

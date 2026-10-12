@@ -652,6 +652,12 @@ with the fixed failure text. See DECISIONS D32 (C5).
 delimiters, cut to the asking profile's `peers.max_answer_chars` (default 50000); our own sentences
 (timeout, cancelled, refused) are plain. The stored row keeps the answer verbatim. See DECISIONS D35.
 
+**Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
+and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the
+two-sided gate), the caller's policy rules and each callee profile's `description`. A denied,
+disabled or unknown peer is absent; with nobody available the tool is not offered. Adding a
+specialist is a profile file plus an allowlist entry, with no persona edit.
+
 ### A2A: shape now, wire protocol in D2
 
 Agent2Agent reached **v1.0 under the Linux Foundation**, backed by Google, Microsoft and

@@ -102,8 +102,18 @@ collateral)
 
 from __future__ import annotations
 
+import copy
+from dataclasses import replace
+from typing import Any
+
+from pydantic_ai import RunContext, Tool
 from pydantic_ai.exceptions import CallDeferred
+from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
+
+from agent_core.adapters.driven.tools.context import TurnContext
+
+_AVAILABLE_PEERS = "Available peers (use the id as `target`):"
 
 
 def ask_peer(target: str, question: str) -> str:
@@ -117,6 +127,32 @@ def ask_peer(target: str, question: str) -> str:
     raise CallDeferred(metadata={"target": target, "question": question})
 
 
+async def _prepare_ask_peer(
+    ctx: RunContext[Any], tool_def: ToolDefinition
+) -> ToolDefinition | None:
+    """Generate the tool's description and `target` enum for THIS turn (C14, D37).
+
+    Runs before every model request with the turn's deps. A turn without a computed catalogue
+    (`peer_catalogue is None`: a runner built without a profile directory, a test) keeps the
+    static tool. Otherwise the tool lists exactly the peers the gate and the policy allow, as an
+    enum and as lines `- <id>: <what it is for>`; with nobody available the tool is not offered
+    at all. The cached `Agent` is shared across turns; only this per-run view differs, so one
+    caller's catalogue never reaches another's.
+    """
+    deps = ctx.deps
+    catalogue = deps.peer_catalogue if isinstance(deps, TurnContext) else None
+    if catalogue is None:
+        return tool_def
+    if not catalogue:
+        return None
+    schema = copy.deepcopy(tool_def.parameters_json_schema)
+    schema["properties"]["target"]["enum"] = [entry.agent_id for entry in catalogue]
+    lines = "\n".join(f"- {entry.agent_id}: {entry.summary}" for entry in catalogue)
+    base = (tool_def.description or "").rstrip()
+    description = f"{base}\n\n{_AVAILABLE_PEERS}\n{lines}"
+    return replace(tool_def, parameters_json_schema=schema, description=description)
+
+
 def build_toolset() -> FunctionToolset[None]:
     """This mechanism's toolset - exactly `ask_peer`, nothing implied alongside it.
 
@@ -126,4 +162,4 @@ def build_toolset() -> FunctionToolset[None]:
     turns. A profile that wants peers imports this one in rather than redeclaring the
     function (CLAUDE.md #8: no auto-discovery, an explicit list is the security property).
     """
-    return FunctionToolset([ask_peer])
+    return FunctionToolset([Tool(ask_peer, prepare=_prepare_ask_peer)])

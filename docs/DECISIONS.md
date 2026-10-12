@@ -1498,3 +1498,34 @@ too, which left one of the two tool calls without a result.
   nothing to the replay shape and did not need a second bump.
 - **Known quirk left.** Rows written before `0031` have `request_key IS NULL`, so they stay under the
   old per-question uniqueness; a keyed ask never collides with them.
+
+## D37 · Agent-comms v2: a dynamic peer catalogue (C14)
+
+The `ask_peer` tool used to be one static function: `target: str`, no list of agents. Personas
+carried hard-coded lists of who to ask, so a new specialist meant a prompt edit, and a peer the
+policy forbade was still offered and then refused at call time.
+
+- **Per-turn tool view.** `ask_peer` is now a `Tool` with a `prepare` hook (Pydantic AI runs it
+  before every model request with the run's deps). It reads the turn's `peer_catalogue` from
+  `TurnContext` and returns a tool definition whose description appends `Available peers:` with one
+  line `- <id>: <what it is for>` per peer and whose `target` schema is an `enum` of exactly those
+  ids. The cached `Agent` is unchanged and shared; only the per-run view differs, so a catalogue
+  never crosses callers. With nobody available the hook returns `None` and the tool is not offered.
+  A turn with no computed catalogue (`peer_catalogue is None`: a runner built without
+  `peer_profiles=`) keeps the old static shape.
+- **Who is listed** (`adapters/driven/peers/catalogue.py::build_peer_catalogue`): the asker's
+  allowlist entries whose profile is loaded, that `hop_limit.authorise_hop` would allow (both
+  sides enabled, both allowlists, with `hop=0`), and that `ToolPolicy.decide(rules, "ask_peer",
+  {"target": id})` does not DENY. NEEDS_APPROVAL stays listed. Today rules match on the tool name,
+  so one verdict covers every target; per-peer rules (C15) plug into the same call and hide a denied
+  peer with no further change here. The hop COUNT is not consulted: a resumed turn does not carry
+  it, and the gate still refuses too deep an ask at call time with a readable reason.
+- **`AgentProfile.description`** (new optional string key, part of the content hash): what the
+  agent is FOR, written for other agents. The catalogue line is that text, else the display name
+  from the asker's allowlist, plus the allowlist's capability hints. The four shipped profiles got
+  one. `PydanticAgentRunner(peer_profiles=)` is wired by `build_container` with the loaded profiles.
+- **Replay shape: unchanged.** The tool view is computed per model request, which DBOS records as
+  a step result; no step was added or reordered. No version bump beyond `.6` (D36).
+- **Follow-up outside this repo state:** the `vertical/glazed` orchestrator persona still names its
+  specialists. It can drop that list once it runs on this branch and gives each specialist profile
+  a `description`; this change did not touch that branch.

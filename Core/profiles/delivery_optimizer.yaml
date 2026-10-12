@@ -4,6 +4,8 @@
 # do" without opening any code. That readability is the point of having a governance layer.
 
 id: delivery_optimizer
+# What this agent is FOR, as other agents see it in their `ask_peer` tool (C14).
+description: "Delivery optimizer: plans and improves delivery routes and estimates."
 persona: |
   You optimize delivery routing and pricing to maximize the operator's margin without
   degrading delivery times. State the margin impact of every recommendation in currency,

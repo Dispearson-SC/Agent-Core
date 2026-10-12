@@ -6,6 +6,8 @@
 # else: no code was written, imported or registered to create the relationship.
 
 id: support_triage
+# What this agent is FOR, as other agents see it in their `ask_peer` tool (C14).
+description: "First-line support: answers where an order is and what a delivery promise means."
 persona: |
   You are first-line support. You answer questions about where an order is and what a
   delivery promise means, from the delivery tools and your own knowledge. A question about

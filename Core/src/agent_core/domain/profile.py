@@ -538,6 +538,15 @@ def _build_public_alias(data: object) -> str:
     return data.strip()
 
 
+def _build_description(data: object) -> str:
+    """The description as written, or `""`. Not blank-padded: it is shown to other agents."""
+    if data is None:
+        return ""
+    if not isinstance(data, str):
+        raise ProfileValidationError("description must be a string")
+    return data.strip()
+
+
 def _build_fragment_map(data: object, *, where: str) -> tuple[tuple[str, str], ...]:
     """`{key: text}` -> sorted `((key, text), ...)`; absent -> `()`."""
     if data is None:
@@ -628,6 +637,11 @@ class AgentProfile:
     # label only: policy, audit and routing keep using `id`.
     public_alias: str = ""
 
+    # C14 (D37). What this agent is FOR, in a sentence or two, written for the OTHER agents that
+    # may ask it: the `ask_peer` tool lists it next to this agent's id in the asker's catalogue.
+    # Empty falls back to the display name the asker's allowlist gave it. Part of the content hash.
+    description: str = ""
+
     # D20, docs/TASKS.md#t-f1-17. Derived at load time, never read from the YAML.
     # `version` is 0 until a `ProfileVersionRegistry` assigns one: a profile that never
     # passed through a registry must not be able to claim it is version 1, because a turn
@@ -710,6 +724,7 @@ class AgentProfile:
                 _build_peer_policy(mapping["peers"]) if "peers" in mapping else defaults.peers
             ),
             public_alias=_build_public_alias(mapping.get("public_alias")),
+            description=_build_description(mapping.get("description")),
             channel_instructions=_build_fragment_map(
                 mapping.get("channel_instructions"), where="channel_instructions"
             ),

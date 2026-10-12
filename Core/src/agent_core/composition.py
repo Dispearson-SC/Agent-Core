@@ -1790,7 +1790,9 @@ def build_container(
     # The runner takes the SAME policy, audit and tool objects as `StartTurn`, so the
     # enforcement point in `before_tool_execute` reads the rules this container was built
     # with and the model is offered the toolset the policy narrowed.
-    runner = PydanticAgentRunner(model=model, policy=policy, audit=audit, tools=tools)
+    runner = PydanticAgentRunner(
+        model=model, policy=policy, audit=audit, tools=tools, peer_profiles=profiles
+    )
 
     channels = build_channel_registry(resolved)
 

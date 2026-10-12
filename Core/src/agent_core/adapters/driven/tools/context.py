@@ -16,7 +16,15 @@ from dataclasses import dataclass
 
 from agent_core.domain.turn import CallerIdentity, SessionRef
 
-__all__ = ["TurnContext"]
+__all__ = ["PeerEntry", "TurnContext"]
+
+
+@dataclass(frozen=True, slots=True)
+class PeerEntry:
+    """One peer the asking agent may ask this turn: its id and a line saying what it is for."""
+
+    agent_id: str
+    summary: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,3 +35,8 @@ class TurnContext:
     session: SessionRef
     # The profile (agent) running the turn - lets a tool label its calls by role.
     agent_id: str = ""
+    # C14. The peers `ask_peer` may name THIS turn, computed from the asker's PeerPolicy, the
+    # callee's policy and the caller's rules (`peers/catalogue.py`). `None` means "not computed"
+    # (a runner without a profile directory) and leaves the tool in its static shape; an empty
+    # tuple means nobody is available and hides the tool.
+    peer_catalogue: tuple[PeerEntry, ...] | None = None
