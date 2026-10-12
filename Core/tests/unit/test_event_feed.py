@@ -377,6 +377,68 @@ def test_a_queued_background_ask_also_keeps_the_stream_open() -> None:
     assert run(scenario()).snapshot.open_asks == 1
 
 
+def test_a_truncated_ask_window_never_reports_the_tree_settled() -> None:
+    """C1q: the ask read is oldest-first and bounded; the asks it left out (`omitted`) are the
+    newest, so none of them is known to be finished. They count as open."""
+
+    class Truncated:
+        async def asks_under(
+            self, tenant_id: str, root_turn_id: str, *, limit: int = 500
+        ) -> AskWindow:
+            done = AskRecord(
+                "h0", "billing", "a", root_turn_id, BackgroundState.ANSWERED, True, 0, T0
+            )
+            return AskWindow((done,), omitted=3)
+
+    store = Store()
+    store.add(_event(ROOT, EventKind.STARTED))
+    store.add(_event(ROOT, EventKind.FINISHED, elapsed=3))
+    feed = EventFeed(store, store, poll_seconds=0.01, asks=Truncated())
+
+    async def scenario() -> Any:
+        return await anext(feed.follow("t", ROOT))
+
+    first = run(scenario())
+
+    assert first.snapshot.open_asks == 3
+    assert not first.snapshot.settled
+
+
+def test_a_failing_idle_snapshot_read_keeps_the_stream_and_retries_at_the_next_idle() -> None:
+    """C1q: one failed snapshot read while idle (a database blip) must not end the stream."""
+    store = Store()
+    store.add(_event(ROOT, EventKind.STARTED))
+    real_tree = store.tree
+    calls = {"n": 0}
+
+    async def flaky_tree(tenant_id: str, root_turn_id: str, *, limit: int = 2000) -> EventWindow:
+        calls["n"] += 1
+        if calls["n"] == 2:  # the first idle read
+            raise ConnectionError("blip")
+        return await real_tree(tenant_id, root_turn_id, limit=limit)
+
+    store.tree = flaky_tree  # type: ignore[method-assign]
+    feed = _feed(store)
+
+    async def scenario() -> list[FeedKind]:
+        stream = feed.follow("t", ROOT, keepalive_seconds=0.01)
+        kinds = [(await anext(stream)).kind]
+        store.add(
+            _event(ROOT, EventKind.FINISHED, elapsed=3)
+        )  # not pumped: only a snapshot sees it
+        for _ in range(8):
+            try:
+                kinds.append((await asyncio.wait_for(anext(stream), 1)).kind)
+            except StopAsyncIteration:
+                break
+        return kinds
+
+    kinds = run(scenario())
+
+    assert calls["n"] >= 3, "the read was retried after the failure"
+    assert kinds[-1] is FeedKind.END, kinds
+
+
 # --- the SSE frames ---
 
 

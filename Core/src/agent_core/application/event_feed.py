@@ -186,9 +186,21 @@ class EventFeed:
         if self._asks is None:
             return snapshot
         asks = await self._asks.asks_under(tenant_id, root_turn_id)
-        return replace(
-            snapshot, open_asks=sum(1 for record in asks.records if record.state in _OPEN_ASKS)
-        )
+        # The ask read is oldest-first and bounded: the asks it left out are the newest and none is
+        # known to be finished, so each counts as open. A truncated window never reads as settled.
+        open_known = sum(1 for record in asks.records if record.state in _OPEN_ASKS)
+        return replace(snapshot, open_asks=open_known + max(0, asks.omitted))
+
+    async def _snapshot_or_none(self, tenant_id: str, root_turn_id: str) -> FeedSnapshot | None:
+        """`_snapshot`, but a failed read is logged and returns None: the stream is an observer and
+        the next idle period reads again, so a database blip must not end it."""
+        try:
+            return await self._snapshot(tenant_id, root_turn_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOG.warning("the event feed could not read a snapshot; retrying", exc_info=True)
+            return None
 
     async def follow(
         self,
@@ -225,7 +237,10 @@ class EventFeed:
                 try:
                     stored = await asyncio.wait_for(sub.queue.get(), timeout=idle)
                 except TimeoutError:
-                    snapshot = await self._snapshot(tenant_id, root_turn_id)
+                    fresh = await self._snapshot_or_none(tenant_id, root_turn_id)
+                    if fresh is None:
+                        continue
+                    snapshot = fresh
                     changed = snapshot.last_seq > floor or snapshot.open_asks != shown_open
                     if changed or snapshot.settled:
                         floor, shown_open, last_sent = (
@@ -243,7 +258,10 @@ class EventFeed:
                     continue
                 if stored is None:  # this subscriber fell behind: the newest state replaces it
                     sub.lagging = False
-                    snapshot = await self._snapshot(tenant_id, root_turn_id)
+                    fresh = await self._snapshot_or_none(tenant_id, root_turn_id)
+                    if fresh is None:  # the next idle snapshot corrects the state
+                        continue
+                    snapshot = fresh
                     floor, shown_open, last_sent = snapshot.last_seq, snapshot.open_asks, clock()
                     yield FeedItem(FeedKind.SNAPSHOT, snapshot=snapshot)
                     if snapshot.settled:
@@ -255,7 +273,10 @@ class EventFeed:
                 floor, last_sent = stored.seq, clock()
                 yield FeedItem(FeedKind.EVENT, event=stored)
                 if stored.event.kind in (EventKind.FINISHED, EventKind.FAILED):
-                    snapshot = await self._snapshot(tenant_id, root_turn_id)
+                    fresh = await self._snapshot_or_none(tenant_id, root_turn_id)
+                    if fresh is None:  # the next idle snapshot decides whether the tree settled
+                        continue
+                    snapshot = fresh
                     shown_open = snapshot.open_asks
                     if snapshot.settled:
                         yield FeedItem(FeedKind.END, snapshot=snapshot)
