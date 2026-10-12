@@ -17,8 +17,8 @@ OFF THE MODEL'S PATH (C1q). A chunk is not published inside the model stream: it
 background task publishes it, so a slow event store never delays the next token. The queue holds at
 most `max_pending` chunks; text that arrives while it is full is merged into the newest pending
 chunk of the same response (up to the delta bound, past which it is dropped with one log line), so
-memory stays bounded and the text stays whole. The end of every stream flushes what is pending (bounded by
-`flush_timeout`), so a finished response is on the feed before the step moves on.
+memory stays bounded and the text stays whole. The end of every stream flushes what is pending
+(bounded by `flush_timeout`), so a finished response is on the feed before the step moves on.
 
 IDENTITY OF A CHUNK. `detail` is `<run>:<response>:<index>`. `run` is a random id per handler (one
 execution of the model step, so a step that is retried after a crash starts a new run and its text
