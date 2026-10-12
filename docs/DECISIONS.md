@@ -2169,3 +2169,13 @@ The review of C21-C23 approved them with advisories; this closes them.
   published between two waits is no longer lost and a wait costs no connect; it reconnects after
   an error. `Container.close_pools()` closes the three pools and the feed's broker closes the
   listener when it stops.
+- **Smaller corrections.** An event keeps at most `MAX_LABEL_CHARS` (200) of any free-form label
+  (agent, tool, asker, call, detail; cut with an ellipsis) because the publisher stores them in a
+  row the feed re-reads; the NOTIFY payload stays the sequence number alone and the channel name is
+  the bound parameter `NOTIFY_CHANNEL`, no longer a literal in the statement. `EventingAuditSink` no
+  longer forwards unknown attributes to the sink it wraps (nothing read them); `ProgressEvent`'s
+  documentation of `root_turn_id` is corrected (the property is never empty: the owner's root or
+  the event's own turn). `migrations.apply_migration` is the one body of the per-module
+  `apply_*_migration` test helpers (the task graph's uses it; the others can follow when touched),
+  and `routes.require_readable_turn` is the one authorisation rule of `GET /turns/{id}/events` and
+  `/graph`.

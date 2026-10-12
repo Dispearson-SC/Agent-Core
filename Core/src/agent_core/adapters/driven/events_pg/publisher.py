@@ -5,9 +5,10 @@ Tests:   Core/tests/integration/test_turn_events.py
 Port:    ports/event_publisher.py
 
 ONE STATEMENT PER EVENT. The row is inserted with `ON CONFLICT (event_id) DO NOTHING` and, only
-if a row was really written, `pg_notify('turn_events', seq)` runs in the same transaction, so a
+if a row was really written, `pg_notify(NOTIFY_CHANNEL, seq)` runs in the same transaction, so a
 replayed publish writes nothing and wakes nobody, and a listener never hears of a row that did not
-commit. The payload is the sequence number alone.
+commit. The payload is the sequence number alone (a few bytes, far under Postgres's 8000), and the
+free-form labels of the row are cut to `MAX_LABEL_CHARS` first (`bound_event`).
 
 A `tool_called` event is made by a hook that does not hold the turn's chain, so it arrives with an
 empty root and agent. The row is filed under the chain of the turn's own `started` event (looked up
@@ -17,13 +18,14 @@ here), or under the turn itself when there is none (a turn from before events ex
 from __future__ import annotations
 
 import asyncio
+from typing import Final
 
 from agent_core.adapters.driven.events_pg.connections import EventConnections
-from agent_core.domain.events import EventKind, ProgressEvent
+from agent_core.domain.events import EventKind, ProgressEvent, bound_event
 
 __all__ = ["NOTIFY_CHANNEL", "PgEventPublisher"]
 
-NOTIFY_CHANNEL = "turn_events"
+NOTIFY_CHANNEL: Final[str] = "turn_events"
 
 _CHAIN_SQL = """
     SELECT root_turn_id, agent, asker_turn_id, asker, call, session_id
@@ -38,7 +40,7 @@ _INSERT_SQL = """
         ON CONFLICT (event_id) DO NOTHING
         RETURNING seq
     )
-    SELECT pg_notify('turn_events', seq::text) FROM ins
+    SELECT pg_notify(%s, seq::text) FROM ins
 """
 
 
@@ -54,7 +56,7 @@ class PgEventPublisher:
         )
 
     async def publish(self, event: ProgressEvent) -> None:
-        await asyncio.to_thread(self._publish_sync, event)
+        await asyncio.to_thread(self._publish_sync, bound_event(event))
 
     def _publish_sync(self, event: ProgressEvent) -> None:
         root = event.owner.root_turn_id if event.owner is not None else ""
@@ -92,5 +94,6 @@ class PgEventPublisher:
                     event.elapsed_ms,
                     event.detail,
                     event.at,
+                    NOTIFY_CHANNEL,
                 ),
             )

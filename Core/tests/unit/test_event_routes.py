@@ -98,3 +98,37 @@ def test_a_process_without_a_feed_says_unavailable_not_missing() -> None:
         response = client.get(f"/turns/{ROOT}/events", headers=HEADERS)
 
     assert response.status_code == 503
+
+
+def test_the_events_and_the_graph_routes_share_one_authorisation_rule() -> None:
+    """C1p (D55): both call `require_readable_turn`; the answer for a turn the caller may not read
+    is the same 404 body on both, and the lookup runs once per request."""
+    import asyncio
+
+    import pytest
+    from fastapi import HTTPException
+
+    from agent_core.adapters.driving.http.routes import require_readable_turn
+
+    lookup = _Lookup({("t", ROOT): "finished"})
+    caller = CallerIdentity(subject_id="u", channel="http", tenant_id="t", roles=frozenset())  # type: ignore[arg-type]
+    foreign = CallerIdentity(subject_id="u", channel="http", tenant_id="x", roles=frozenset())  # type: ignore[arg-type]
+
+    asyncio.run(require_readable_turn(lookup, ROOT, caller))
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(require_readable_turn(lookup, ROOT, foreign))
+
+    assert refused.value.status_code == 404
+    assert [turn for turn, _ in lookup.calls] == [ROOT, ROOT]
+    from tests.unit.test_task_graph import _client as graph_client
+
+    class _NoAsks:
+        async def asks_under(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("not reached")
+
+    with graph_client(_NoAsks()) as client:  # type: ignore[arg-type]
+        graph = client.get("/turns/never/graph", headers=HEADERS)
+    with _app(Store(), lookup) as client:
+        events = client.get("/turns/never/events", headers=HEADERS)
+    assert graph.status_code == events.status_code == 404
+    assert graph.json() == events.json() == {"detail": refused.value.detail}

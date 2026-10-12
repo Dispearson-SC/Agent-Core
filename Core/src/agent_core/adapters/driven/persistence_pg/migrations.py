@@ -397,6 +397,29 @@ def _apply_all_migrations_sync(app_conninfo: str) -> None:
             conn.execute("INSERT INTO schema_migrations (id) VALUES (%s)", (migration.id,))
 
 
+def _apply_migration_sync(app_conninfo: str, migration: Migration) -> None:
+    with psycopg.connect(app_conninfo, autocommit=True) as conn:
+        conn.execute(_TRACKING_TABLE_SQL)
+        applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE id = %s", (migration.id,)
+        ).fetchone()
+        if applied is not None:
+            return
+        conn.execute(migration.sql)
+        conn.execute("INSERT INTO schema_migrations (id) VALUES (%s)", (migration.id,))
+
+
+async def apply_migration(app_conninfo: str, migration: Migration) -> None:
+    """Apply ONE migration, once, and track it: the shared body of the per-module
+    `apply_*_migration` helpers that tests call.
+
+    Production never calls this; it uses `apply_all_migrations`, because ordering is a property
+    of the whole set (see there). A module's helper is for a test that needs only its own
+    migration and whose prerequisites it has applied itself. An already-tracked id is skipped.
+    """
+    await asyncio.to_thread(_apply_migration_sync, app_conninfo, migration)
+
+
 async def apply_all_migrations(app_conninfo: str) -> None:
     """Bring the app database up to the whole schema - this is what production calls.
 

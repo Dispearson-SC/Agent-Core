@@ -157,3 +157,57 @@ def test_apply_all_migrations_creates_the_peer_turn_id_text_column_and_the_attem
     assert columns[("peer_messages", "max_concurrent")] == "integer"
     assert columns[("workflow_attempts", "attempts")] == "integer"
     assert columns[("workflow_attempts", "parked")] == "boolean"
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_apply_migration_applies_one_migration_once_and_tracks_it() -> None:
+    """C1p (D55): the single-migration applier every `apply_*_migration` shares."""
+    app_db = "agent_core_apply_one_migration_test"
+    asyncio.run(migrations.ensure_databases(_ADMIN_CONNINFO, app_database=app_db))
+    app_conninfo = re.sub(r"/[^/?]+(\?.*)?$", rf"/{app_db}\1", _ADMIN_CONNINFO)
+    probe = migrations.Migration(
+        id="9990_apply_one_probe",
+        sql=(
+            "CREATE TABLE IF NOT EXISTS apply_one_probe (n INT);"
+            " INSERT INTO apply_one_probe VALUES (1);"
+        ),
+    )
+
+    asyncio.run(migrations.apply_migration(app_conninfo, probe))
+    asyncio.run(migrations.apply_migration(app_conninfo, probe))  # already tracked: skipped
+
+    with psycopg.connect(app_conninfo) as conn:
+        tracked = conn.execute(
+            "SELECT count(*) FROM schema_migrations WHERE id = %s", (probe.id,)
+        ).fetchone()
+        rows = conn.execute("SELECT count(*) FROM apply_one_probe").fetchone()
+        conn.execute("DROP TABLE apply_one_probe")
+        conn.execute("DELETE FROM schema_migrations WHERE id = %s", (probe.id,))
+    assert tracked == (1,) and rows == (1,), "the second call re-ran the migration"
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_the_task_graph_migration_applier_uses_the_shared_one() -> None:
+    from agent_core.adapters.driven.persistence_pg.task_graph_migration import (
+        TASK_GRAPH_MIGRATION,
+        apply_task_graph_migration,
+    )
+
+    app_db = "agent_core_apply_task_graph_test"
+    asyncio.run(migrations.ensure_databases(_ADMIN_CONNINFO, app_database=app_db))
+    app_conninfo = re.sub(r"/[^/?]+(\?.*)?$", rf"/{app_db}\1", _ADMIN_CONNINFO)
+    asyncio.run(migrations.apply_all_migrations(app_conninfo))
+    with psycopg.connect(app_conninfo, autocommit=True) as conn:
+        conn.execute("DROP INDEX ix_peer_messages_root")
+        conn.execute("DELETE FROM schema_migrations WHERE id = %s", (TASK_GRAPH_MIGRATION.id,))
+
+    asyncio.run(apply_task_graph_migration(app_conninfo))
+
+    with psycopg.connect(app_conninfo) as conn:
+        index = conn.execute(
+            "SELECT 1 FROM pg_indexes WHERE indexname = 'ix_peer_messages_root'"
+        ).fetchone()
+        tracked = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE id = %s", (TASK_GRAPH_MIGRATION.id,)
+        ).fetchone()
+    assert index is not None and tracked is not None

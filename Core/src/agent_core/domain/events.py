@@ -19,6 +19,7 @@ from enum import StrEnum
 from typing import Final
 
 __all__ = [
+    "MAX_LABEL_CHARS",
     "EventKind",
     "EventOwner",
     "EventWindow",
@@ -27,6 +28,7 @@ __all__ = [
     "StoredEvent",
     "TurnProgress",
     "TurnState",
+    "bound_event",
     "fold_snapshot",
     "progress_event_id",
 ]
@@ -63,8 +65,10 @@ class ProgressEvent:
     `owner` is None for a turn a person or a channel started (it is its own root). `tool` is set on
     `tool_called` only; `elapsed_ms` on `finished` and `failed` (time since `started`); `detail` is
     a short label (the tool's policy verdict, an error class), never free text from a model.
-    `root_turn_id` may be empty on a `tool_called` made where the chain is not at hand: the store
-    fills it from the turn's `started` event.
+    `owner` is also None on a `tool_called` made where the chain is not at hand (the audit hook
+    holds only the turn id); the `root_turn_id` property then answers the event's own turn id, and
+    the publisher files the stored row under the chain of the turn's `started` event instead.
+    The property is never empty.
     """
 
     event_id: str
@@ -82,6 +86,34 @@ class ProgressEvent:
     @property
     def root_turn_id(self) -> str:
         return self.owner.root_turn_id if self.owner is not None else self.turn_id
+
+
+MAX_LABEL_CHARS: Final[int] = 200
+"""Longest agent, tool, asker, call or detail label an event keeps. A label is a name or a short
+class, never prose; the bound keeps one odd value from bloating a row the feed re-reads."""
+
+
+def _cut(value: str) -> str:
+    return value if len(value) <= MAX_LABEL_CHARS else value[: MAX_LABEL_CHARS - 1] + "…"
+
+
+def bound_event(event: ProgressEvent) -> ProgressEvent:
+    """The event with every free-form label cut to `MAX_LABEL_CHARS` (ending in `…` when cut).
+    Identity (ids, tenant, session, kind, time, numbers) is never touched. Pure."""
+    owner = event.owner
+    return replace(
+        event,
+        agent=_cut(event.agent),
+        tool=None if event.tool is None else _cut(event.tool),
+        detail=None if event.detail is None else _cut(event.detail),
+        owner=None
+        if owner is None
+        else replace(
+            owner,
+            asker=None if owner.asker is None else _cut(owner.asker),
+            call=_cut(owner.call),
+        ),
+    )
 
 
 def progress_event_id(turn_id: str, kind: EventKind, discriminator: str = "") -> str:

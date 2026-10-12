@@ -395,6 +395,18 @@ EvidenceCorrelate = Callable[[str], Awaitable[tuple[TurnId, AgentProfile] | None
 EvidenceSignal = Callable[[str, TurnId, MediaRef], Awaitable[None]]
 
 
+async def require_readable_turn(
+    lookup_turn: TurnLookup, turn_id: str, caller: CallerIdentity
+) -> None:
+    """404 unless this caller may read the turn: the rule `GET /turns/{id}`, the event feed and the
+    task graph share. An unknown id and another tenant's id are the same answer on purpose."""
+    if await lookup_turn(TurnId(turn_id), caller) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No turn with that id in this tenant.",
+        )
+
+
 def create_app(
     *,
     start_turn: TurnStarter,
@@ -562,11 +574,7 @@ def create_app(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="This process was built without an event feed.",
             )
-        if await lookup_turn(TurnId(turn_id), caller) is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No turn with that id in this tenant.",
-            )
+        await require_readable_turn(lookup_turn, turn_id, caller)
         return StreamingResponse(
             frames(event_feed.follow(str(caller.tenant_id), turn_id)),
             media_type="text/event-stream",
@@ -593,11 +601,7 @@ def create_app(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="This process was built without a task graph reader.",
             )
-        if await lookup_turn(TurnId(turn_id), caller) is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No turn with that id in this tenant.",
-            )
+        await require_readable_turn(lookup_turn, turn_id, caller)
         asks = await task_graph.asks_under(str(caller.tenant_id), turn_id)
         return graph_json(build_task_graph(turn_id, asks.records, omitted=asks.omitted))
 

@@ -10,11 +10,7 @@ the search. Additive.
 
 from __future__ import annotations
 
-import asyncio
-
-import psycopg
-
-from agent_core.adapters.driven.persistence_pg.migrations import Migration
+from agent_core.adapters.driven.persistence_pg.migrations import Migration, apply_migration
 
 TASK_GRAPH_MIGRATION = Migration(
     id="0038_peer_messages_root_index",
@@ -25,17 +21,6 @@ TASK_GRAPH_MIGRATION = Migration(
 )
 
 
-def _apply_sync(app_conninfo: str) -> None:
-    with psycopg.connect(app_conninfo, autocommit=True) as conn:
-        applied = conn.execute(
-            "SELECT 1 FROM schema_migrations WHERE id = %s", (TASK_GRAPH_MIGRATION.id,)
-        ).fetchone()
-        if applied is not None:
-            return
-        conn.execute(TASK_GRAPH_MIGRATION.sql)
-        conn.execute("INSERT INTO schema_migrations (id) VALUES (%s)", (TASK_GRAPH_MIGRATION.id,))
-
-
 async def apply_task_graph_migration(app_conninfo: str) -> None:
     """Apply `TASK_GRAPH_MIGRATION` once (tests; production uses `apply_all_migrations`)."""
-    await asyncio.to_thread(_apply_sync, app_conninfo)
+    await apply_migration(app_conninfo, TASK_GRAPH_MIGRATION)

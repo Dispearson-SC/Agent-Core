@@ -23,7 +23,6 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
 
 from agent_core.domain.events import EventKind, ProgressEvent, progress_event_id
 from agent_core.domain.media import MediaRef
@@ -100,7 +99,3 @@ class EventingAuditSink:
 
     async def record_turn_end(self, turn_id: TurnId, usage: Usage, cost_usd: Decimal) -> None:
         await self._inner.record_turn_end(turn_id, usage, cost_usd)
-
-    def __getattr__(self, name: str) -> Any:
-        """Anything else the concrete sink offers (the composition root reads a few)."""
-        return getattr(self._inner, name)
