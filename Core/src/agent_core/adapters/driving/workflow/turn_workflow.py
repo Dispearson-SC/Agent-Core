@@ -141,12 +141,14 @@ NOT EVERY SUSPENSION IS A QUESTION FOR A HUMAN
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import logging
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Final, Protocol
+from typing import Any, Final, NoReturn, Protocol
 from uuid import uuid4
 
 from dbos import DBOS, Queue, SetEnqueueOptions, SetWorkflowID, WorkflowHandleAsync
@@ -356,6 +358,41 @@ class _NoPendingInputs:
 
     async def drain(self, session: SessionRef) -> tuple[UserInput, ...]:
         return ()
+
+
+class AttemptLedger(Protocol):
+    """The durable count of how many times a workflow body was entered (C5, D32).
+
+    DBOS re-runs a pending workflow's body after every crash, and a turn whose step kills its
+    process (a native crash, an out-of-memory kill) is then re-run by every restart, for ever.
+    A step cannot count this: its result is recorded, so a replay reads it back instead of running
+    it. The count therefore lives in a row the BODY touches on each entry, outside the operation
+    log, and that is also why it is a plain call and not a step.
+
+    `begin` counts one entry and returns the new count. An entry that follows a restart out of a
+    WAIT does not count (it restarts at 1): a turn parked on a person for weeks is restarted by
+    every deploy and has done nothing wrong, while a crash anywhere else is a failed attempt.
+    `park` is called right before the body blocks on the durable topic and `resume` right after it
+    returns, so a process killed while waiting leaves the row parked and one killed while working
+    does not. `forget` drops the row of a workflow that has ended.
+    """
+
+    async def begin(self, workflow_id: str) -> int: ...
+    async def park(self, workflow_id: str) -> None: ...
+    async def resume(self, workflow_id: str) -> None: ...
+    async def forget(self, workflow_id: str) -> None: ...
+
+
+DEFAULT_MAX_TURN_ATTEMPTS: Final[int] = 10
+
+
+class PoisonTurnError(RuntimeError):
+    """A workflow was entered more often than its attempt budget allows and was failed.
+
+    Raised from the body, so the workflow ends `ERROR` with this message as its reason and
+    DBOS stops re-running it. Its own type so an incident names it, and so a test can tell the
+    deliberate give-up from an accident.
+    """
 
 
 class TurnWorkflowNotWiredError(RuntimeError):
@@ -573,6 +610,12 @@ class TurnWorkflowDependencies:
     # missing wiring is the reason the question went nowhere. A silent seat there would
     # suspend the turn on an ask no mailbox ever received, and it would wait three days.
     peers: PeerSeat | None = None
+
+    # C5 (D32). `None` means attempts are not counted (a process without the ledger table, most
+    # tests): the guard fails OPEN, because a turn is worth more running than a counter is worth
+    # a missing table. `max_attempts` is `Settings.max_turn_attempts`.
+    attempts: AttemptLedger | None = None
+    max_attempts: int = DEFAULT_MAX_TURN_ATTEMPTS
 
 
 _dependencies: TurnWorkflowDependencies | None = None
@@ -1237,6 +1280,136 @@ async def cancel_turn(turn_id: TurnId, reason: str) -> tuple[str, ...]:
     return await _cancel_callees(open_asks, reason)
 
 
+# --- C5: the poison-turn budget -----------------------------------------------------------------
+#
+# Everything below runs in the workflow BODY and none of it is a step, on purpose. A step runs
+# once and a replay reads its recorded result, so a step cannot count how often the body is
+# entered; and a DBOS operation called from the body (send, cancel, a child) is recorded at a
+# fixed position in the log, which a run that gives up before replaying the earlier steps would
+# collide with (`DBOSUnexpectedStepError`). The ledger is therefore a plain row, and the give-up
+# path runs its DBOS calls in an EMPTY context (`_outside_the_log`), as an external caller would.
+
+
+async def _outside_the_log[T](work: Coroutine[Any, Any, T]) -> T:
+    """Run `work` with no workflow context, so a DBOS call inside it is not a recorded step."""
+    return await asyncio.create_task(work, context=contextvars.Context())
+
+
+async def _begin_attempt() -> tuple[int, int] | None:
+    """Count this entry of the body. `(attempts, budget)`, or None when attempts are not counted.
+
+    Fails OPEN: a ledger that cannot be written is logged and the turn runs, because refusing
+    every turn while a counter table is down is a worse outage than the loop this guards against.
+    """
+    dependencies = _require_dependencies()
+    if dependencies.attempts is None:
+        return None
+    workflow_id = _current_workflow_id()
+    try:
+        return await dependencies.attempts.begin(workflow_id), dependencies.max_attempts
+    except Exception:
+        _LOG.warning(
+            "could not count the attempt of workflow %r; running it uncounted",
+            workflow_id,
+            exc_info=True,
+        )
+        return None
+
+
+async def _note_wait(*, parked: bool) -> None:
+    """Tell the ledger the body is about to block on the durable topic (`parked=True`) or has
+    just been woken (`False`). Best effort: a failure here must never fail a turn."""
+    ledger = _require_dependencies().attempts
+    if ledger is None:
+        return
+    workflow_id = _current_workflow_id()
+    try:
+        await (ledger.park(workflow_id) if parked else ledger.resume(workflow_id))
+    except Exception:
+        _LOG.warning("could not note the wait state of workflow %r", workflow_id, exc_info=True)
+
+
+async def _forget_attempts() -> None:
+    """The workflow ended on its own terms: drop its count. Best effort."""
+    ledger = _require_dependencies().attempts
+    if ledger is None:
+        return
+    workflow_id = _current_workflow_id()
+    try:
+        await ledger.forget(workflow_id)
+    except Exception:
+        _LOG.warning("could not drop the attempt count of workflow %r", workflow_id, exc_info=True)
+
+
+def _poison_reason(workflow_id: str, attempts: int, budget: int) -> str:
+    return (
+        f"workflow {workflow_id!r} was started {attempts} attempts in a row without getting past "
+        f"the same point (budget of {budget}, AGENT_CORE_MAX_TURN_ATTEMPTS): a step keeps "
+        "killing its process, so it is failed instead of retried again"
+    )
+
+
+async def _cancel_open_asks(turn_id: str, reason: str) -> None:
+    """Cancel every open peer ask this turn made, rows and callee workflows."""
+    dependencies = _require_dependencies()
+    if dependencies.peers is None:
+        return
+    open_asks = await dependencies.peers.mailbox.cancel_open(turn_id, reason)
+    await _cancel_callees(open_asks, reason)
+
+
+async def _settle_poisoned_turn(turn_id: str, reason: str) -> None:
+    try:
+        await _cancel_open_asks(turn_id, reason)
+    except Exception:
+        _LOG.exception("could not cancel the peer asks of poisoned turn %r", turn_id)
+
+
+async def _settle_poisoned_peer(job: PeerTurnJob, turn_id: str, reason: str) -> None:
+    """A callee that cannot finish still owes its asker an answer: the fixed failure text, recorded
+    first and woken second, exactly like any other failed callee (`_close_peer_ask`)."""
+    try:
+        peers = _require_peer_seat()
+        try:
+            await peers.mailbox.answer(
+                job.correlation_id, PEER_ASK_FAILED_ANSWER, answer_token=job.answer_token
+            )
+        except PeerAnswerRefusedError as refused:
+            _LOG.warning(
+                "peer ask %r refused the failure answer: %s", job.correlation_id, refused.reason
+            )
+        else:
+            try:
+                await signal_peer_answer(job.asking_turn_id, job.correlation_id)
+            except Exception:
+                _LOG.warning(
+                    "could not wake asking turn %r for poisoned peer ask %r; the answer is "
+                    "recorded",
+                    job.asking_turn_id,
+                    job.correlation_id,
+                    exc_info=True,
+                )
+        await _cancel_open_asks(turn_id, reason)
+    except Exception:
+        _LOG.exception("could not settle poisoned peer ask %r", job.correlation_id)
+
+
+async def _give_up_turn(attempts: int, budget: int) -> NoReturn:
+    workflow_id = _current_workflow_id()
+    reason = _poison_reason(workflow_id, attempts, budget)
+    _LOG.error("%s", reason)
+    await _outside_the_log(_settle_poisoned_turn(workflow_id, reason))
+    raise PoisonTurnError(reason)
+
+
+async def _give_up_peer(job: PeerTurnJob, attempts: int, budget: int) -> NoReturn:
+    workflow_id = _current_workflow_id()
+    reason = _poison_reason(workflow_id, attempts, budget)
+    _LOG.error("%s (peer ask %r)", reason, job.correlation_id)
+    await _outside_the_log(_settle_poisoned_peer(job, workflow_id, reason))
+    raise PoisonTurnError(reason)
+
+
 @DBOS.step()
 async def _step_resume_round(
     turn_id: TurnId,
@@ -1358,11 +1531,11 @@ async def _collect_round(
         )
         nearest = min(deadlines)
         remaining = nearest - await _step_round_clock()
-        answer = (
-            await DBOS.recv_async(RESUME_TOPIC, timeout_seconds=remaining)
-            if remaining > 0
-            else None
-        )
+        answer = None
+        if remaining > 0:
+            await _note_wait(parked=True)
+            answer = await DBOS.recv_async(RESUME_TOPIC, timeout_seconds=remaining)
+            await _note_wait(parked=False)
         if answer is None:
             now = await _step_round_clock()
             if human_missing and (human_deadline <= now or human_deadline == nearest):
@@ -1768,7 +1941,9 @@ async def _drive_turn(request: TurnRequest) -> _TurnEnd:
         # human answer, explicitly THREE_DAYS - the 60-second default is the trap, and a
         # person decides in hours, not seconds.
         while True:
+            await _note_wait(parked=True)
             answer = await DBOS.recv_async(RESUME_TOPIC, timeout_seconds=THREE_DAYS)
+            await _note_wait(parked=False)
             if isinstance(answer, PeerAnswer) and answer.correlation_id in timed_out_peers:
                 continue
             break
@@ -1833,47 +2008,60 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
         and the body driven twice - once executing, once replaying its step log - reaches
         the same decision sequence. Cheap, and it fails on a laptop instead of in recovery.
     """
-    # t-f2-10, and it is FIRST on purpose: a message that joined this turn's window is
-    # part of THIS turn's input and has to be folded in before `StartTurn` persists the
-    # request, or the audit row records a question the user did not ask.
-    #
-    # Rebinding `request` is deterministic: the combined value is a STEP result, so a
-    # replay reads it back out of the operation log rather than draining again.
-    request = await _step_drain_pending(request)
-
-    end = await _drive_turn(request)
-    if end.closed:
-        return end.outcome
-    outcome = end.outcome
-
-    # t-f3-07. The loop above exits only on a FINISHED outcome, and I2 makes `result`
-    # non-None for exactly that shape - `TurnOutcome.__post_init__` refuses any other. The
-    # local is what mypy narrows on; asserting instead would put a check in the workflow
-    # body for an invariant the domain type already enforces at construction.
-    #
-    # The two early returns above - `_step_abandon` and `_step_expire` - deliberately do
-    # NOT come through here. They are the turn giving up, not the turn answering, and
-    # telling the human on the channel is a product decision about what an abandoned turn
-    # says, which belongs with F3's message copy rather than with this anchor.
-    result = outcome.result
-    if result is not None:
-        await _step_deliver(request, result)
-
-        # t-f5-08, R5. AFTER delivery, so a compaction pass never delays the answer the
-        # human is waiting for - the summariser call on rungs L3 and L4 is not a fast one.
+    # C5. FIRST of all, before any step: count this entry and give up past the budget. See
+    # `AttemptLedger` and D32. Nothing below runs for a poisoned turn.
+    counted = await _begin_attempt()
+    if counted is not None and counted[0] > counted[1]:
+        await _give_up_turn(*counted)
+    try:
+        # t-f2-10, and it is FIRST on purpose: a message that joined this turn's window is
+        # part of THIS turn's input and has to be folded in before `StartTurn` persists the
+        # request, or the audit row records a question the user did not ask.
         #
-        # ONE call site, and deliberately not inside the loop above: `CompactContext`
-        # refuses to retry a pass that freed nothing, and a second entry would turn that
-        # refusal back into the infinite loop it exists to prevent. The trigger is asked
-        # again on the NEXT turn, which is what "compact rarely and in large steps" means.
-        #
-        # The turn's own usage is passed rather than read: an argument is recorded in the
-        # durable log, so a replay compacts against the same numbers the first attempt saw
-        # (CLAUDE.md non-negotiable #2). The two abandoned paths above return before this
-        # line on purpose - a turn nobody answered produced no usage worth triggering on.
-        await _step_compact(request, result.usage)
+        # Rebinding `request` is deterministic: the combined value is a STEP result, so a
+        # replay reads it back out of the operation log rather than draining again.
+        request = await _step_drain_pending(request)
 
-    return outcome
+        end = await _drive_turn(request)
+        if end.closed:
+            await _forget_attempts()
+            return end.outcome
+        outcome = end.outcome
+
+        # t-f3-07. The loop above exits only on a FINISHED outcome, and I2 makes `result`
+        # non-None for exactly that shape - `TurnOutcome.__post_init__` refuses any other. The
+        # local is what mypy narrows on; asserting instead would put a check in the workflow
+        # body for an invariant the domain type already enforces at construction.
+        #
+        # The two early returns above - `_step_abandon` and `_step_expire` - deliberately do
+        # NOT come through here. They are the turn giving up, not the turn answering, and
+        # telling the human on the channel is a product decision about what an abandoned turn
+        # says, which belongs with F3's message copy rather than with this anchor.
+        result = outcome.result
+        if result is not None:
+            await _step_deliver(request, result)
+
+            # t-f5-08, R5. AFTER delivery, so a compaction pass never delays the answer the
+            # human is waiting for - the summariser call on rungs L3 and L4 is not a fast one.
+            #
+            # ONE call site, and deliberately not inside the loop above: `CompactContext`
+            # refuses to retry a pass that freed nothing, and a second entry would turn that
+            # refusal back into the infinite loop it exists to prevent. The trigger is asked
+            # again on the NEXT turn, which is what "compact rarely and in large steps" means.
+            #
+            # The turn's own usage is passed rather than read: an argument is recorded in the
+            # durable log, so a replay compacts against the same numbers the first attempt saw
+            # (CLAUDE.md non-negotiable #2). The two abandoned paths above return before this
+            # line on purpose - a turn nobody answered produced no usage worth triggering on.
+            await _step_compact(request, result.usage)
+
+        await _forget_attempts()
+        return outcome
+    except Exception:
+        # The turn ends on its own terms (a crash is a BaseException and never lands here), so
+        # its count is dropped. A POISONED turn keeps its row as evidence: it never gets here.
+        await _forget_attempts()
+        raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -1980,11 +2168,17 @@ async def run_peer_turn_workflow(job: PeerTurnJob) -> TurnOutcome:
     A crash at any point replays from the log: the claimed row is no longer lost with the
     worker's memory, and the deterministic workflow id makes a second start a no-op.
     """
+    # C5. Before any step, as in `run_turn_workflow`: past the budget the asker is answered with
+    # the fixed failure text and the workflow fails with the reason.
+    counted = await _begin_attempt()
+    if counted is not None and counted[0] > counted[1]:
+        await _give_up_peer(job, *counted)
     try:
         end = await _drive_turn(job.request)
     except Exception:
         _LOG.exception("peer turn for ask %r failed", job.correlation_id)
         await _close_peer_ask(job, PEER_ASK_FAILED_ANSWER)
+        await _forget_attempts()
         raise
     result = end.outcome.result
     # C1e. "Closed unanswered" is the TYPED `_TurnEnd.closed` (abandoned after too many rounds,
@@ -1993,6 +2187,7 @@ async def run_peer_turn_workflow(job: PeerTurnJob) -> TurnOutcome:
     # `result is None` cannot happen for a finished turn (I2) and only narrows the type.
     text = PEER_ASK_CLOSED_ANSWER if end.closed or result is None else result.text
     await _close_peer_ask(job, text)
+    await _forget_attempts()
     return end.outcome
 
 

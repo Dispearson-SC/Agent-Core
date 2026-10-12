@@ -638,6 +638,11 @@ after a lease. A callee may itself ask a third agent (A -> B -> C): the ask is f
 callee's workflow id (`peer_messages.turn_id` is TEXT), and cancelling B cancels the asks B made,
 level by level. See DECISIONS D31 (C3, C4) and D32 (C1f).
 
+A turn that keeps killing its worker is not retried for ever: each workflow body counts its own
+entries in a durable ledger (a restart out of a wait is not an attempt) and past
+`AGENT_CORE_MAX_TURN_ATTEMPTS` (default 10) it fails with a reason; a callee's asker is answered
+with the fixed failure text. See DECISIONS D32 (C5).
+
 ### A2A: shape now, wire protocol in D2
 
 Agent2Agent reached **v1.0 under the Linux Foundation**, backed by Google, Microsoft and

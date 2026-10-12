@@ -177,6 +177,7 @@ from agent_core.adapters.driven.knowledge_pg.admin import PgKnowledgeAdmin
 from agent_core.adapters.driven.llm_litellm.gateway import LiteLLMGateway
 from agent_core.adapters.driven.media_fs.store import FilesystemMediaStore
 from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
+from agent_core.adapters.driven.persistence_pg.attempt_ledger import PgAttemptLedger
 from agent_core.adapters.driven.persistence_pg.audit_read_repository import (
     PgAuditReadRepository,
 )
@@ -250,6 +251,7 @@ from agent_core.ports.knowledge_admin import KnowledgeAdmin
 from agent_core.ports.transcript_reader import TranscriptReader
 
 __all__ = [
+    "DEFAULT_MAX_TURN_ATTEMPTS",
     "DEFAULT_PEER_LEASE_SECONDS",
     "PINNED_DBOS_APPLICATION_VERSION",
     "TOOL_PACKAGES",
@@ -465,6 +467,9 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # gained the cancel cascade steps (C4), so a turn or peer workflow suspended on .2 is stranded.
 PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.3"
 
+# C5 (D32). Default of `Settings.max_turn_attempts`.
+DEFAULT_MAX_TURN_ATTEMPTS: Final[int] = 10
+
 # C3 (D31). Default of `Settings.peer_lease_seconds`: five minutes.
 DEFAULT_PEER_LEASE_SECONDS: Final[int] = 300
 
@@ -582,6 +587,10 @@ class Settings:
     # worker needs between its claim and the workflow enqueue, short enough that a lost claim
     # is retried before the asker's usual reply timeout (an hour).
     peer_lease_seconds: int = DEFAULT_PEER_LEASE_SECONDS
+    # C5 (D32). How many times in a row a turn or peer workflow may be entered without getting
+    # past the same point before it is failed instead of retried again: the poison-turn budget.
+    # `AGENT_CORE_MAX_TURN_ATTEMPTS`, default 10.
+    max_turn_attempts: int = DEFAULT_MAX_TURN_ATTEMPTS
 
     @property
     def resolved_audit_conninfo(self) -> str:
@@ -648,6 +657,7 @@ class Settings:
             # for reading `TELEGRAM_BOT` rather than inventing an `AGENT_CORE_` name.
             dbos_conductor_key=env.get("DBOS_CONDUCTOR_KEY"),
             peer_lease_seconds=_parse_lease_seconds(env.get("AGENT_CORE_PEER_LEASE_SECONDS")),
+            max_turn_attempts=_parse_max_turn_attempts(env.get("AGENT_CORE_MAX_TURN_ATTEMPTS")),
         )
 
 
@@ -665,6 +675,22 @@ def _parse_lease_seconds(raw: str | None) -> int:
             f"got {raw!r}"
         )
     return seconds
+
+
+def _parse_max_turn_attempts(raw: str | None) -> int:
+    """`AGENT_CORE_MAX_TURN_ATTEMPTS` as a positive integer; unset means the default."""
+    if raw is None:
+        return DEFAULT_MAX_TURN_ATTEMPTS
+    try:
+        attempts = int(raw)
+    except ValueError:
+        attempts = 0
+    if attempts < 1:
+        raise ValueError(
+            f"AGENT_CORE_MAX_TURN_ATTEMPTS must be a positive whole number of attempts, "
+            f"got {raw!r}"
+        )
+    return attempts
 
 
 def _parse_channel_ids(raw: str) -> tuple[str, ...]:
@@ -1598,6 +1624,10 @@ def bind_turn_workflow(container: Container) -> None:
             human_gateway=container.human_gateway,
             resume_turn=container.resume_turn,
             peers=PeerSeat(mailbox=container.mailbox, profiles=container.profiles),
+            # C5. The poison-turn budget: the ledger lives in the application database, and the
+            # limit is `Settings.max_turn_attempts`.
+            attempts=PgAttemptLedger(container.settings.app_conninfo),
+            max_attempts=container.settings.max_turn_attempts,
         )
     )
 

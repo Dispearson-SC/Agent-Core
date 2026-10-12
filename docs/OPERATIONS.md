@@ -100,3 +100,24 @@ answers land on rows nobody reads. To see what a cancel did:
 `SELECT correlation_id, cancel_reason, cancelled_at FROM peer_messages WHERE state = 'cancelled';`
 A reply timeout and an expired asking turn cancel their asks the same way, with reasons
 `reply timeout: ...` and `asking turn expired ...`.
+
+## Poison turns (attempt budget)
+
+A turn or callee whose step keeps killing its worker (a crash in a tool, an out-of-memory kill)
+used to be re-run by every restart for ever. Each workflow body now counts how often it was
+entered in a row without having been parked on a wait (D32, C5), and the entry past the budget is
+refused.
+
+- Budget: `AGENT_CORE_MAX_TURN_ATTEMPTS`, default `10`. A positive whole number; anything else
+  stops startup. A restart of a turn that was waiting for a person or a peer is not an attempt.
+- What you see: the workflow ends `ERROR` with an error that starts `workflow '<id>' was started
+  N attempts in a row ...` (`dbos workflow get <id>`), an ERROR log line with the same text, and
+  the row `SELECT * FROM workflow_attempts;` (the count of a poisoned workflow is kept; rows of
+  workflows that ended normally are removed). A callee's asker gets the fixed "could not be
+  answered: the answering agent failed" answer and is woken; asks the poisoned turn still had
+  open are cancelled.
+- The person on the other end of a poisoned ordinary turn is not told anything: tell them, then
+  look for what killed the process (the last step in `dbos workflow steps <id>` is the one that
+  never completed).
+- To retry a poisoned workflow on purpose after fixing the cause, delete its ledger row and fork
+  or resubmit it; do not raise the budget to "push it through".

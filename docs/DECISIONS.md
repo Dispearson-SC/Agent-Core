@@ -1174,3 +1174,42 @@ what the current build does for every other stranded turn).
 - Test tidy: one helper (`_drain_queue`) empties `peer_messages` for the mailbox tests, and a
   comment in `test_peer_cancel.py` is a statement. D31's dangling "(see the report)" now states the
   finding inline (a nested ask failed on INSERT because `peer_messages.turn_id` was a UUID).
+
+**C5 · poison-turn budget.** DBOS re-runs a pending workflow's body after every crash. A turn
+whose step kills its process (a native crash, an out-of-memory kill) is therefore re-run by every
+restart, for ever (DBOS' own dead-letter limit is 100 recoveries and dead-letters in silence).
+OpenCode's `restart.ts` counts resumes durably before each one and terminalizes past a budget
+(default 10); this is the same idea, shaped to DBOS.
+
+- *Where the count lives.* A step runs once and a replay reads its recorded result, so a step
+  cannot count body entries. The count is a row (`workflow_attempts`, migration `0030`, port-like
+  `AttemptLedger`, adapter `PgAttemptLedger`) that the BODY touches on each entry with a plain
+  call, outside the operation log. Both `run_turn_workflow` and `run_peer_turn_workflow` do it
+  first, before any step, so no replay-shape change: the application version is NOT bumped for
+  C5 (see C6 for the batch's bump).
+- *What counts.* An entry counts +1 unless the previous entry ended PARKED on a wait, in which
+  case it restarts at 1. The body calls `park` right before it blocks on the durable topic and
+  `resume` right after it returns. This is what keeps a turn waiting for a person for weeks (a
+  deploy restarts it every time, and DBOS' own counter would count each) from using up the
+  budget, while a process killed while working, including right after the wake, counts. A restart
+  out of a wait that crashes before its first step completes is, by construction, the
+  indistinguishable case; the next entry counts.
+- *Budget and config.* `Settings.max_turn_attempts`, `AGENT_CORE_MAX_TURN_ATTEMPTS`, default 10,
+  a positive whole number or startup fails. Entry number `budget + 1` is refused.
+- *What a refused entry does.* It runs no step and raises `PoisonTurnError(reason)`, so the
+  workflow ends `ERROR` with the reason, and DBOS stops re-running it. The reason names the
+  workflow, the attempts and the budget. For an ordinary turn it also cancels the peer asks it
+  still has open (rows and callee workflows, with the D32 cascade). For a peer workflow it
+  answers the asker with the fixed failure text (`PEER_ASK_FAILED_ANSWER`, record first, wake
+  second, like any failed callee) and cancels the asks the callee made. A poisoned workflow keeps
+  its ledger row as evidence; one that ends on its own terms deletes it.
+- *Outside the log.* The settlement runs in an EMPTY `contextvars` context (`_outside_the_log`).
+  A DBOS call made from the body (a send, a cancel) is recorded at the next position of the
+  operation log, and a run that gives up before replaying its earlier steps would collide with
+  what is recorded there (`DBOSUnexpectedStepError`); in an empty context the same calls behave
+  as an external caller's, as `cancel_turn` and the worker already do.
+- *Fails open.* A ledger that cannot be written is logged and the turn runs uncounted: a counter
+  table being down must not refuse every turn. A workflow bound without a ledger is not counted.
+- *Not done.* No message is delivered to the person whose turn was poisoned (a product decision:
+  `_step_deliver` is a step and the channel text is F3's); the ERROR status, the log line and
+  the ledger row are the operator's evidence.

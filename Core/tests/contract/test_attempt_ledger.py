@@ -1,0 +1,92 @@
+"""The `AttemptLedger` rules (C5), run against the in-memory fake and the Postgres adapter."""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from collections.abc import Iterator
+from typing import Any
+
+import psycopg
+import pytest
+
+from agent_core.adapters.driven.persistence_pg import migrations
+from agent_core.adapters.driven.persistence_pg.attempt_ledger import PgAttemptLedger
+from tests.contract.harnesses import database_name_for
+from tests.fakes import peer_world
+from tests.fakes.attempt_ledger import InMemoryAttemptLedger
+
+pytestmark = pytest.mark.asyncio
+
+_DATABASE = database_name_for("attempts")
+
+
+@pytest.fixture(scope="module")
+def pg_conninfo() -> Iterator[str]:
+    if not peer_world.postgres_reachable():
+        pytest.skip("no reachable Postgres instance")
+    asyncio.run(
+        migrations.ensure_databases(
+            peer_world.ADMIN_CONNINFO, app_database=_DATABASE, dbos_database=f"{_DATABASE}_dbos_sys"
+        )
+    )
+    conninfo = re.sub(r"/[^/?]+(\?.*)?$", rf"/{_DATABASE}\1", peer_world.ADMIN_CONNINFO)
+    asyncio.run(migrations.run_migrations(conninfo))
+    yield conninfo
+
+
+class AttemptLedgerConformance:
+    @pytest.fixture
+    def ledger(self) -> Any:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+    async def test_every_entry_of_a_body_that_does_not_wait_counts(self, ledger: Any) -> None:
+        assert [await ledger.begin("wf") for _ in range(4)] == [1, 2, 3, 4]
+
+    async def test_workflows_are_counted_apart(self, ledger: Any) -> None:
+        assert await ledger.begin("a") == 1
+        assert await ledger.begin("b") == 1
+        assert await ledger.begin("a") == 2
+
+    async def test_an_entry_after_a_wait_starts_the_count_again(self, ledger: Any) -> None:
+        await ledger.begin("wf")
+        await ledger.begin("wf")
+        await ledger.park("wf")  # killed while parked on a person
+
+        assert await ledger.begin("wf") == 1, "a restart out of a wait is not a failed attempt"
+        assert await ledger.begin("wf") == 2
+
+    async def test_a_wake_ends_the_wait_so_a_crash_after_it_counts(self, ledger: Any) -> None:
+        await ledger.begin("wf")
+        await ledger.park("wf")
+        await ledger.resume("wf")  # the answer arrived; the process dies working on it
+
+        assert await ledger.begin("wf") == 2
+
+    async def test_a_forgotten_workflow_starts_from_nothing(self, ledger: Any) -> None:
+        await ledger.begin("wf")
+        await ledger.begin("wf")
+        await ledger.forget("wf")
+        await ledger.forget("never-counted")  # idempotent
+
+        assert await ledger.begin("wf") == 1
+
+    async def test_parking_an_unknown_workflow_is_harmless(self, ledger: Any) -> None:
+        await ledger.park("ghost")
+        await ledger.resume("ghost")
+
+        assert await ledger.begin("ghost") == 1
+
+
+class TestInMemoryAttemptLedger(AttemptLedgerConformance):
+    @pytest.fixture
+    def ledger(self) -> Any:
+        return InMemoryAttemptLedger()
+
+
+class TestPostgresAttemptLedger(AttemptLedgerConformance):
+    @pytest.fixture
+    def ledger(self, pg_conninfo: str) -> Any:
+        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+            conn.execute("DELETE FROM workflow_attempts")
+        return PgAttemptLedger(pg_conninfo)

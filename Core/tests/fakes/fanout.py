@@ -160,6 +160,7 @@ class World:
     cancelled_workflows: list[str] = field(default_factory=list)
     clock: list[float] = field(default_factory=lambda: [1000.0])
     script: list[Any] = field(default_factory=list)
+    ledger: Any | None = None
 
 
 def install(
@@ -169,10 +170,12 @@ def install(
     *,
     start_step: Callable[[TurnId, TurnRequest], Any] | None = None,
     resume_seat: Any | None = None,
+    ledger: Any | None = None,
+    max_attempts: int = 10,
 ) -> World:
     """Bind the fakes. Each script item runs when the body waits: it may answer in the
     mailbox, advance the clock, and returns what `recv_async` hands back."""
-    world = World()
+    world = World(ledger=ledger)
 
     async def new_turn_id() -> TurnId:
         return TurnId("turn-1")
@@ -193,6 +196,8 @@ def install(
         return TurnOutcome(turn_id=turn_id, result=TurnResult(text="expired"))
 
     class _Dbos:
+        workflow_id = "turn-1"  # the running workflow's durable id, which is also the turn id
+
         @staticmethod
         async def cancel_workflow_async(workflow_id: str, **_: Any) -> None:
             world.cancelled_workflows.append(workflow_id)
@@ -223,6 +228,8 @@ def install(
             channels=ChannelRegistry(()),
             resume_turn=cast("Any", resume_seat or world.resume),
             peers=turn_workflow.PeerSeat(mailbox=cast("Any", world.mailbox), profiles=profiles()),
+            attempts=ledger,
+            max_attempts=max_attempts,
         ),
     )
     return world
