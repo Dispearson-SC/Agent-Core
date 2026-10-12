@@ -51,6 +51,14 @@ def test_attributes_are_escaped_so_a_model_written_target_cannot_break_the_tag()
     assert rendered.startswith('<peer id="x&quot; status=&quot;ok" status="refused">')
 
 
+def test_a_validated_object_is_marked_as_data() -> None:
+    rendered = PeerResult(
+        peer="b", status=PeerStatus.OK, text='{"a":1}', session="s", data=True
+    ).render()
+
+    assert rendered == '<peer id="b" session="s" status="ok" data="json">\n{"a":1}\n</peer>'
+
+
 def test_every_status_has_a_distinct_wire_value() -> None:
     assert {s.value for s in PeerStatus} == {"ok", "error", "timeout", "cancelled", "refused"}
 

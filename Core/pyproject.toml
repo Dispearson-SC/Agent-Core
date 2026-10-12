@@ -19,6 +19,8 @@ dependencies = [
     "psycopg[binary,pool]>=3.2",
     "pydantic>=2.9",
     "pyyaml>=6.0",
+    # C9: typed peer answers are checked against the profile's JSON Schema.
+    "jsonschema>=4.18",
 ]
 
 [project.optional-dependencies]
@@ -73,3 +75,8 @@ select = ["E", "F", "I", "UP", "B", "TID"]
 python_version = "3.12"
 strict = true
 files = ["src", "tests"]
+
+# `jsonschema` ships no stubs (and `types-jsonschema` is not a runtime dependency).
+[[tool.mypy.overrides]]
+module = ["jsonschema", "jsonschema.*"]
+ignore_missing_imports = true

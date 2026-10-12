@@ -91,7 +91,12 @@ from urllib.parse import urlsplit
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability, ProcessHistory, ValidatedToolArgs
-from pydantic_ai.exceptions import ApprovalRequired, SkipToolExecution, UsageLimitExceeded
+from pydantic_ai.exceptions import (
+    ApprovalRequired,
+    ModelRetry,
+    SkipToolExecution,
+    UsageLimitExceeded,
+)
 from pydantic_ai.messages import (
     AudioUrl,
     BinaryContent,
@@ -106,6 +111,7 @@ from pydantic_ai.messages import (
     VideoUrl,
 )
 from pydantic_ai.models import Model
+from pydantic_ai.output import StructuredDict
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import (
     DeferredToolApprovalResult,
@@ -120,6 +126,7 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from agent_core.adapters.driven.mcp.toolsets import result_budget_for
 from agent_core.adapters.driven.peers.catalogue import build_peer_catalogue
+from agent_core.adapters.driven.peers.typed_answer import answer_problem
 from agent_core.adapters.driven.tools.context import PeerEntry, TurnContext
 from agent_core.application.ingest_media import sniff_media
 from agent_core.domain.compaction import CompactionPolicy, ContextState
@@ -139,6 +146,7 @@ from agent_core.domain.turn import (
     TurnResult,
     Usage,
 )
+from agent_core.domain.typed_answer import render_answer
 from agent_core.ports.agent_runner import ToolResolution
 from agent_core.ports.audit_sink import AuditSink
 from agent_core.ports.context_engine import ContextEngine
@@ -1290,7 +1298,19 @@ def _domain_usage(usage: RunUsage) -> Usage:
 # ADDING IT COSTS THE TEXT PATH NOTHING. `_output.py` strips `DeferredToolRequests` out of
 # the output list before it builds a schema, so no output tool is registered, the mode
 # stays plain text and a turn that defers nothing is byte-for-byte the turn it was.
-RunOutput = str | DeferredToolRequests
+RunOutput = str | dict[str, Any] | DeferredToolRequests
+
+
+def _validate_typed_output(agent: Agent[Any, RunOutput], schema_json: str) -> None:
+    """Check a typed profile's structured output against its schema; a miss is a model retry."""
+
+    @agent.output_validator
+    def check(output: RunOutput) -> RunOutput:
+        if isinstance(output, dict):
+            problem = answer_problem(schema_json, output)
+            if problem is not None:
+                raise ModelRetry(f"The answer does not match the required schema: {problem}")
+        return output
 
 
 class PydanticAgentRunner:
@@ -1685,11 +1705,14 @@ class PydanticAgentRunner:
                 pending=_pending_requests(output),
                 messages=messages,
             )
+        # C9. A typed profile finishes with a structured object; the outcome (and the mailbox row
+        # behind it) carries it as compact JSON text, the one form the asker re-validates.
+        text = render_answer(output) if isinstance(output, dict) else str(output)
         return TurnOutcome(
             turn_id=turn_id,
             messages=messages,
             result=TurnResult(
-                text=str(output),
+                text=text,
                 usage=_domain_usage(result.usage),
                 finished_at=self._clock(),
             ),
@@ -1814,6 +1837,18 @@ class PydanticAgentRunner:
         model = self._model_factory(
             self._model.model_id_for(profile.model), self._model.base_url()
         )
+        schema_json = profile.answer_schema
+        output_type: Any = [str, DeferredToolRequests]
+        if schema_json is not None:
+            # C9. A typed profile ends its turn through an output tool built from its schema, and
+            # prose is no longer a way to finish. The library does not check a StructuredDict
+            # against the schema (it only advertises it), so `_validate_typed_output` below does,
+            # and a miss goes back to the model through the library's own retry: ONE retry (the
+            # default `retries=1`), then the run raises and the peer workflow answers "failed".
+            output_type = [
+                StructuredDict(json.loads(schema_json), name="answer"),
+                DeferredToolRequests,
+            ]
         agent: Agent[Any, RunOutput] = Agent(
             model,
             # The persona only. The assembled system prompt - persona plus the skill INDEX -
@@ -1825,9 +1860,11 @@ class PydanticAgentRunner:
             # composition order and on whoever remembered to look - and the failure of
             # getting it wrong is a lost turn at the provider, not a test (t-f11-41). See
             # `RunOutput` for why this and not `HandleDeferredToolCalls`.
-            output_type=[str, DeferredToolRequests],
+            output_type=output_type,
             toolsets=await self._toolsets_for(profile),
         )
+        if schema_json is not None:
+            _validate_typed_output(agent, schema_json)
         self._agents[key] = agent
         return agent
 

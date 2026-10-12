@@ -652,6 +652,15 @@ with the fixed failure text. See DECISIONS D32 (C5).
 delimiters, cut to the asking profile's `peers.max_answer_chars` (default 50000); our own sentences
 (timeout, cancelled, refused) are plain. The stored row keeps the answer verbatim. See DECISIONS D35.
 
+**Typed answers (C9, D44).** A profile may declare `answer_schema`, a JSON Schema whose root is an
+object. That agent's turns then finish through a structured-output tool instead of prose (the model
+that gets the schema wrong is sent back once, then the turn fails and the asker reads
+`status="error"`). The asker's envelope marks a checked answer `data="json"`: the JSON is the text
+between the tags, still inside the untrusted delimiters, because its string values were written by
+another agent. The asker validates it again against the callee's schema before it labels it; an
+answer that breaks the contract is `error` and is not shown, and a cut one is plain text. No schema,
+no change: prose stays the default.
+
 **What one failed ask does to its siblings (C10, D39).** `peers.fan_out` on the asking profile:
 `all_settled` (default) lets every ask of a model step run to its own end; `fail_fast` cancels the
 siblings still out (the C4 cancel: row and callee workflow) as soon as one ask ends in `error`, hands

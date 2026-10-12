@@ -157,6 +157,7 @@ from dbos import DBOS, Queue, SetEnqueueOptions, SetWorkflowID, WorkflowHandleAs
 
 from agent_core.adapters.driven.peers.hop_limit import HopRefusal, authorise_hop
 from agent_core.adapters.driven.peers.mailbox import cap_wrapped_answer
+from agent_core.adapters.driven.peers.typed_answer import answer_text_problem
 from agent_core.adapters.driving.channels.registry import ChannelRegistry, OutboundMessage
 from agent_core.adapters.driving.peers.worker import new_peer_session
 from agent_core.application.compact_context import CompactContext
@@ -339,6 +340,12 @@ _CANCEL_TIMED_OUT: Final[str] = "reply timeout: the asking round gave up waiting
 _CANCEL_FAIL_FAST: Final[str] = "fail_fast: a sibling ask of the same step failed"
 _CANCEL_EXPIRED: Final[str] = "asking turn expired before a person decided"
 _CANCEL_RETIRED: Final[str] = "stranded by a deploy: the application version moved on"
+# The result for a typed answer that does not match the callee's declared schema (C9). OUR text.
+_TYPED_ANSWER_REFUSED = (
+    "The peer's answer did not match the schema it declares, so it was discarded. "
+    "Ask again or tell the person the answer is unavailable."
+)
+
 # The result for an ask beyond `peers.max_parallel_asks` (C11). OUR text, not wrapped.
 _TOO_MANY_ASKS: Final[str] = (
     "The peer ask was refused before it was sent: this agent may make at most {limit} parallel "
@@ -1234,13 +1241,44 @@ async def _peer_envelope(
         return None
     mailbox = _require_peer_seat().mailbox
     failed = await mailbox.answer_failed(correlation_id)
-    cap = _asking_policy(_require_peer_seat(), request.profile_id).max_answer_chars
+    seat = _require_peer_seat()
+    cap = _asking_policy(seat, request.profile_id).max_answer_chars
     capped = cap_wrapped_answer(wrapped, cap)
+    session = _peer_session_id(request, correlation_id)
+    callee = seat.profiles.get(target)
+    schema = None if callee is None else callee.answer_schema
+    if schema is not None and not failed and not capped.truncated:
+        # C9 (D44). A typed callee's answer is `data` only if it matches the schema it declares. The
+        # callee checked its own output, but the answer came through a mailbox (over A2A, through
+        # somebody else's code): the asker does not take the label on trust. An answer that breaks
+        # the contract is an error and is not shown (nothing in it is safe to act on); a CUT answer
+        # (`truncated`) is shown as text, not as data, because cut JSON is no object.
+        problem = answer_text_problem(schema, capped.inner)
+        if problem is not None:
+            return (
+                PeerResult(
+                    peer=target,
+                    status=PeerStatus.ERROR,
+                    text=_TYPED_ANSWER_REFUSED,
+                    session=session,
+                ).render(),
+                True,
+            )
+        return (
+            PeerResult(
+                peer=target,
+                status=PeerStatus.OK,
+                text=capped.wrapped,
+                session=session,
+                data=True,
+            ).render(),
+            False,
+        )
     envelope = PeerResult(
         peer=target,
         status=PeerStatus.ERROR if failed else PeerStatus.OK,
         text=capped.wrapped,
-        session=_peer_session_id(request, correlation_id),
+        session=session,
         truncated=capped.truncated,
     ).render()
     return envelope, failed

@@ -15,8 +15,9 @@ again (CLAUDE.md non-negotiable #10: one boundary, applied at one place). When W
 (`timeout`, `cancelled`, `refused`) it is plain, because nothing outside this process wrote it.
 
 Pure: no I/O, no clock, so the workflow can build it inside the body without breaking replay.
-`data` (typed answers) and `usage` are not fields yet: C9 adds the first and needs the callee's
-usage persisted for the second; adding them then is an additive change to `render`.
+`data` (C9) marks a text that is a JSON object checked against the callee's `answer_schema`: the
+JSON itself is the text, inside the same untrusted wrapper, because its string values were still
+written by another agent. `usage` is not a field yet: it needs the callee's usage persisted.
 """
 
 from __future__ import annotations
@@ -53,6 +54,8 @@ class PeerResult:
     text: str
     session: str | None = None
     truncated: bool = False
+    # C9. The text is a JSON object that was checked against the callee's `answer_schema`.
+    data: bool = False
 
     def render(self) -> str:
         """The tagged form the model reads. Attributes are escaped: `peer` is model-written."""
@@ -62,6 +65,8 @@ class PeerResult:
         attributes.append(f'status="{self.status.value}"')
         if self.truncated:
             attributes.append('truncated="true"')
+        if self.data:
+            attributes.append('data="json"')
         return f"<peer {' '.join(attributes)}>\n{self.text}\n</peer>"
 
 

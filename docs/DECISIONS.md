@@ -1733,3 +1733,38 @@ Decisions taken while closing the review advisories of the caps / rules / topolo
   never requeued, and the redelivery cap (which counts workflows that ended in ERROR) is not touched.
   Pinned by a test; no code change.
 - **Replay shape: unchanged** by this item.
+
+## D44 · Agent-comms v2: typed answers (C9)
+
+A specialist often has to hand back a record (a risk score, a list of rows), and prose makes the
+asker parse it back. `answer_schema` on a profile makes the contract explicit.
+
+- **Where it lives: top level of the profile, as canonical JSON text.** The callee owns the shape of
+  what it answers, so it sits on the callee's profile (not in `peers`, which describes who this
+  profile may ask). It is stored as sorted compact JSON so the frozen, hashed profile is the same
+  value whatever order the YAML listed the keys in; it is part of the content hash. A schema
+  whose root is not an object refuses to load; one whose body is not valid JSON Schema stops startup
+  (`composition._refuse_unusable_answer_schemas`), because `domain/` imports no validator
+  (`jsonschema` lives in `adapters/driven/peers/typed_answer.py`).
+- **The callee runs with structured output; one retry, then it fails.** The runner registers an
+  output tool built from the schema (`StructuredDict`) and no longer accepts prose as a way to end the
+  turn. Pydantic AI only advertises a `StructuredDict`, it does not check it, so an output validator
+  checks it with `jsonschema` and a miss goes back to the model through the library's own retry
+  (default one retry). A second miss raises, and the peer workflow answers "failed" exactly as for any
+  callee that raises. The turn's text is the object as compact JSON. This applies to every turn of
+  that profile, not only peer ones: a typed profile is meant to be a specialist behind `ask_peer`.
+- **The asker checks again, and does not show a broken answer.** `_peer_envelope` validates the stored
+  text against the callee profile's schema before it adds `data="json"` to the envelope. The answer
+  crossed a mailbox, and over A2A it can be somebody else's code; the label is not taken on trust. A
+  mismatch is `status="error"` with OUR sentence and none of the peer's content, and trips `fail_fast`
+  like any error. A typed answer cut by `max_answer_chars` is plain text (`truncated="true"`): cut JSON
+  is no object.
+- **`data` is not out of the untrusted wrapper.** The JSON stays between the untrusted delimiters,
+  since its strings were still written by another agent (non-negotiable #10).
+- **Dependency.** `jsonschema` was already installed through the model libraries; it is now declared,
+  and mypy ignores its missing stubs.
+- **Replay shape: unchanged.** No step added or reordered; the profile content hash of every profile
+  changes once (a new field), as with earlier peer keys.
+- **Not done:** listing the schema in the `ask_peer` catalogue so the asking model knows the shape
+  before it asks; a per-ask schema chosen by the asker; A2A servers publishing their own schema.
+

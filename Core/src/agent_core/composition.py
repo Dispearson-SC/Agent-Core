@@ -177,6 +177,7 @@ from agent_core.adapters.driven.knowledge_pg.admin import PgKnowledgeAdmin
 from agent_core.adapters.driven.llm_litellm.gateway import LiteLLMGateway
 from agent_core.adapters.driven.media_fs.store import FilesystemMediaStore
 from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
+from agent_core.adapters.driven.peers.typed_answer import check_answer_schema
 from agent_core.adapters.driven.persistence_pg.attempt_ledger import PgAttemptLedger
 from agent_core.adapters.driven.persistence_pg.audit_read_repository import (
     PgAuditReadRepository,
@@ -248,6 +249,7 @@ from agent_core.domain.turn import (
     ToolCallId,
     TurnId,
 )
+from agent_core.domain.typed_answer import AnswerSchemaError
 from agent_core.ports.agent_mailbox import AgentMailbox
 from agent_core.ports.knowledge_admin import KnowledgeAdmin
 from agent_core.ports.transcript_reader import TranscriptReader
@@ -976,6 +978,25 @@ def _refuse_topology_drift(profiles: Mapping[str, AgentProfile], policy_dir: Pat
         return
     rules = load_policy_rules(policy_dir) if policy_dir.is_dir() else None
     validate_topology(profiles, rules)
+
+
+def _refuse_unusable_answer_schemas(profiles: Mapping[str, AgentProfile]) -> None:
+    """Fail startup on a profile whose `answer_schema` is not a valid JSON Schema (C9, D44).
+
+    The profile loader (domain/) can only see that the root is an object; whether the rest is a
+    schema needs a validator, so the check lives here, naming every offender at once. A bad schema
+    would otherwise surface as a failed peer turn on a customer's question.
+    """
+    problems: list[str] = []
+    for profile_id, profile in sorted(profiles.items()):
+        if profile.answer_schema is None:
+            continue
+        try:
+            check_answer_schema(profile.answer_schema)
+        except AnswerSchemaError as error:
+            problems.append(f"profile {profile_id!r}: {error}")
+    if problems:
+        raise ValueError("unusable answer_schema:\n  " + "\n  ".join(problems))
 
 
 def _refuse_unservable_profiles(
@@ -1756,6 +1777,7 @@ def build_container(
     # C17 (D42). The peer topology, declared once, against the profiles, their hop limits and the
     # policy files: drift stops the process here, not as refused asks on a customer's turn.
     _refuse_topology_drift(profiles, resolved.policy_dir)
+    _refuse_unusable_answer_schemas(profiles)
 
     model = LiteLLMGateway(resolved.proxy_base_url)
     policy = PgToolPolicy(PoolConnections(domain_pool))

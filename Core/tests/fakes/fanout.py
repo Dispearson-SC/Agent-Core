@@ -307,3 +307,10 @@ def asker_policy(**changes: Any) -> None:
     seat.profiles[ASKER] = dataclasses.replace(
         asker, peers=dataclasses.replace(asker.peers, **changes)
     )
+
+
+def callee_profile(**changes: Any) -> None:
+    """Change the CALLEE profile (the peer the asker asks) in the bound seat (after `install`)."""
+    seat = turn_workflow._dependencies.peers  # noqa: SLF001 - the test seam
+    assert seat is not None
+    seat.profiles[PEER] = dataclasses.replace(seat.profiles[PEER], **changes)

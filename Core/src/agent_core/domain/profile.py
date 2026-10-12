@@ -52,6 +52,7 @@ from agent_core.domain.peers import (
     PeerVisibility,
     Topology,
 )
+from agent_core.domain.typed_answer import AnswerSchemaError, canonical_schema
 
 
 class ProfileValidationError(ValueError):
@@ -580,6 +581,16 @@ def _build_public_alias(data: object) -> str:
     return data.strip()
 
 
+def _build_answer_schema(data: object) -> str | None:
+    """`answer_schema` (C9): a JSON Schema mapping with an object root, kept as canonical JSON."""
+    if data is None:
+        return None
+    try:
+        return canonical_schema(data)
+    except AnswerSchemaError as error:
+        raise ProfileValidationError(f"answer_schema: {error}") from error
+
+
 def _build_description(data: object) -> str:
     """The description as written, or `""`. Not blank-padded: it is shown to other agents."""
     if data is None:
@@ -684,6 +695,11 @@ class AgentProfile:
     # Empty falls back to the display name the asker's allowlist gave it. Part of the content hash.
     description: str = ""
 
+    # C9 (D44). The JSON Schema (canonical JSON text, root an object) this agent answers with, or
+    # None for prose (the default). The callee runs with structured output; an asker receives the
+    # validated answer as `data`. Part of the content hash.
+    answer_schema: str | None = None
+
     # D20, docs/TASKS.md#t-f1-17. Derived at load time, never read from the YAML.
     # `version` is 0 until a `ProfileVersionRegistry` assigns one: a profile that never
     # passed through a registry must not be able to claim it is version 1, because a turn
@@ -767,6 +783,7 @@ class AgentProfile:
             ),
             public_alias=_build_public_alias(mapping.get("public_alias")),
             description=_build_description(mapping.get("description")),
+            answer_schema=_build_answer_schema(mapping.get("answer_schema")),
             channel_instructions=_build_fragment_map(
                 mapping.get("channel_instructions"), where="channel_instructions"
             ),
