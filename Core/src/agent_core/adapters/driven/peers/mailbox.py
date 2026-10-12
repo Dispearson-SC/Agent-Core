@@ -172,22 +172,35 @@ _ENQUEUE_UNKEYED_SQL = (
 """
 )
 
-# THE CLAIM (C11, D40). Candidates are the oldest queued asks for the target, read without a lock;
-# each is then claimed by ONE guarded UPDATE (`state = 'queued'` in its WHERE), so two workers can
-# never both take the same ask: the loser blocks on the row lock, re-reads the row as delivered and
-# matches nothing. An ask whose asking turn already has `max_concurrent` asks RUNNING (delivered,
-# unanswered, across every target) is skipped and stays queued, so the cap is a queue and not a
-# refusal. The count is taken under a per-turn advisory lock, held to the end of the transaction, so
-# two workers claiming different asks of one turn at the same moment cannot both see "one slot
-# free". NULL `max_concurrent` (a row written before migration 0033) is never held. The tie-break on
-# correlation_id keeps the order total, so replay does not depend on which of two rows Postgres
-# happened to write first.
-_CLAIM_CANDIDATES_SQL = """
-    SELECT correlation_id, turn_id, max_concurrent
-    FROM peer_messages
-    WHERE target_agent_id = %s AND state = 'queued'
-    ORDER BY enqueued_at, correlation_id
-    LIMIT %s
+# THE CLAIM (C11, D40, C1m). Candidates are the oldest queued asks for the target, read without a
+# lock; each is then claimed by ONE guarded UPDATE (`state = 'queued'` in its WHERE), so two workers
+# can never both take the same ask: the loser blocks on the row lock, re-reads the row as delivered
+# and matches nothing. An ask whose asking turn already has `max_concurrent` asks RUNNING
+# (delivered, unanswered, across every target) is not claimable and stays queued, so the cap is a
+# queue and not a refusal.
+#
+# The candidate query already leaves out the asks of a turn that is at its cap, so a backlog of
+# capped asks can never fill a scan window and hide an uncapped turn's ask behind it. That count
+# is read without a lock and can be stale, so it is repeated under a per-turn advisory lock before
+# the ask is taken: two workers claiming different asks of one turn at the same moment cannot both
+# see "one slot free". The lock is taken for the ONE ask the transaction means to claim and for no
+# other: a transaction that held the locks of every turn it scanned, skipped ones included, could
+# wait for a turn's lock while a second worker (another target, the same two turns the other way
+# round) waits for its own, and Postgres would abort one of them with a deadlock. When the recount
+# under the lock finds the turn at its cap after all, the transaction ends (releasing the lock),
+# that turn is excluded, and the claim starts again. NULL `max_concurrent` (a row written before
+# migration 0033) is never held. The tie-break on correlation_id keeps the order total, so replay
+# does not depend on which of two rows Postgres happened to write first.
+_CLAIM_CANDIDATE_SQL = """
+    SELECT m.correlation_id, m.turn_id, m.max_concurrent
+    FROM peer_messages m
+    WHERE m.target_agent_id = %s AND m.state = 'queued'
+      AND m.turn_id <> ALL(%s)
+      AND (m.max_concurrent IS NULL OR m.max_concurrent > (
+            SELECT count(*) FROM peer_messages r
+            WHERE r.turn_id = m.turn_id AND r.state = 'delivered' AND r.answered_at IS NULL))
+    ORDER BY m.enqueued_at, m.correlation_id
+    LIMIT 1
 """
 _TURN_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
 _RUNNING_SQL = """
@@ -201,10 +214,6 @@ _CLAIM_ONE_SQL = """
     RETURNING correlation_id, target_agent_id, from_session_id, from_tenant_id,
               turn_id, hop, question, from_agent_id, answer_token, redeliveries, callee_failures
 """
-# How many queued asks one claim looks through before it gives up: a bound, not a policy. An ask
-# only waits behind its own turn's cap, which `max_parallel_asks` keeps small.
-_CLAIM_SCAN: Final[int] = 100
-
 # `answered_at IS NULL` is the idempotency guard and it lives in the WHERE clause rather
 # than in a preceding SELECT, for the reason every other guard in this module does: two
 # deliveries can both read "unanswered" before either writes. A retried delivery matches
@@ -511,17 +520,24 @@ class PgAgentMailbox:
 
     def _claim_sync(self, target: AgentId) -> PeerAsk | None:
         row: tuple[Any, ...] | None = None
-        with psycopg.connect(self._conninfo) as conn, conn.transaction():
-            candidates = conn.execute(_CLAIM_CANDIDATES_SQL, (target, _CLAIM_SCAN)).fetchall()
-            for correlation_id, turn_id, max_concurrent in candidates:
-                if max_concurrent is not None:
-                    conn.execute(_TURN_LOCK_SQL, (str(turn_id),))
-                    running = conn.execute(_RUNNING_SQL, (str(turn_id),)).fetchone()
-                    if running is not None and int(running[0]) >= int(max_concurrent):
-                        continue  # the asking turn is at its cap: this ask waits, queued
-                row = conn.execute(_CLAIM_ONE_SQL, (correlation_id,)).fetchone()
-                if row is not None:
-                    break
+        capped: list[str] = []  # turns the recount under their lock found at their cap
+        with psycopg.connect(self._conninfo) as conn:
+            while row is None:
+                skipped_turn: str | None = None
+                with conn.transaction():
+                    candidate = conn.execute(_CLAIM_CANDIDATE_SQL, (target, capped)).fetchone()
+                    if candidate is None:
+                        return None
+                    correlation_id, turn_id, max_concurrent = candidate
+                    if max_concurrent is not None:
+                        conn.execute(_TURN_LOCK_SQL, (str(turn_id),))
+                        running = conn.execute(_RUNNING_SQL, (str(turn_id),)).fetchone()
+                        if running is not None and int(running[0]) >= int(max_concurrent):
+                            skipped_turn = str(turn_id)  # full after all: its asks wait, queued
+                    if skipped_turn is None:
+                        row = conn.execute(_CLAIM_ONE_SQL, (correlation_id,)).fetchone()
+                if skipped_turn is not None:
+                    capped.append(skipped_turn)
         if row is None:
             return None
         # `turn_id` is TEXT (migration 0029); the domain type is the string every other table

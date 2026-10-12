@@ -453,6 +453,24 @@ class MailboxConformance:
         assert first is not None and first.correlation_id == stale, "oldest first, slot free again"
         assert second is None, "and the cap of one still holds"
 
+    async def test_capped_turns_cannot_hide_an_uncapped_turns_ask(
+        self, harness: MailboxHarness
+    ) -> None:
+        """C1m. A turn at its concurrent cap keeps its asks queued; however many there are, they
+        must not fill the window the claim looks through and starve an
+        uncapped turn behind them."""
+        queue = _queue(harness)
+        await queue.ask("running", turn_id="capped", request_key="tc-0", max_concurrent=1)
+        assert (await queue.claim()) is not None, "the capped turn's first ask runs"
+        for n in range(1, 121):
+            await queue.ask(f"waiting {n}", turn_id="capped", request_key=f"tc-{n}",
+                            max_concurrent=1)
+        free = await queue.ask("free", turn_id="free", request_key="tc-free", max_concurrent=1)
+
+        claimed = await queue.claim()
+
+        assert claimed is not None and claimed.correlation_id == free
+
 
 async def _never_exists(correlation_id: str, generation: int) -> bool:
     return False
