@@ -60,7 +60,14 @@ def test_a_validated_object_is_marked_as_data() -> None:
 
 
 def test_every_status_has_a_distinct_wire_value() -> None:
-    assert {s.value for s in PeerStatus} == {"ok", "error", "timeout", "cancelled", "refused"}
+    assert {s.value for s in PeerStatus} == {
+        "ok",
+        "error",
+        "timeout",
+        "cancelled",
+        "refused",
+        "running",  # C19: a background ask that has been sent and not answered
+    }
 
 
 # --- the size cap ---------------------------------------------------------------------------

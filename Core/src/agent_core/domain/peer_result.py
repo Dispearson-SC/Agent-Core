@@ -35,6 +35,7 @@ class PeerStatus(StrEnum):
     TIMEOUT   - no answer inside the asker's `reply_timeout_seconds`; the ask was cancelled.
     CANCELLED - the ask was cancelled before this call (a repeat of one that timed out).
     REFUSED   - the ask was never sent (policy, an unknown peer, a malformed call).
+    RUNNING   - a background ask (C19): sent, not answered; its answer arrives later as a follow-up.
     """
 
     OK = "ok"
@@ -42,6 +43,7 @@ class PeerStatus(StrEnum):
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"
     REFUSED = "refused"
+    RUNNING = "running"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,12 +58,17 @@ class PeerResult:
     truncated: bool = False
     # C9. The text is a JSON object that was checked against the callee's `answer_schema`.
     data: bool = False
+    # C19. The handle of a background ask (its correlation id): how the owner conversation names it
+    # to `peer_status`, `peer_message` and `peer_stop` (C20) and how a follow-up names its ask.
+    handle: str | None = None
 
     def render(self) -> str:
         """The tagged form the model reads. Attributes are escaped: `peer` is model-written."""
         attributes = [f'id="{_attribute(self.peer)}"']
         if self.session is not None:
             attributes.append(f'session="{_attribute(self.session)}"')
+        if self.handle is not None:
+            attributes.append(f'handle="{_attribute(self.handle)}"')
         attributes.append(f'status="{self.status.value}"')
         if self.truncated:
             attributes.append('truncated="true"')

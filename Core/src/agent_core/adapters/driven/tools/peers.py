@@ -116,7 +116,12 @@ from agent_core.adapters.driven.tools.context import TurnContext
 _AVAILABLE_PEERS = "Available peers (use the id as `target`):"
 
 
-def ask_peer(target: str, question: str, continue_session: str | None = None) -> str:
+def ask_peer(
+    target: str,
+    question: str,
+    continue_session: str | None = None,
+    background: bool = False,
+) -> str:
     """Ask another agent `target` a question. Always defers - see module docstring.
 
     The return type is `str` only so a type checker can tell what the AGENT eventually
@@ -129,10 +134,16 @@ def ask_peer(target: str, question: str, continue_session: str | None = None) ->
         question: What to ask it. The peer sees this and nothing else of your conversation.
         continue_session: To follow up on an earlier exchange with the SAME agent, the `session`
             of its earlier result. The peer then remembers that exchange. Omit it to start fresh.
+        background: Set true for a slow question you do not need answered to carry on. The call
+            returns at once with a handle (status "running"); the answer arrives later as a new
+            message in this conversation. Use `peer_status`, `peer_message` and `peer_stop` with the
+            handle while it runs. Omit it to wait for the answer in this turn.
     """
-    metadata = {"target": target, "question": question}
+    metadata: dict[str, Any] = {"target": target, "question": question}
     if continue_session is not None:
         metadata["continue_session"] = continue_session
+    if background:
+        metadata["background"] = True
     raise CallDeferred(metadata=metadata)
 
 
@@ -153,7 +164,11 @@ async def _prepare_ask_peer(
     # C12. The follow-up parameter is only offered to a profile that opted in (the workflow
     # refuses it from one that did not, whatever the model writes).
     if isinstance(deps, TurnContext) and not deps.allow_continuation:
-        tool_def = _without_continuation(tool_def)
+        tool_def = _without_parameter(tool_def, "continue_session")
+    # C19. Same for `background`: offered only to a profile that opted in (the workflow refuses it
+    # from one that did not, whatever the model writes).
+    if isinstance(deps, TurnContext) and not deps.allow_background:
+        tool_def = _without_parameter(tool_def, "background")
     if catalogue is None:
         return tool_def
     if not catalogue:
@@ -166,9 +181,9 @@ async def _prepare_ask_peer(
     return replace(tool_def, parameters_json_schema=schema, description=description)
 
 
-def _without_continuation(tool_def: ToolDefinition) -> ToolDefinition:
+def _without_parameter(tool_def: ToolDefinition, name: str) -> ToolDefinition:
     schema = copy.deepcopy(tool_def.parameters_json_schema)
-    schema.get("properties", {}).pop("continue_session", None)
+    schema.get("properties", {}).pop(name, None)
     return replace(tool_def, parameters_json_schema=schema)
 
 

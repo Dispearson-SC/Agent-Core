@@ -220,6 +220,22 @@ class TurnResult:
 
 
 @dataclass(frozen=True, slots=True)
+class BackgroundReturn:
+    """Where the answer of a BACKGROUND ask goes back to (C19, D49): the asking conversation.
+
+    `session` and `profile_id` are the asking turn's own; `caller` is the identity the asking turn
+    ran under, snapshotted on the ask row when the ask was made (subject, channel, roles, modality;
+    the tenant is the session's). The follow-up turn that carries the answer runs as exactly that
+    caller, so the answer reaches the person on the channel they asked on and never with more
+    authority than they held when they asked.
+    """
+
+    session: SessionRef
+    profile_id: str
+    caller: CallerIdentity
+
+
+@dataclass(frozen=True, slots=True)
 class PeerOwner:
     """The chain that owns a peer turn (C16, D46): which ask started it and from where.
 
@@ -235,6 +251,9 @@ class PeerOwner:
     asker_turn_id: str
     asker: str | None
     call: str
+    # C19. Set only for a BACKGROUND ask: where its answer is delivered instead of waking the asking
+    # turn (which has moved on).
+    background: BackgroundReturn | None = None
 
 
 @dataclass(frozen=True, slots=True)

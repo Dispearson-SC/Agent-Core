@@ -26,8 +26,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy
-from agent_core.domain.turn import SessionRef, TurnId
+from agent_core.domain.peers import AgentId, AgentRef, BackgroundAsk, PeerPolicy
+from agent_core.domain.turn import CallerIdentity, SessionRef, TurnId
 
 
 class ProcessDied(BaseException):  # noqa: N818 - a BaseException on purpose, see the module doc
@@ -124,7 +124,9 @@ class ControlledMailbox:
         request_key: str | None = None,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: CallerIdentity | None = None,
     ) -> str:
+        extra = {} if background_caller is None else {"background_caller": background_caller}
         return await self._invoke(  # type: ignore[no-any-return]
             "ask",
             policy,
@@ -137,6 +139,7 @@ class ControlledMailbox:
             request_key=request_key,
             continue_session=continue_session,
             root_turn_id=root_turn_id,
+            **extra,  # recorded only when given: older asserts on the call kwargs hold
         )
 
     async def answer(
@@ -158,6 +161,12 @@ class ControlledMailbox:
 
     async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
         return await self._invoke("cancel_open", turn_id, reason)  # type: ignore[no-any-return]
+
+    async def cancel_background(self, session: SessionRef, reason: str) -> tuple[str, ...]:
+        return await self._invoke("cancel_background", session, reason)  # type: ignore[no-any-return]
+
+    async def background_asks(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
+        return await self._invoke("background_asks", session)  # type: ignore[no-any-return]
 
     async def is_cancelled(self, correlation_id: str) -> bool:
         return await self._invoke("is_cancelled", correlation_id)  # type: ignore[no-any-return]

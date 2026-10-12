@@ -5,7 +5,7 @@ changes. Decisions behind them are in `docs/DECISIONS.md`.
 
 ## Bumping the DBOS application version
 
-`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.8`) is bumped when a
+`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.9`) is bumped when a
 change makes turns that are already in flight incompatible with the new code: a workflow step
 added, removed, renamed or reordered, or a changed workflow argument (D28 took `.1` to `.2`;
 D31 took `.2` to `.3`: the peer job gained `answer_token` and the round gained the cancel
@@ -16,7 +16,8 @@ under `.4` is stranded and the new build does not know its name, see "Deploying 
 workflow ids"; D36 took `.5` to `.6`: the request key of a peer ask names its round and position, see
 "Deploying the ask keys"; D39 took `.6` to `.7`: a round waiting on a peer records one more step
 (the fan-out policy), see "Deploying the fan-out policy"; D47 took `.7` to `.8`: a round that
-asks a peer records the context step first, see "Deploying peer context". Peer asks in
+asks a peer records the context step first, see "Deploying peer context"; D49 took `.8` to `.9`:
+background asks, see "Deploying background asks". Peer asks in
 flight on `.2` are stranded too: `stranded-turns` lists them, and
 their mailbox rows stay `delivered` until the lease reclaims them: with
 `AGENT_CORE_RETIRE_OTHER_VERSIONS=true` (D33) the lease treats a workflow left open under another
@@ -137,6 +138,30 @@ views); both are additive, but `0035` re-creates `transcript_entries` and `trans
 so apply it in the same window as the `.8` build and not under a running `.7` reader you cannot
 restart. Nothing was deployed under `.3`-`.8` on this branch, so the bumps collapse into one before
 the first release.
+
+## Deploying background asks (`.8` -> `.9`, D49)
+
+`PeerDispatch` and `PeerOwner` (pickled into the operation log and into the peer workflow's input)
+gained fields, and the peer workflow records `_step_background_follow_up` for a background ask. A
+turn or callee suspended under `.8` is stranded like any stale-version workflow: drain before
+deploying `.9` as for `.8` (`stranded-turns` against the OLD build must report 0), deploy `.9`, run
+`stranded-turns` again and cancel what it lists. Migration `0036` (`peer_messages.background`, nullable
+JSONB) is additive and safe under a running `.8` build. Nothing was deployed under `.3`-`.8` on this
+branch, so the bumps collapse into one before the first release.
+
+### Background asks: looking and stopping
+
+Background asks of one conversation:
+`SELECT correlation_id, target_agent_id, state, answered_at, cancelled_at FROM peer_messages WHERE
+from_tenant_id = '<tenant>' AND from_session_id = '<session>' AND background IS NOT NULL;`
+
+Closing a conversation stops its running background asks (rows, callee workflows and what those
+asked in turn) and returns the handles it ended; like `cancel_turn` it runs outside a workflow:
+`await turn_workflow.close_conversation(SessionRef(...), "conversation closed")`. Cancelling the
+asking TURN (`cancel_turn`) does not touch them. A follow-up turn already created for an ask that
+finished before the close still runs. If the answer is recorded and the follow-up never appeared (the
+enqueue failed: the callee workflow is in `ERROR`), the answer is on the row
+(`SELECT answer FROM peer_messages WHERE correlation_id = '<handle>'`); nothing re-enqueues it.
 
 ## Peer redelivery lease
 

@@ -159,6 +159,7 @@ class _Mailbox:
         request_key: str | None = None,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: object | None = None,
     ) -> str:
         assert request_key is not None
         corr = peer_ask_id(str(turn_id), request_key, str(target), question)

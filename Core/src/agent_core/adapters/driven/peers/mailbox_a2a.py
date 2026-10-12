@@ -86,13 +86,15 @@ from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
 from agent_core.domain.peers import (
     AgentId,
     AgentRef,
+    BackgroundAsk,
     PeerAnswerRefusedError,
+    PeerBackgroundRefusedError,
     PeerContinuationRefusedError,
     PeerPolicy,
     new_answer_token,
     peer_ask_id,
 )
-from agent_core.domain.turn import SessionRef, TurnId
+from agent_core.domain.turn import CallerIdentity, SessionRef, TurnId
 
 _AGENT_CARD_PATH: Final[str] = "/.well-known/agent-card.json"
 
@@ -179,6 +181,7 @@ class A2AAgentMailbox:
         request_key: str | None = None,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: CallerIdentity | None = None,
     ) -> str:
         """Send one A2A `message/send` request and return the task id as correlation id.
 
@@ -199,6 +202,12 @@ class A2AAgentMailbox:
         replayed send carries the same id and a peer that de-duplicates on it runs the task
         once. Omitted, no `messageId` is sent (the previous behaviour).
         """
+        if background_caller is not None:
+            # The answer of a background ask is delivered to a conversation that has moved on, from
+            # a row that survives a restart. This adapter's answers live in this process's memory
+            # (see the module docstring), so it cannot honour that: a refusal, never a silent
+            # foreground ask the asker would not wait for.
+            raise PeerBackgroundRefusedError("this peer cannot run in the background over A2A")
         if continue_session is not None:
             # The A2A peer owns its sessions: this adapter could only forward a context id the peer
             # may not honour, and a follow-up that silently starts fresh is worse than a refusal.
@@ -339,6 +348,13 @@ class A2AAgentMailbox:
         )
         self._cancelled.update(open_ids)
         return tuple(open_ids)
+
+    async def background_asks(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
+        """No background asks over A2A (`ask` refuses them): always empty."""
+        return ()
+
+    async def cancel_background(self, session: SessionRef, reason: str) -> tuple[str, ...]:
+        return ()
 
     async def is_cancelled(self, correlation_id: str) -> bool:
         return correlation_id in self._cancelled

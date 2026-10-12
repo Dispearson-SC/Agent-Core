@@ -126,6 +126,7 @@ def profiles() -> dict[str, AgentProfile]:
                 peers=tuple(AgentRef(agent_id=AgentId(o), display_name=o) for o in others),
                 max_hops=3,
                 reply_timeout_seconds=600,
+                allow_background=True,
             ),
         )
 
@@ -147,6 +148,10 @@ class Start:
     def __init__(self, *, c_waits_for_a_human: bool = False) -> None:
         self.c_waits_for_a_human = c_waits_for_a_human
         self.b_answers_directly = False
+        # C19. A asks B in the BACKGROUND, and B never finishes while `b_hangs` is set (a worker
+        # that is killed mid-turn, once the engine is destroyed under it).
+        self.a_asks_in_background = False
+        self.b_hangs = False
         # Approvals A asks of its own people instead of asking B (C6): their tool call ids.
         self.a_asks_people: tuple[str, ...] = ()
         self.requests: list[TurnRequest] = []
@@ -167,13 +172,24 @@ class Start:
                     for call in self.a_asks_people
                 ),
             )
+        if request.profile_id == B and self.b_hangs:
+            await asyncio.Event().wait()
         asks = {A: B} if self.b_answers_directly else {A: B, B: C}
+        if request.profile_id == A and request.input.text.startswith("[Background result]"):
+            # C19. The follow-up turn that carries a background answer back: it just finishes.
+            return TurnOutcome(turn_id=turn_id, result=TurnResult(text="a follow-up"))
         if request.profile_id in asks:
+            arguments: dict[str, Any] = {
+                "target": asks[request.profile_id],
+                "question": "pass it on",
+            }
+            if request.profile_id == A and self.a_asks_in_background:
+                arguments["background"] = True
             pending = PendingRequest(
                 kind=PendingKind.DELEGATION,
                 tool_call_id=ToolCallId(f"call_{request.profile_id}"),
                 tool_name="ask_peer",
-                arguments={"target": asks[request.profile_id], "question": "pass it on"},
+                arguments=arguments,
                 reason="asking",
             )
             return TurnOutcome(turn_id=turn_id, pending=(pending,))

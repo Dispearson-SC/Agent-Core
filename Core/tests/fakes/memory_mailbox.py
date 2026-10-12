@@ -21,6 +21,8 @@ from agent_core.adapters.driven.peers.mailbox import PeerAsk, wrap_peer_answer
 from agent_core.domain.peers import (
     AgentId,
     AgentRef,
+    BackgroundAsk,
+    BackgroundState,
     PeerAnswerRefusedError,
     PeerContinuationRefusedError,
     PeerPolicy,
@@ -30,7 +32,7 @@ from agent_core.domain.peers import (
     peer_ask_id,
     peer_root_origin,
 )
-from agent_core.domain.turn import SessionRef, TurnId
+from agent_core.domain.turn import CallerIdentity, SessionRef, TurnId
 
 
 @dataclass
@@ -54,6 +56,9 @@ class _Row:
     cancel_reason: str | None = None
     peer_session_id: str | None = None
     root_turn_id: str | None = None
+    background_caller: CallerIdentity | None = None
+    enqueued_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 class InMemoryAgentMailbox:
@@ -81,6 +86,7 @@ class InMemoryAgentMailbox:
         request_key: str | None = None,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: CallerIdentity | None = None,
     ) -> str:
         if continue_session is not None:
             self._check_continuation(continue_session, target, from_session, asker)
@@ -106,6 +112,8 @@ class InMemoryAgentMailbox:
             seq=self._seq,
             max_concurrent=policy.max_concurrent_asks,
             root_turn_id=root_turn_id if root_turn_id is not None else str(turn_id),
+            background_caller=background_caller,
+            enqueued_at=self._clock(),
             peer_session_id=(
                 continue_session
                 if continue_session is not None
@@ -155,6 +163,7 @@ class InMemoryAgentMailbox:
         row.answer = answer
         row.answer_failed = failed
         row.state = "answered"
+        row.finished_at = self._clock()
 
     async def answer_failed(self, correlation_id: str) -> bool:
         row = self.rows.get(correlation_id)
@@ -166,17 +175,54 @@ class InMemoryAgentMailbox:
             return False
         row.state = "cancelled"
         row.cancel_reason = reason
+        row.finished_at = self._clock()
         return True
 
     async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
         ended = sorted(
             row.correlation_id
             for row in self.rows.values()
-            if row.turn_id == turn_id and row.state in ("queued", "delivered")
+            if row.turn_id == turn_id
+            and row.state in ("queued", "delivered")
+            and row.background_caller is None  # a background ask outlives its asking turn (C19)
         )
         for correlation_id in ended:
             await self.cancel(correlation_id, reason)
         return tuple(ended)
+
+    async def cancel_background(self, session: SessionRef, reason: str) -> tuple[str, ...]:
+        ended = sorted(
+            row.correlation_id
+            for row in self.rows.values()
+            if row.background_caller is not None
+            and row.from_session == session
+            and row.state in ("queued", "delivered")
+        )
+        for correlation_id in ended:
+            await self.cancel(correlation_id, reason)
+        return tuple(ended)
+
+    async def background_asks(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
+        mine = sorted(
+            (
+                row
+                for row in self.rows.values()
+                if row.background_caller is not None and row.from_session == session
+            ),
+            key=lambda row: (-row.seq, row.correlation_id),
+        )[:50]
+        return tuple(
+            BackgroundAsk(
+                handle=row.correlation_id,
+                target=str(row.target),
+                question=row.question,
+                asked_at=row.enqueued_at or self._clock(),
+                state=_state_of(row),
+                finished_at=row.finished_at,
+                session=row.peer_session_id,
+            )
+            for row in mine
+        )
 
     async def is_cancelled(self, correlation_id: str) -> bool:
         row = self.rows.get(correlation_id)
@@ -221,6 +267,7 @@ class InMemoryAgentMailbox:
             failures=row.failures,
             peer_session_id=row.peer_session_id,
             root_turn_id=row.root_turn_id,
+            background_caller=row.background_caller,
         )
 
     def _at_its_cap(self, row: _Row) -> bool:
@@ -284,3 +331,11 @@ class InMemoryAgentMailbox:
         row = self.rows[correlation_id]
         if row.delivered_at is not None:
             row.delivered_at -= by
+
+
+def _state_of(row: _Row) -> BackgroundState:
+    if row.state == "cancelled":
+        return BackgroundState.CANCELLED
+    if row.state == "answered":
+        return BackgroundState.FAILED if row.answer_failed else BackgroundState.ANSWERED
+    return BackgroundState.RUNNING if row.state == "delivered" else BackgroundState.QUEUED

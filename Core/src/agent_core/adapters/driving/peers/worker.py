@@ -145,6 +145,7 @@ from agent_core.domain.peers import (
 )
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
+    BackgroundReturn,
     CallerIdentity,
     PeerOwner,
     SessionId,
@@ -496,7 +497,24 @@ def peer_turn_request(ask: PeerAsk, *, session: SessionRef) -> TurnRequest:
             asker_turn_id=str(ask.turn_id),
             asker=None if ask.asker is None else str(ask.asker),
             call=ask.correlation_id,
+            background=_background_return(ask),
         ),
+    )
+
+
+def _background_return(ask: PeerAsk) -> BackgroundReturn | None:
+    """Where a BACKGROUND ask's answer goes back to (C19, D49), or None for an ordinary ask.
+
+    The conversation and tenant are the row's own; the identity is the one the asking turn ran
+    under, snapshotted on the row when the ask was made. The profile to run the follow-up as is the
+    asker's: a row that never recorded one (`asker is None` means UNKNOWN) has no return address,
+    and none is invented from the session. The callee itself still runs as a `peer`, never as the
+    person: this value only says where the answer is delivered afterwards.
+    """
+    if ask.background_caller is None or ask.asker is None:
+        return None
+    return BackgroundReturn(
+        session=ask.from_session, profile_id=str(ask.asker), caller=ask.background_caller
     )
 
 

@@ -599,5 +599,5 @@ def test_the_peer_context_step_moved_the_pinned_application_version_to_eight() -
     first, OPERATIONS.md). C9, C12 and C16 added no step: one bump for the batch."""
     from agent_core import composition
 
-    assert composition.PINNED_DBOS_APPLICATION_VERSION == "agent-core-turns.8"
+    assert int(composition.PINNED_DBOS_APPLICATION_VERSION.rsplit(".", 1)[1]) >= 8
     assert hasattr(turn_workflow, "_step_peer_context")

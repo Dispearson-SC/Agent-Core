@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import secrets
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Final, NewType
 from uuid import UUID, uuid5
@@ -62,6 +63,10 @@ DEFAULT_MAX_CONTEXT_CHARS: Final[int] = 4_000
 # many peer asks one model step may make, and how many of one asking turn run at the same time.
 DEFAULT_MAX_PARALLEL_ASKS: Final[int] = 8
 DEFAULT_MAX_CONCURRENT_ASKS: Final[int] = 4
+
+# C19 (D49). Default of `PeerPolicy.max_background_asks`: how many background asks one
+# conversation may have running at once.
+DEFAULT_MAX_BACKGROUND_ASKS: Final[int] = 4
 
 # What a peer ask is answered with when the answering turn could not produce an answer. FIXED
 # text: the exception message stays out of what the asking model reads, and a person's
@@ -174,6 +179,68 @@ class PeerContinuationRefusedError(Exception):
         self.reason = reason
 
 
+class PeerBackgroundRefusedError(Exception):
+    """An ask asked to run in the background where it cannot (C19, D49).
+
+    Raised by a mailbox whose transport cannot deliver a late answer to a conversation that has
+    moved on (the A2A client). The workflow turns it into a refused result the model can read.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def background_followup_turn_id(correlation_id: str) -> str:
+    """The id of the turn that carries a background ask's answer back to its conversation. Pure.
+
+    DETERMINISTIC ON PURPOSE (C19): the follow-up is enqueued under this workflow id, so a callee
+    workflow that is replayed, or a second one that races it, names the same turn and DBOS runs it
+    once. A UUID because it is a turn id (the turn tables are UUID columns, D33).
+    """
+    return str(uuid5(_PEER_ID_NAMESPACE, f"background:{correlation_id}"))
+
+
+class BackgroundState(StrEnum):
+    """Where a background ask is, from its owner conversation's point of view (C19, C20).
+
+    QUEUED    - waiting for a worker (or for the asking turn's concurrency cap).
+    RUNNING   - claimed; the callee is working or waiting for a person.
+    ANSWERED  - the peer answered; the answer was (or is being) delivered as a follow-up.
+    FAILED    - the peer's turn failed or was closed.
+    CANCELLED - stopped by the owner, or the conversation was closed.
+    """
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    ANSWERED = "answered"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundAsk:
+    """One background ask as the conversation that owns it may see it (C20).
+
+    `handle` is the correlation id. `question` is what was asked (the model wrote it, so it is the
+    owner's own text), never the answer: an answer reaches the model only through the follow-up
+    turn, inside the untrusted wrapper.
+    """
+
+    handle: str
+    target: str
+    state: BackgroundState
+    question: str
+    asked_at: datetime
+    finished_at: datetime | None = None
+    # The peer session the callee runs in: what a message to it continues (C20). None if unknown.
+    session: str | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.state in (BackgroundState.QUEUED, BackgroundState.RUNNING)
+
+
 class FanOutPolicy(StrEnum):
     """What one failed ask does to the other asks made in the same model step (C10, D39).
 
@@ -267,6 +334,12 @@ class PeerPolicy:
     # C18 (D47). With `visibility` `summary` or `full`, the most characters of the asking
     # conversation a peer is told. Part of the content hash.
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS
+    # C19 (D49). Whether this profile's `ask_peer` may run in the BACKGROUND (`background=true`):
+    # the call returns a handle at once and the answer comes back later as a follow-up turn of the
+    # same conversation. Off by default; part of the content hash. And how many such asks one
+    # conversation may have running at once.
+    allow_background: bool = False
+    max_background_asks: int = DEFAULT_MAX_BACKGROUND_ASKS
 
     def may_ask(self, agent_id: AgentId) -> bool:
         """Whether this profile may address `agent_id`. Empty `peers` means nobody.

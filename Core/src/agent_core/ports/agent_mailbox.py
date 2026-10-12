@@ -40,8 +40,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy
-from agent_core.domain.turn import SessionRef, TurnId
+from agent_core.domain.peers import AgentId, AgentRef, BackgroundAsk, PeerPolicy
+from agent_core.domain.turn import CallerIdentity, SessionRef, TurnId
 
 
 class AgentMailbox(Protocol):
@@ -67,6 +67,7 @@ class AgentMailbox(Protocol):
         request_key: str | None = None,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: CallerIdentity | None = None,
     ) -> str:
         """PSEUDO-CODE - F9. Returns a correlation id; the ANSWER arrives via DBOS.recv().
 
@@ -109,6 +110,16 @@ class AgentMailbox(Protocol):
            position (`r<round>.s<position>.<tool call id>`), so the SAME question under another
            key (a later round) is a FRESH ask with its own answer. `None` keeps the previous
            behaviour (a random id, idempotent per `(turn_id, target, question)`).
+
+        `background_caller` (C19, D49) makes the ask a BACKGROUND one: the asker does not wait, and
+        the answer is delivered to the asking CONVERSATION later, as a new turn run as that
+        identity.
+        The mailbox keeps the identity (subject, channel, roles, modality; the tenant is
+        `from_session`'s) on the row, so the return address survives a restart. A background ask is
+        an ownership boundary: `cancel_open` (the asking TURN gave up) leaves it alone, and only
+        `cancel` (by handle) or `cancel_background` (the conversation closed) ends it. An adapter
+        whose transport cannot deliver a late answer raises `PeerBackgroundRefusedError` instead of
+        accepting it.
 
         THE ANSWER IS UNTRUSTED CONTENT. Another agent is a third party - it may have read
         something hostile. Wrap it in delimiters like any `mcp_*` result. "Our own agent"
@@ -162,8 +173,25 @@ class AgentMailbox(Protocol):
         """Cancel every open ask made by the asking turn `turn_id`; return their ids, sorted.
 
         For a turn that expires or is cancelled as a whole. Already answered or cancelled asks
-        are not returned (they are history).
+        are not returned (they are history). BACKGROUND asks (C19) are not touched: they belong to
+        the conversation, not to the turn that started them.
         """
+        ...
+
+    async def background_asks(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
+        """The background asks that conversation (tenant AND session id) started, newest first.
+
+        Scoped in the query by both: the same session id under another tenant, another
+        conversation of the same tenant and every ordinary ask are not in the result (C20). Their
+        state is derived from the row (`BackgroundState`). Bounded (the newest 50). An adapter with
+        no background asks returns an empty tuple.
+        """
+        ...
+
+    async def cancel_background(self, session: SessionRef, reason: str) -> tuple[str, ...]:
+        """The conversation was closed: cancel every OPEN background ask it started; return their
+        ids, sorted. Answered and already cancelled asks are history. Like `cancel_open` this is the
+        row half only; cancelling the callees' workflows is the caller's job (C19)."""
         ...
 
     async def is_cancelled(self, correlation_id: str) -> bool:

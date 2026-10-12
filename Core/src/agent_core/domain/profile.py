@@ -545,6 +545,14 @@ def _build_peer_policy(data: object) -> PeerPolicy:
             mapping.get("allow_continuation", defaults.allow_continuation),
             where="peers.allow_continuation",
         ),
+        allow_background=_strict_bool(
+            mapping.get("allow_background", defaults.allow_background),
+            where="peers.allow_background",
+        ),
+        max_background_asks=_positive_int(
+            mapping.get("max_background_asks", defaults.max_background_asks),
+            where="peers.max_background_asks",
+        ),
     )
 
 

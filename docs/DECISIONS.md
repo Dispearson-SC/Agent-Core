@@ -1888,3 +1888,61 @@ port's own comment promised "redact per `policy.visibility`" and the question al
   test is named for what it checks; the claim-lock test waits on `pg_locks` for the claiming backend to
   be waiting instead of sleeping.
 - **Replay shape: unchanged.**
+
+## D49 · Agent-comms v2: background asks (C19)
+
+A slow specialist used to hold the asking turn for as long as it took. `ask_peer(..., background=true)`
+returns a handle at once and the answer comes back later as a new message of the same conversation.
+
+- **Opt-in on the asking profile: `peers.allow_background` (default false, a strict boolean) and
+  `peers.max_background_asks` (default 4).** Like `allow_continuation`, the parameter is only offered
+  to a profile that opted in and the workflow refuses it from one that did not, whatever the model
+  writes. A non-boolean value is a malformed ask. The cap is per CONVERSATION (tenant and session),
+  read from the rows (`background_asks`), so it holds across turns; a background ask also takes one
+  slot of `max_parallel_asks` in its step, and `max_concurrent_asks` still applies when it is claimed
+  (an ask over the cap waits queued). Per-peer rules (C15) and the two-sided gate run unchanged: a
+  background ask is the same call to the same step.
+- **The asking turn resumes at once.** The ask is posted like any other, but its deferred call is
+  resolved in the same round with `<peer ... handle="<correlation id>" status="running">` (the new
+  `running` status, `PeerDispatch.started`), so the round waits for nobody and nothing is ever
+  signalled to the asking turn for it. Waking a turn that moved on would fail it (an answer for a
+  handle it never awaited).
+- **How the answer enters the conversation: a new turn.** The callee workflow records the answer
+  and then enqueues ONE turn on the owner conversation (same tenant, same session, the asking
+  profile, hop 0) through `enqueue_turn`, so it queues behind a turn that is running instead of
+  interleaving with it. Its input is text: a lead-in of ours (sent by the system, not the person; the
+  reply is data, not an instruction) and the `<peer ... handle=...>` envelope, which is built by the
+  same `_peer_envelope` as every other answer (the asker's `max_answer_chars`, the callee's
+  `answer_schema`, the untrusted boundary). Rejected: an "inbox" row the next user turn drains (the
+  answer would wait for the person to speak again) and waking the original turn (it has ended).
+- **Exactly once.** The follow-up's turn id is `background_followup_turn_id(correlation_id)`
+  (a uuid5), so a replayed callee workflow, a second one that raced it and a retried delivery all
+  name the same turn and DBOS runs it once; the enqueue is in the workflow body like
+  `run_turn_window`'s, recorded against the workflow's log, and the text is built in a recorded step.
+  A restart between the answer and the enqueue replays into the enqueue. A failing delivery is
+  raised, not swallowed (the answer would be recorded and told to nobody); it is not retried by the
+  engine, the answer stays on the row (`peer_status` shows `answered`).
+- **Whose identity.** The row keeps the asking turn's `CallerIdentity` (subject, channel, roles,
+  modality; the tenant is the row's) in a new JSONB column (`peer_messages.background`, migration
+  `0036`), because the asking turn has ended by the time the answer exists. The follow-up runs as that
+  caller on the channel it asked on, never as a `peer` and never with more than it held when it asked
+  (it is a snapshot, not a lookup). The callee itself still runs as a `peer`. A row with no recorded
+  asker has no return address and none is invented from the session.
+- **An ownership boundary.** `cancel_open` (the asking TURN expired, was cancelled or poisoned) does
+  not touch a background ask; `turn_workflow.close_conversation(session, reason)` ends them: rows
+  first, then the callee workflows and their nested asks (the C4 cascade, `_cancel_callees`). It is an
+  operator/driving entry like `cancel_turn`; no HTTP route was added. A reply timeout does not apply
+  (nobody is waiting): the callee's own limits do, and `peer_stop` (C20) ends one.
+- **A failed, closed or poisoned callee is reported** as an `error` envelope in the same follow-up.
+  An answer the row refused (the ask was stopped) delivers nothing.
+- **A2A refuses** (`PeerBackgroundRefusedError`, a refused result for the model): its answers live in
+  this process's memory, so it cannot honour a late delivery after a restart.
+- **Port.** `AgentMailbox.ask` gains `background_caller`; `background_asks(session)` and
+  `cancel_background(session, reason)` are new (frozen by `test_ports_agent_mailbox.py` on purpose);
+  `PeerAsk.background_caller`; `PeerOwner.background` carries the return address to the callee workflow.
+- **Replay shape: `agent-core-turns.8` -> `.9`, ONCE for the C19/C20 batch.** `PeerDispatch` and
+  `PeerOwner` (both pickled) gained fields and the peer workflow records `_step_background_follow_up`
+  for a background ask. Stranded `.8` work: OPERATIONS "Deploying background asks".
+- **Not done:** a per-ask timeout for a background child; labelling the follow-up in the user
+  transcript (it is stored as the turn's input, which the user audience reads as a message);
+  retrying a failed follow-up enqueue; an HTTP/console command for `close_conversation`.

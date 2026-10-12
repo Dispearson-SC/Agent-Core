@@ -197,6 +197,7 @@ class _SilentMailbox:
         request_key: str | None = None,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: CallerIdentity | None = None,
     ) -> str:
         self.sent.append((target, question, hop))
         return "corr-1"
@@ -268,6 +269,7 @@ def test_every_send_carries_a_required_hop_count() -> None:
         "request_key",
         "continue_session",
         "root_turn_id",
+        "background_caller",
     ], (
         "ask is frozen at the policy that authorises it, the peer, the question, the "
         "originating session and turn, the depth, and who is asking. The policy travels "
@@ -298,7 +300,9 @@ def test_protocol_exposes_no_blocking_receive() -> None:
         "answer",
         "answer_failed",
         "ask",
+        "background_asks",
         "cancel",
+        "cancel_background",
         "cancel_open",
         "discover",
         "is_cancelled",
@@ -308,7 +312,8 @@ def test_protocol_exposes_no_blocking_receive() -> None:
         "AgentMailbox answers one question - how does one agent ask another - through "
         "discover + ask + answer + read_answer, plus the asker's way out of an ask it no "
         "longer wants (C4: cancel, cancel_open, is_cancelled) and the generation a cancel must "
-        "reach (D33: redeliveries). "
+        "reach (D33: redeliveries), and a conversation's background asks (C19: background_asks, "
+        "cancel_background). "
         f"Found: {members}. Asking and "
         "reading the reply back are two halves of ONE question, and a port that declares "
         "only the first half forces application code to name a concrete adapter to get "
@@ -495,8 +500,8 @@ def _stub(*, read_answer: bool) -> str:
     return f'''
 from __future__ import annotations
 
-from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy
-from agent_core.domain.turn import SessionRef, TurnId
+from agent_core.domain.peers import AgentId, AgentRef, BackgroundAsk, PeerPolicy
+from agent_core.domain.turn import CallerIdentity, SessionRef, TurnId
 from agent_core.ports.agent_mailbox import AgentMailbox
 
 
@@ -517,6 +522,7 @@ class StubMailbox:
         request_key: str | None = None,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: CallerIdentity | None = None,
     ) -> str:
         raise NotImplementedError
 
@@ -534,6 +540,12 @@ class StubMailbox:
         raise NotImplementedError
 
     async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
+        raise NotImplementedError
+
+    async def background_asks(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
+        raise NotImplementedError
+
+    async def cancel_background(self, session: SessionRef, reason: str) -> tuple[str, ...]:
         raise NotImplementedError
 
     async def is_cancelled(self, correlation_id: str) -> bool:
@@ -615,9 +627,10 @@ class _RecordsWhoAsked:
         request_key: str | None = None,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: CallerIdentity | None = None,
     ) -> str:
         del policy, target, question, from_session, turn_id, hop, request_key
-        del continue_session, root_turn_id
+        del continue_session, root_turn_id, background_caller
         self.askers.append(asker)
         return f"corr-{len(self.askers)}"
 
@@ -744,6 +757,7 @@ def test_every_send_names_who_is_asking() -> None:
         "request_key",
         "continue_session",
         "root_turn_id",
+        "background_caller",
     ], (
         "ask is frozen at the policy that authorises it, the peer, the question, the "
         "originating session and turn, the depth, and who is asking. The policy travels "

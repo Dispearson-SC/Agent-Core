@@ -492,7 +492,13 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # `_step_read_peer_answer` returns the callee's failure flag too, so a turn suspended under .6 would
 # replay into a different step sequence. In-flight .6 turns are stranded on purpose (drain first,
 # OPERATIONS.md). Nothing was deployed under .3-.6, so for this branch it is a formality.
-PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.8"
+# .7 -> .8 with D47 (C18): a round that asks a peer records `_step_peer_context` first.
+# .8 -> .9 with D49 (C19/C20, ONCE for the background-agents batch): `PeerDispatch` gained a field
+# (`started`) and `PeerOwner` another (`background`), both pickled into the operation log and the
+# peer workflow's input, and the peer workflow records `_step_background_follow_up` for a background
+# ask. A turn or peer workflow suspended under .8 is stranded on purpose (drain first,
+# OPERATIONS.md). Nothing was deployed under .3-.8.
+PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.9"
 
 # C5 (D32). The default of `Settings.max_turn_attempts` is `DEFAULT_MAX_TURN_ATTEMPTS`, defined once
 # in `turn_workflow` (where the budget is enforced) and imported above; D33 removed the second copy.

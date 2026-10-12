@@ -716,6 +716,16 @@ one-sided or looping entry, a hop limit that would refuse a declared edge, a pee
 with peers switched off, or (when the policy directory is managed from files) an edge no `ask_peer`
 rule allows or one that a rule denies for every caller. Nothing declared, nothing checked.
 
+**Background asks (C19, D49).** `ask_peer(..., background=true)`, offered only to a profile with
+`peers.allow_background: true`, posts the ask and resolves the call in the same round with
+`status="running"` and a `handle` (the correlation id), so the asking turn does not wait. The callee
+workflow records the answer and enqueues one turn on the owner conversation under
+`background_followup_turn_id(<id>)` (exactly once), run as the identity that asked (kept on the row,
+`peer_messages.background`), with the `<peer handle=...>` envelope as its input. It queues behind a
+running turn of that conversation. `max_background_asks` (default 4) bounds how many a conversation
+has running. A background ask outlives the asking turn (`cancel_open` skips it) and ends with
+`close_conversation(session)` or by handle; A2A refuses it.
+
 **Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
 and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the
 two-sided gate), the caller's policy rules and each callee profile's `description`. A denied,

@@ -15,7 +15,7 @@ import psycopg
 from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
 from agent_core.adapters.driven.peers.mailbox_a2a import A2AAgentMailbox
 from agent_core.domain.peers import AgentId
-from agent_core.domain.turn import SessionRef, TurnId
+from agent_core.domain.turn import CallerIdentity, SessionRef, TurnId
 from tests.contract.mailbox_conformance import ASKER, LEASE, POLICY, SESSION, TARGET
 from tests.fakes.controlled_mailbox import ControlledMailbox
 from tests.fakes.memory_mailbox import InMemoryAgentMailbox
@@ -26,6 +26,7 @@ class PgHarness:
 
     supports_queue = True
     supports_continuation = True
+    supports_background = True
 
     def __init__(self, conninfo: str) -> None:
         self._conninfo = conninfo
@@ -43,6 +44,7 @@ class PgHarness:
         asker: AgentId = ASKER,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: CallerIdentity | None = None,
     ) -> str:
         policy = (
             POLICY
@@ -60,6 +62,7 @@ class PgHarness:
             request_key=request_key,
             continue_session=continue_session,
             root_turn_id=root_turn_id,
+            **({} if background_caller is None else {"background_caller": background_caller}),
         )
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -108,6 +111,7 @@ class A2AHarness:
 
     supports_queue = False
     supports_continuation = False
+    supports_background = False
 
     def __init__(self) -> None:
         self._messages: dict[str, dict[str, Any]] = {}  # task id -> first message
@@ -139,6 +143,7 @@ class A2AHarness:
         asker: AgentId = ASKER,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: CallerIdentity | None = None,
     ) -> str:
         policy = (
             POLICY
@@ -156,6 +161,7 @@ class A2AHarness:
             request_key=request_key,
             continue_session=continue_session,
             root_turn_id=root_turn_id,
+            **({} if background_caller is None else {"background_caller": background_caller}),
         )
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -172,6 +178,7 @@ class MemoryHarness:
 
     supports_queue = True
     supports_continuation = True
+    supports_background = True
 
     def __init__(self, *, controlled: bool = False) -> None:
         self.inner = InMemoryAgentMailbox()
@@ -189,6 +196,7 @@ class MemoryHarness:
         asker: AgentId = ASKER,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: CallerIdentity | None = None,
     ) -> str:
         policy = (
             POLICY
@@ -206,6 +214,7 @@ class MemoryHarness:
             request_key=request_key,
             continue_session=continue_session,
             root_turn_id=root_turn_id,
+            **({} if background_caller is None else {"background_caller": background_caller}),
         )
 
     def callee_token(self, correlation_id: str) -> str | None:

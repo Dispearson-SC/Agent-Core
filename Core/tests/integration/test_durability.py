@@ -503,6 +503,7 @@ class _RecordingMailbox:
         request_key: str | None = None,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: object | None = None,
     ) -> str:
         del policy, from_session, turn_id, asker
         self.asks.append((target, question, hop))

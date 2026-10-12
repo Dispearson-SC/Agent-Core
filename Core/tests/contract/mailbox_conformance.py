@@ -44,7 +44,9 @@ from agent_core.adapters.driven.agent_pydantic.runner import UNTRUSTED_CLOSE, UN
 from agent_core.domain.peers import (
     AgentId,
     AgentRef,
+    BackgroundState,
     PeerAnswerRefusedError,
+    PeerBackgroundRefusedError,
     PeerContinuationRefusedError,
     PeerPolicy,
     new_answer_token,
@@ -52,7 +54,7 @@ from agent_core.domain.peers import (
     peer_session_key,
     peer_session_name,
 )
-from agent_core.domain.turn import SessionId, SessionRef, TenantId
+from agent_core.domain.turn import CallerIdentity, SessionId, SessionRef, TenantId
 from agent_core.ports.agent_mailbox import AgentMailbox
 
 TARGET = AgentId("personal-assistant")
@@ -66,6 +68,13 @@ POLICY = PeerPolicy(
 )
 SESSION = SessionRef(session_id=SessionId("s-conformance"), tenant_id=TenantId("t-1"))
 LEASE = timedelta(seconds=300)
+CALLER = CallerIdentity(
+    subject_id="person-1",
+    channel="whatsapp",
+    tenant_id=SESSION.tenant_id,
+    roles=frozenset({"customer", "vip"}),
+    modality="voice",
+)
 
 
 class MailboxHarness(Protocol):
@@ -74,6 +83,7 @@ class MailboxHarness(Protocol):
     mailbox: AgentMailbox
     supports_queue: bool
     supports_continuation: bool
+    supports_background: bool
 
     async def ask(
         self,
@@ -87,11 +97,13 @@ class MailboxHarness(Protocol):
         asker: AgentId = ASKER,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: CallerIdentity | None = None,
     ) -> str:
         """Enqueue one ask through the port and return its correlation id. `max_concurrent`
         overrides the asking policy's `max_concurrent_asks` (C11); `continue_session` asks to run
         in an earlier peer session (C12); `root_turn_id` names the turn a person started when the
-        asking turn is itself a callee's (C16)."""
+        asking turn is itself a callee's (C16); `background_caller` makes it a background ask
+        whose answer goes back to that identity (C19)."""
         ...
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -122,6 +134,12 @@ def _queue(harness: MailboxHarness) -> QueueHarness:
     if not harness.supports_queue:
         pytest.skip("this adapter has no answering-side queue (its transport is the wire)")
     return harness  # type: ignore[return-value]
+
+
+def _background(harness: MailboxHarness) -> MailboxHarness:
+    if not harness.supports_background:
+        pytest.skip("this adapter cannot deliver a late answer to a conversation that moved on")
+    return harness
 
 
 def _continuation(harness: MailboxHarness) -> MailboxHarness:
@@ -592,6 +610,132 @@ class MailboxConformance:
         assert [c.root_turn_id for c in claimed] == ["root-turn", "root-turn"], (
             "a direct ask hangs from its own asking turn, a nested one from the root it was given"
         )
+
+    # --- background asks (C19, C20) -------------------------------------------------------------
+
+    async def test_an_adapter_that_cannot_run_in_the_background_refuses_it_visibly(
+        self, harness: MailboxHarness
+    ) -> None:
+        if harness.supports_background:
+            pytest.skip("this adapter supports background asks")
+
+        with pytest.raises(PeerBackgroundRefusedError):
+            await harness.ask("slow one", background_caller=CALLER)
+
+        assert await harness.mailbox.background_asks(SESSION) == ()
+
+    async def test_a_replayed_background_ask_names_the_same_ask(
+        self, harness: MailboxHarness
+    ) -> None:
+        _background(harness)
+        first = await harness.ask("slow one", background_caller=CALLER)
+        replay = await harness.ask("slow one", background_caller=CALLER)
+
+        assert replay == first
+        assert len(await harness.mailbox.background_asks(SESSION)) == 1
+
+    async def test_background_asks_are_listed_for_their_own_conversation_only(
+        self, harness: MailboxHarness
+    ) -> None:
+        _background(harness)
+        mine = await harness.ask("mine", request_key="tc-1", background_caller=CALLER)
+        await harness.ask("not background", request_key="tc-2")
+        other_case = SessionRef(session_id=SessionId("another-case"), tenant_id=SESSION.tenant_id)
+        await harness.ask(
+            "another case", request_key="tc-3", session=other_case, background_caller=CALLER
+        )
+        other_tenant = SessionRef(session_id=SESSION.session_id, tenant_id=TenantId("tenant-2"))
+        await harness.ask(
+            "another tenant", request_key="tc-4", session=other_tenant, background_caller=CALLER
+        )
+
+        listed = await harness.mailbox.background_asks(SESSION)
+
+        assert [(a.handle, a.target, a.question, a.state) for a in listed] == [
+            (mine, str(TARGET), "mine", BackgroundState.QUEUED)
+        ]
+        assert listed[0].is_open
+
+    async def test_a_background_ask_goes_queued_running_answered(
+        self, harness: MailboxHarness
+    ) -> None:
+        queue = _queue(_background(harness))
+        corr = await queue.ask("slow one", background_caller=CALLER)
+
+        async def state() -> BackgroundState:
+            (only,) = await queue.mailbox.background_asks(SESSION)
+            return only.state
+
+        assert await state() is BackgroundState.QUEUED
+        claimed = await queue.claim()
+        assert claimed is not None and claimed.correlation_id == corr
+        assert await state() is BackgroundState.RUNNING
+        await queue.mailbox.answer(corr, "done", answer_token=await _token(queue, corr))
+        assert await state() is BackgroundState.ANSWERED
+        (only,) = await queue.mailbox.background_asks(SESSION)
+        assert not only.is_open and only.finished_at is not None
+
+    async def test_a_failed_or_cancelled_background_ask_says_so(
+        self, harness: MailboxHarness
+    ) -> None:
+        queue = _queue(_background(harness))
+        failed = await queue.ask("one", request_key="tc-1", background_caller=CALLER)
+        stopped = await queue.ask("two", request_key="tc-2", background_caller=CALLER)
+        await queue.mailbox.answer(
+            failed, "sorry", answer_token=await _token(queue, failed), failed=True
+        )
+        await queue.mailbox.cancel(stopped, "owner stopped it")
+
+        states = {a.handle: a.state for a in await queue.mailbox.background_asks(SESSION)}
+
+        assert states == {failed: BackgroundState.FAILED, stopped: BackgroundState.CANCELLED}
+
+    async def test_a_claimed_background_ask_carries_the_return_address(
+        self, harness: MailboxHarness
+    ) -> None:
+        queue = _queue(_background(harness))
+        background = await queue.ask("slow one", request_key="tc-1", background_caller=CALLER)
+        ordinary = await queue.ask("quick one", request_key="tc-2")
+
+        first, second = await queue.claim(), await queue.claim()
+
+        assert (first.correlation_id, second.correlation_id) == (background, ordinary)
+        assert first.background_caller == CALLER, "subject, channel, tenant, roles and modality"
+        assert second.background_caller is None
+
+    async def test_cancelling_a_turn_does_not_cancel_the_background_asks_it_started(
+        self, harness: MailboxHarness
+    ) -> None:
+        """A background run is an ownership boundary: it survives the asking turn (C19)."""
+        _background(harness)
+        background = await harness.ask("slow", turn_id="turn-a", request_key="tc-1",
+                                       background_caller=CALLER)
+        ordinary = await harness.ask("quick", turn_id="turn-a", request_key="tc-2")
+
+        assert await harness.mailbox.cancel_open("turn-a", "asking turn cancelled") == (ordinary,)
+
+        assert await harness.mailbox.is_cancelled(background) is False
+
+    async def test_closing_the_conversation_cancels_its_open_background_asks_only(
+        self, harness: MailboxHarness
+    ) -> None:
+        queue = _queue(_background(harness))
+        open_one = await queue.ask("one", request_key="tc-1", background_caller=CALLER)
+        open_two = await queue.ask("two", request_key="tc-2", background_caller=CALLER)
+        done = await queue.ask("three", request_key="tc-3", background_caller=CALLER)
+        ordinary = await queue.ask("four", request_key="tc-4")
+        other_case = SessionRef(session_id=SessionId("another-case"), tenant_id=SESSION.tenant_id)
+        elsewhere = await queue.ask(
+            "five", request_key="tc-5", session=other_case, background_caller=CALLER
+        )
+        await queue.mailbox.answer(done, "ok", answer_token=await _token(queue, done))
+
+        ended = await queue.mailbox.cancel_background(SESSION, "conversation closed")
+
+        assert ended == tuple(sorted((open_one, open_two)))
+        assert await queue.mailbox.is_cancelled(ordinary) is False, "not background"
+        assert await queue.mailbox.is_cancelled(elsewhere) is False, "another conversation"
+        assert await queue.mailbox.cancel_background(SESSION, "again") == ()
 
 
 async def _never_exists(correlation_id: str, generation: int) -> bool:

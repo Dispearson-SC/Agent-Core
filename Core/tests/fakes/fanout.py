@@ -15,6 +15,7 @@ import dataclasses
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
@@ -27,7 +28,10 @@ from agent_core.domain.peer_result import PeerResult, PeerStatus
 from agent_core.domain.peers import (
     AgentId,
     AgentRef,
+    BackgroundAsk,
+    BackgroundState,
     PeerAnswerRefusedError,
+    PeerBackgroundRefusedError,
     PeerContinuationRefusedError,
     PeerPolicy,
     peer_session_key,
@@ -99,6 +103,13 @@ class Mailbox:
         self.root_turns: list[str | None] = []  # `root_turn_id` of each ask (C16)
         self.continued: list[str | None] = []  # `continue_session` of each ask, in ask order
         self.refuse_continuation = False  # the mailbox refuses every continuation (C12)
+        # C19. The return address of each ask in ask order (None = ordinary), how many background
+        # asks earlier turns of the conversation still have running, and a mailbox that cannot run
+        # an ask in the background.
+        self.background_callers: list[Any] = []
+        self.background_sessions: dict[str, Any] = {}  # correlation id -> asking session
+        self.open_background = 0
+        self.refuse_background = False
         self.cancelled: dict[str, str] = {}  # correlation id -> reason, in cancel order
         self.turn_of: dict[str, str] = {}
         self.redelivered: dict[str, int] = {}  # correlation id -> redeliveries (the generation)
@@ -114,7 +125,10 @@ class Mailbox:
         self.request_keys.append(kwargs.get("request_key"))
         if kwargs.get("continue_session") is not None and self.refuse_continuation:
             raise PeerContinuationRefusedError("not yours")
+        if kwargs.get("background_caller") is not None and self.refuse_background:
+            raise PeerBackgroundRefusedError("not here")
         self.continued.append(kwargs.get("continue_session"))
+        self.background_callers.append(kwargs.get("background_caller"))
         self.root_turns.append(kwargs.get("root_turn_id"))
         key: tuple[str, ...] = (str(target), question)
         if not self.fold_repeats:
@@ -122,6 +136,8 @@ class Mailbox:
         if key not in self._ids:  # idempotent per request key, like the real one
             self._ids[key] = f"corr-{len(self._ids) + 1}"
             self.asks.append((str(target), question))
+            if kwargs.get("background_caller") is not None:
+                self.background_sessions[self._ids[key]] = kwargs.get("from_session")
             self.turn_of[self._ids[key]] = str(kwargs.get("turn_id"))
         return self._ids[key]
 
@@ -135,6 +151,44 @@ class Mailbox:
     async def is_cancelled(self, correlation_id: str) -> bool:
         return correlation_id in self.cancelled
 
+    async def background_asks(self, session: Any) -> tuple[BackgroundAsk, ...]:
+        """The conversation's background asks: `open_background` synthetic running ones from
+        earlier turns, plus the ones this mailbox took (C19)."""
+        at = datetime(2026, 1, 1, tzinfo=UTC)
+        earlier = tuple(
+            BackgroundAsk(
+                handle=f"open-{n}", target=PEER, state=BackgroundState.RUNNING, question="q",
+                asked_at=at,
+            )
+            for n in range(self.open_background)
+        )
+        mine = tuple(
+            BackgroundAsk(
+                handle=corr,
+                target=PEER,
+                state=(
+                    BackgroundState.CANCELLED if corr in self.cancelled
+                    else BackgroundState.ANSWERED if corr in self.answers
+                    else BackgroundState.RUNNING
+                ),
+                question="q",
+                asked_at=at,
+            )
+            for corr, owner in self.background_sessions.items()
+            if owner == session
+        )
+        return earlier + mine
+
+    async def cancel_background(self, session: Any, reason: str) -> tuple[str, ...]:
+        ids = sorted(
+            corr
+            for corr, owner in self.background_sessions.items()
+            if owner == session and corr not in self.answers and corr not in self.cancelled
+        )
+        for corr in ids:
+            self.cancelled[corr] = reason
+        return tuple(ids)
+
     async def redeliveries(self, correlation_id: str) -> int:
         return self.redelivered.get(correlation_id, 0)
 
@@ -142,7 +196,10 @@ class Mailbox:
         ids = sorted(
             corr
             for corr, turn in self.turn_of.items()
-            if turn == str(turn_id) and corr not in self.answers and corr not in self.cancelled
+            if turn == str(turn_id)
+            and corr not in self.answers
+            and corr not in self.cancelled
+            and corr not in self.background_sessions  # a background ask outlives its turn (C19)
         )
         for corr in ids:
             self.cancelled[corr] = reason

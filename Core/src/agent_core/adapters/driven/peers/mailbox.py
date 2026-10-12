@@ -102,6 +102,7 @@ SCOPE - THIS ADAPTER IS NOT THE GATE
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import secrets
@@ -116,6 +117,8 @@ from agent_core.adapters.driven.agent_pydantic.runner import UNTRUSTED_CLOSE, UN
 from agent_core.domain.peers import (
     AgentId,
     AgentRef,
+    BackgroundAsk,
+    BackgroundState,
     PeerAnswerRefusedError,
     PeerContinuationRefusedError,
     PeerPolicy,
@@ -125,7 +128,7 @@ from agent_core.domain.peers import (
     peer_ask_id,
     peer_root_origin,
 )
-from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId
+from agent_core.domain.turn import CallerIdentity, SessionId, SessionRef, TenantId, TurnId
 
 # 32 bytes, so the handle carries 256 bits. A correlation id is what an inbound answer
 # arrives with, and an answer routed into a turn is content the model will act on - the
@@ -157,8 +160,8 @@ _ENQUEUE_COLUMNS = """
     INSERT INTO peer_messages
         (correlation_id, target_agent_id, from_session_id, from_tenant_id,
          turn_id, hop, question, from_agent_id, answer_token, request_key, max_concurrent,
-         peer_session_id, root_turn_id)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         peer_session_id, root_turn_id, background)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
 """
 _ENQUEUE_KEYED_SQL = (
     _ENQUEUE_COLUMNS
@@ -218,7 +221,7 @@ _CLAIM_ONE_SQL = """
     WHERE correlation_id = %s AND state = 'queued'
     RETURNING correlation_id, target_agent_id, from_session_id, from_tenant_id,
               turn_id, hop, question, from_agent_id, answer_token, redeliveries, callee_failures,
-              peer_session_id, root_turn_id
+              peer_session_id, root_turn_id, background
 """
 # `answered_at IS NULL` is the idempotency guard and it lives in the WHERE clause rather
 # than in a preceding SELECT, for the reason every other guard in this module does: two
@@ -251,11 +254,33 @@ _CANCEL_SQL = """
     RETURNING correlation_id
 """
 
+# A BACKGROUND ask (C19) belongs to the conversation, not to the turn that started it: a turn that
+# gives up leaves it running.
 _CANCEL_OPEN_SQL = """
     UPDATE peer_messages
     SET state = 'cancelled', cancel_reason = %s, cancelled_at = now()
     WHERE turn_id = %s AND state IN ('queued', 'delivered') AND answered_at IS NULL
+      AND background IS NULL
     RETURNING correlation_id
+"""
+
+# The conversation was closed: its open background asks (tenant AND session, in SQL).
+_CANCEL_BACKGROUND_SQL = """
+    UPDATE peer_messages
+    SET state = 'cancelled', cancel_reason = %s, cancelled_at = now()
+    WHERE from_tenant_id = %s AND from_session_id = %s AND background IS NOT NULL
+      AND state IN ('queued', 'delivered') AND answered_at IS NULL
+    RETURNING correlation_id
+"""
+
+# C20. The background asks of one conversation, newest first. The state is derived from the row.
+_BACKGROUND_ASKS_SQL = """
+    SELECT correlation_id, target_agent_id, question, enqueued_at, state, answer_failed,
+           answered_at, cancelled_at, peer_session_id
+    FROM peer_messages
+    WHERE from_tenant_id = %s AND from_session_id = %s AND background IS NOT NULL
+    ORDER BY enqueued_at DESC, correlation_id
+    LIMIT 50
 """
 
 _IS_CANCELLED_SQL = "SELECT state = 'cancelled' FROM peer_messages WHERE correlation_id = %s"
@@ -370,6 +395,38 @@ class PeerAsk:
     # C16. The turn a person started that this ask hangs from (the asking turn itself for a direct
     # ask); None only for a row written before migration 0035.
     root_turn_id: str | None = None
+    # C19. Where the answer goes when the ask is a BACKGROUND one (the asking conversation moved
+    # on); None for an ordinary ask.
+    background_caller: CallerIdentity | None = None
+
+
+def _caller_to_json(caller: CallerIdentity) -> str:
+    """The identity a background ask answers to, as the JSON kept on its row. The tenant is the
+    row's own (`from_tenant_id`) and is not stored twice."""
+    return json.dumps(
+        {
+            "subject_id": caller.subject_id,
+            "channel": caller.channel,
+            "roles": sorted(caller.roles),
+            "modality": caller.modality,
+        }
+    )
+
+
+def _caller_from_json(raw: object, tenant: TenantId) -> CallerIdentity | None:
+    if raw is None:
+        return None
+    data = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(data, dict):
+        return None
+    modality = data.get("modality")
+    return CallerIdentity(
+        subject_id=str(data["subject_id"]),
+        channel=str(data["channel"]),
+        tenant_id=tenant,
+        roles=frozenset(str(role) for role in data.get("roles", ())),
+        modality=None if modality is None else str(modality),
+    )
 
 
 def wrap_peer_answer(answer: str) -> str:
@@ -418,6 +475,15 @@ def cap_wrapped_answer(wrapped: str, max_chars: int) -> CappedAnswer:
     )
 
 
+def _background_state(state: str, answer_failed: bool, answered_at: object) -> BackgroundState:
+    """The state of a background ask as its owner sees it, from the row's columns."""
+    if state == "cancelled":
+        return BackgroundState.CANCELLED
+    if answered_at is not None:
+        return BackgroundState.FAILED if answer_failed else BackgroundState.ANSWERED
+    return BackgroundState.RUNNING if state == "delivered" else BackgroundState.QUEUED
+
+
 class PgAgentMailbox:
     """Postgres adapter for `ports.agent_mailbox.AgentMailbox`.
 
@@ -457,6 +523,7 @@ class PgAgentMailbox:
         request_key: str | None = None,
         continue_session: str | None = None,
         root_turn_id: str | None = None,
+        background_caller: CallerIdentity | None = None,
     ) -> str:
         """Enqueue durably and return the correlation id the answer will arrive with.
 
@@ -502,6 +569,7 @@ class PgAgentMailbox:
             policy.max_concurrent_asks,
             continue_session,
             root_turn_id,
+            None if background_caller is None else _caller_to_json(background_caller),
         )
 
     def _enqueue_sync(
@@ -516,6 +584,7 @@ class PgAgentMailbox:
         max_concurrent: int,
         continue_session: str | None,
         root_turn_id: str | None,
+        background: str | None,
     ) -> str:
         correlation_id = (
             secrets.token_urlsafe(_CORRELATION_ID_BYTES)
@@ -546,6 +615,7 @@ class PgAgentMailbox:
                     else derived_peer_session(str(from_session.session_id), correlation_id),
                     # C16. A direct ask hangs from its own asking turn.
                     root_turn_id if root_turn_id is not None else str(turn_id),
+                    background,
                 ),
             ).fetchone()
         if row is None:  # pragma: no cover - DO UPDATE always returns the surviving row
@@ -638,6 +708,7 @@ class PgAgentMailbox:
             failures=int(row[10]),
             peer_session_id=None if row[11] is None else str(row[11]),
             root_turn_id=None if row[12] is None else str(row[12]),
+            background_caller=_caller_from_json(row[13], TenantId(str(row[3]))),
         )
 
     async def reclaim_stale(
@@ -792,6 +863,39 @@ class PgAgentMailbox:
         with psycopg.connect(self._conninfo, autocommit=True) as conn:
             rows = conn.execute(_CANCEL_OPEN_SQL, (reason, turn_id)).fetchall()
         return tuple(sorted(str(row[0]) for row in rows))
+
+    async def cancel_background(self, session: SessionRef, reason: str) -> tuple[str, ...]:
+        """Cancel the open background asks of one conversation; the ids, sorted. See the port."""
+        return await asyncio.to_thread(self._cancel_background_sync, session, reason)
+
+    def _cancel_background_sync(self, session: SessionRef, reason: str) -> tuple[str, ...]:
+        with psycopg.connect(self._conninfo, autocommit=True) as conn:
+            rows = conn.execute(
+                _CANCEL_BACKGROUND_SQL, (reason, session.tenant_id, session.session_id)
+            ).fetchall()
+        return tuple(sorted(str(row[0]) for row in rows))
+
+    async def background_asks(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
+        """The background asks of one conversation, newest first. See the port."""
+        return await asyncio.to_thread(self._background_asks_sync, session)
+
+    def _background_asks_sync(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
+        with psycopg.connect(self._conninfo) as conn:
+            rows = conn.execute(
+                _BACKGROUND_ASKS_SQL, (session.tenant_id, session.session_id)
+            ).fetchall()
+        return tuple(
+            BackgroundAsk(
+                handle=str(row[0]),
+                target=str(row[1]),
+                question=str(row[2]),
+                asked_at=row[3],
+                state=_background_state(str(row[4]), bool(row[5]), row[6]),
+                finished_at=row[7] if str(row[4]) == "cancelled" else row[6],
+                session=None if row[8] is None else str(row[8]),
+            )
+            for row in rows
+        )
 
     async def is_cancelled(self, correlation_id: str) -> bool:
         return await asyncio.to_thread(self._is_cancelled_sync, correlation_id)
