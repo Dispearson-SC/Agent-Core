@@ -1993,3 +1993,44 @@ Four tools, the Pi example-23 set, granted with `peers.allow_background`: `peer_
 - **Replay shape: unchanged by C20** (the `.9` bump was taken by C19; these are tools, not steps).
 - **Not done:** true mid-turn steering; cancelling a queued message by its handle other than with
   `peer_stop` on it; showing the owner conversation's background agents in the transcript API.
+
+## D51 · Agent-comms v2: slice 13 advisories for background asks (C1o)
+
+- **A follow-up turn may not start a background ask (the chain cap is zero).** The follow-up runs
+  the asking profile as a fresh turn at hop 0, so nothing stopped it asking in the background
+  again, for ever. Two options were weighed: carry a chain generation on the follow-up and cap it
+  (`peers.max_background_chain`), or refuse. Refusing is the simplest safe choice: a generation
+  needs a new column on the row, a new field on the pickled `TurnRequest`/`BackgroundReturn` and a
+  runner path (`resume` carries no request), and a cap of N still permits N rounds of cost nobody
+  asked for. The follow-up can still ask WITHOUT `background` (it waits, bounded by the reply
+  timeout) and can still `peer_list`, `peer_status`, `peer_stop`. `peer_message` is a background
+  ask, so it is refused there too. The check is `AgentMailbox.is_background_followup(session,
+  turn_id)`: a follow-up's turn id is `background_followup_turn_id(correlation_id)`, so the turn is
+  recognised from the conversation's ANSWERED background asks with no new column, request field or
+  runner change, on the replay path and after an approval resume alike. A product that wants real
+  chains later adds a generation and lifts the refusal behind a profile switch.
+- **Counting, lookup and the listing are three queries.** `background_asks` is a window (default
+  `BACKGROUND_LIST_LIMIT`, the newest 50) and the cap, the handle lookup and the stop used to read
+  through it, so a conversation with more than 50 asks could always start another and could not
+  stop its oldest. `count_background(session, open_only=..., excluding=...)` counts in SQL,
+  `background_ask(session, handle)` looks one up by id (still scoped by tenant and session), and
+  `peer_list` shows its newest 20 and says how many older ones exist from the store's count.
+- **Replay-idempotent cap.** The step that starts background asks counts the conversation's open
+  asks leaving out the rows THIS turn already keyed with the keys the step is about to use
+  (`BackgroundKeys`: turn id AND request key), then counts its own asks as it re-asks them. A step
+  that crashed after its INSERT and runs again gets its handle back instead of a refusal of the
+  ask it already made. `peer_message` does the same with its key `msg.<tool call id>`.
+- **Poisoned callee uses the one delivery path.** `_settle_poisoned_peer` called an unrecorded copy
+  of the follow-up builder. It now calls `_deliver_background_answer`, and a failed enqueue is
+  logged under the ask's handle (`ERROR`) without skipping the cancel of what the callee had asked
+  in turn. The failure answer stays on the row, as for any lost delivery (OPERATIONS).
+- **Smaller:** `_PAGE_NEWEST_FIRST_SQL` is written out instead of derived by `str.replace`;
+  the tools' `_seat` is `_background_seat` and returns `tuple[BackgroundAgents, BackgroundOwner]`;
+  a missing asker profile in `peer_message` is reported as such, not as an unknown handle.
+- **The follow-up still runs with the role snapshot of the asking turn** (`CallerIdentity` kept on
+  the row). Roles revoked between the ask and the answer are NOT re-checked: the follow-up carries
+  at most the authority the person held when they asked, never more (D49), and no port reads the
+  current roles of a subject, so a re-check would need a new one. Documented, not done.
+- **Replay shape: unchanged.** No step was added, renamed or reordered (`_step_ask_peers` records
+  a result of the same shape); the pin stays `.9`.
+

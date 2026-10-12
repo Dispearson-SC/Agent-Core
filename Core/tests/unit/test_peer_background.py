@@ -278,6 +278,58 @@ def test_background_asks_already_running_in_the_conversation_count_toward_the_ca
     assert 'status="refused"' in _result(world, "tc-1")
 
 
+def test_the_cap_counts_every_open_ask_not_just_the_newest_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1o: the cap used to be summed over a listing of the newest 50, so a conversation with more
+    open asks than that could always start another."""
+    world = fanout.install(monkeypatch, (_background_ask("tc-1"),), [])
+    fanout.asker_policy(allow_background=True, max_background_asks=100)
+    world.mailbox.open_background = 100
+
+    _run()
+
+    assert world.mailbox.asks == []
+    assert 'status="refused"' in _result(world, "tc-1")
+
+
+def test_a_step_that_runs_again_does_not_count_its_own_earlier_asks_against_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1o: a step that crashed after the INSERT and runs again finds its own row open. With a cap
+    of one it must still get its handle back, not a refusal of the ask it already made."""
+    world = fanout.install(monkeypatch, (_background_ask("tc-1"),), [])
+    fanout.asker_policy(allow_background=True, max_background_asks=1)
+
+    _run()
+    first = _result(world, "tc-1")
+    world.resume.calls.clear()
+    _run()
+
+    assert 'status="running"' in first
+    assert 'status="running"' in _result(world, "tc-1"), "the replay was refused by its own row"
+    assert len(world.mailbox.asks) == 1, "and it is still ONE ask"
+
+
+def test_a_follow_up_turn_may_not_start_the_next_background_ask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1o: the follow-up runs the asking profile at depth zero, so without this a model could keep
+    a background -> follow-up -> background chain going for ever."""
+    world = fanout.install(
+        monkeypatch, (_background_ask("tc-1"), fanout.ask("tc-2")), [fanout.answer("corr-1", "now")]
+    )
+    fanout.asker_policy(allow_background=True)
+    world.mailbox.followup_turns.add("turn-1")
+
+    _run()
+
+    envelope = _result(world, "tc-1")
+    assert 'status="refused"' in envelope and "follow-up" in envelope
+    assert 'status="ok"' in _result(world, "tc-2"), "an ordinary ask still waits for its answer"
+    assert world.mailbox.asks == [("p-peer", "q-tc-2")]
+
+
 def test_background_asks_share_the_per_step_parallel_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     world = fanout.install(
         monkeypatch,

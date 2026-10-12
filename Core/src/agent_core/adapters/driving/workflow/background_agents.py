@@ -38,8 +38,10 @@ from agent_core.adapters.driven.tools.background import (
 )
 from agent_core.adapters.driving.workflow import turn_workflow
 from agent_core.domain.peers import (
+    BACKGROUND_LIST_LIMIT,
     AgentId,
     BackgroundAsk,
+    BackgroundKeys,
     BackgroundState,
     PeerContinuationRefusedError,
 )
@@ -72,6 +74,13 @@ _CAP: Final[str] = (
 )
 _GATE: Final[str] = "the message was refused by the peer gate: {reason}"
 _SESSION: Final[str] = "the child's session cannot be continued any more"
+_IN_FOLLOW_UP: Final[str] = (
+    "this turn is itself the follow-up that carried a background answer back, and a follow-up "
+    "may not start another background ask (that would chain them without end)"
+)
+_NO_ASKER_PROFILE: Final[str] = (
+    "the asking agent's profile {profile!r} is not loaded, so the peer gate cannot run"
+)
 _UNKNOWN_PEER: Final[str] = "no profile named {target!r} is loaded, so the peer gate cannot run"
 
 
@@ -84,14 +93,17 @@ class WorkflowBackgroundAgents:
         self._mailbox = mailbox
         self._profiles = profiles
 
-    async def list(self, owner: BackgroundOwner) -> tuple[BackgroundAsk, ...]:
-        return await self._mailbox.background_asks(owner.session)
+    async def list(
+        self, owner: BackgroundOwner, *, limit: int = BACKGROUND_LIST_LIMIT
+    ) -> tuple[BackgroundAsk, ...]:
+        return await self._mailbox.background_asks(owner.session, limit=limit)
+
+    async def count(self, owner: BackgroundOwner) -> int:
+        return await self._mailbox.count_background(owner.session)
 
     async def status(self, owner: BackgroundOwner, handle: str) -> BackgroundAsk | None:
-        for ask in await self.list(owner):
-            if ask.handle == handle:
-                return ask
-        return None
+        # By handle in the store, scoped to the conversation: not a search of a listing window.
+        return await self._mailbox.background_ask(owner.session, handle)
 
     async def stop(self, owner: BackgroundOwner, handle: str) -> StopResult:
         ask = await self.status(owner, handle)
@@ -117,12 +129,13 @@ class WorkflowBackgroundAgents:
             return MessageResult(refusal=_NOT_FOUND)
         if child.state is BackgroundState.CANCELLED:
             return MessageResult(refusal=_STOPPED)
-        policy = (
-            self._profiles[owner.profile_id].peers if owner.profile_id in self._profiles else None
-        )
+        if await self._mailbox.is_background_followup(owner.session, owner.turn_id):
+            return MessageResult(refusal=_IN_FOLLOW_UP)
+        asker = self._profiles.get(owner.profile_id)
+        policy = None if asker is None else asker.peers
         callee = self._profiles.get(child.target)
         if policy is None:
-            return MessageResult(refusal=_NOT_FOUND)
+            return MessageResult(refusal=_NO_ASKER_PROFILE.format(profile=owner.profile_id))
         if callee is None:
             return MessageResult(refusal=_UNKNOWN_PEER.format(target=child.target))
         if not policy.allow_background:
@@ -137,7 +150,13 @@ class WorkflowBackgroundAgents:
         if not decision.allowed or decision.next_hop is None:
             reason = decision.reason.value if decision.reason else "refused"
             return MessageResult(refusal=_GATE.format(reason=reason))
-        running = sum(1 for ask in await self.list(owner) if ask.is_open)
+        # Counted in the store, leaving out this very message if an earlier attempt of the call
+        # already sent it: the tool is idempotent per call, so the replay must not meet its own row.
+        running = await self._mailbox.count_background(
+            owner.session,
+            open_only=True,
+            excluding=BackgroundKeys(owner.turn_id, (f"msg.{call_id}",)),
+        )
         if running >= policy.max_background_asks:
             return MessageResult(refusal=_CAP.format(limit=policy.max_background_asks))
         try:

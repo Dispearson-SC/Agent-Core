@@ -115,9 +115,21 @@ _PAGE_SQL = """
 """
 
 # The same page walked from the newest entry back (C1n): only the comparison and the order flip.
-_PAGE_NEWEST_FIRST_SQL = _PAGE_SQL.replace("(at, entry_id) > (", "(at, entry_id) < (").replace(
-    "ORDER BY at ASC, entry_id ASC", "ORDER BY at DESC, entry_id DESC"
-)
+# Written out in full (C1o) rather than derived from `_PAGE_SQL` by string replacement, which would
+# silently produce the oldest-first statement if the first one were ever reworded.
+_PAGE_NEWEST_FIRST_SQL = """
+    SELECT entry_id, turn_id, kind, at, payload, cost_usd
+    FROM transcript_entries
+    WHERE tenant_id = %s
+      AND session_id = %s
+      AND kind = ANY(%s)
+      AND (
+        %s::timestamptz IS NULL
+        OR (at, entry_id) < (%s::timestamptz, %s::text)
+      )
+    ORDER BY at DESC, entry_id DESC
+    LIMIT %s
+"""
 
 # The sort column is chosen from this closed map and never from anything a caller sent.
 # `ports/transcript_reader.py` refuses to offer a free-form filter for exactly this

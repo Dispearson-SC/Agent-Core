@@ -732,7 +732,10 @@ has running. A background ask outlives the asking turn (`cancel_open` skips it) 
 turn's conversation (tenant and session) in SQL; a handle of another conversation reads as unknown.
 `peer_stop` runs the C4 cascade for that one ask. `peer_message` is a new background ask continuing
 the child's session through the same gate, queued behind the child's current turn: `steer` is NOT
-mid-turn steering, only a different framing of the same queued message.
+mid-turn steering, only a different framing of the same queued message. A follow-up turn (the one
+that carries a background answer back) may not start another background ask or message one, so the
+background -> follow-up -> background chain cannot run on (D51); the cap, a handle lookup and the
+`peer_list` "older" figure are read from the store, never from the newest-50 listing.
 
 **Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
 and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the

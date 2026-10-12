@@ -170,6 +170,7 @@ from agent_core.domain.peers import (
     PEER_ASK_CLOSED_ANSWER,
     PEER_ASK_FAILED_ANSWER,
     AgentId,
+    BackgroundKeys,
     FanOutPolicy,
     PeerAnswerRefusedError,
     PeerBackgroundRefusedError,
@@ -370,6 +371,12 @@ _BACKGROUND_CAP: Final[str] = (
     "The peer ask was refused before it was sent: this conversation already has {limit} "
     "background asks running, which is the most it may have. Wait for one to finish (its answer "
     "arrives as a new message), stop one, or ask {target!r} again without `background`."
+)
+_BACKGROUND_IN_FOLLOW_UP: Final[str] = (
+    "The peer ask was refused before it was sent: this turn is itself the follow-up that carried a "
+    "background answer back, and a follow-up may not start another background ask (that would "
+    "chain them without end). Ask {target!r} again without `background` and wait for the answer, "
+    "or tell the person what you need and let them ask."
 )
 _BACKGROUND_UNSUPPORTED: Final[str] = (
     "The peer ask was refused before it was sent: {target!r} cannot be asked in the background. "
@@ -1158,6 +1165,18 @@ async def _step_ask_peers(
     # C19. Background asks the conversation already has running, read once and only if a background
     # ask is made (the step's result is recorded, so a replay does not read it again).
     running_background: int | None = None
+    # C1o. Whether THIS turn is the follow-up that carried a background answer back; read once, and
+    # only if a background ask is made (the step's result is recorded).
+    in_follow_up: bool | None = None
+    # C1o. The keys this step gives its own asks. A re-run after a crash finds the rows its first
+    # attempt wrote; the cap count leaves them out and the step counts them itself as it re-asks.
+    own_keys = BackgroundKeys(
+        turn_id=str(turn_id),
+        keys=tuple(
+            _ask_key(round_number, position, item.tool_call_id)
+            for position, item in enumerate(pending)
+        ),
+    )
 
     for position, ask in enumerate(pending):
         target = ask.arguments.get(_ASK_TARGET)
@@ -1279,9 +1298,27 @@ async def _step_ask_peers(
             continue
 
         if background is True:
+            if in_follow_up is None:
+                in_follow_up = await seat.mailbox.is_background_followup(
+                    request.session, str(turn_id)
+                )
+            if in_follow_up:
+                refusals.append(
+                    (
+                        ask.tool_call_id,
+                        _own_peer_result(
+                            request,
+                            target=target,
+                            status=PeerStatus.REFUSED,
+                            text=_BACKGROUND_IN_FOLLOW_UP.format(target=target),
+                        ),
+                    )
+                )
+                continue
             if running_background is None:
-                known = await seat.mailbox.background_asks(request.session)
-                running_background = sum(1 for item in known if item.is_open)
+                running_background = await seat.mailbox.count_background(
+                    request.session, open_only=True, excluding=own_keys
+                )
             if running_background + len(started) >= caller_policy.max_background_asks:
                 refusals.append(
                     (
@@ -1781,10 +1818,15 @@ async def _settle_poisoned_peer(job: PeerTurnJob, turn_id: str, reason: str) -> 
             )
         else:
             if _background_of(job) is not None:
-                follow_up = await _build_background_follow_up(job)
-                if follow_up is not None:
-                    await enqueue_turn(
-                        follow_up, turn_id=TurnId(background_followup_turn_id(job.correlation_id))
+                # The one delivery path (C1o). A delivery that fails is logged under the ask and
+                # does not skip cancelling what this callee asked in turn.
+                try:
+                    await _deliver_background_answer(job)
+                except Exception:
+                    _LOG.exception(
+                        "could not enqueue the follow-up for poisoned background ask %r; its "
+                        "failure answer is recorded but the conversation was not told",
+                        job.correlation_id,
                     )
             else:
                 try:

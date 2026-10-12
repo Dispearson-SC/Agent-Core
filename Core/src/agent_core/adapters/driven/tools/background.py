@@ -82,7 +82,13 @@ class MessageResult:
 
 
 class BackgroundAgents(Protocol):
-    async def list(self, owner: BackgroundOwner) -> tuple[BackgroundAsk, ...]: ...
+    async def list(self, owner: BackgroundOwner, *, limit: int) -> tuple[BackgroundAsk, ...]:
+        """The newest `limit` background asks of the owner conversation."""
+        ...
+
+    async def count(self, owner: BackgroundOwner) -> int:
+        """How many background asks the owner conversation has, however many a listing shows."""
+        ...
 
     async def status(self, owner: BackgroundOwner, handle: str) -> BackgroundAsk | None: ...
 

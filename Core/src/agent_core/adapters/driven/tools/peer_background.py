@@ -35,11 +35,16 @@ from pydantic_ai import RunContext, Tool
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
 
-from agent_core.adapters.driven.tools.background import MessageMode, StopResult
+from agent_core.adapters.driven.tools.background import (
+    BackgroundAgents,
+    BackgroundOwner,
+    MessageMode,
+    StopResult,
+)
 from agent_core.adapters.driven.tools.context import TurnContext
 from agent_core.domain.peers import BackgroundAsk, BackgroundState
 
-__all__ = ["AUDIT_ALLOW", "build_toolset"]
+__all__ = ["AUDIT_ALLOW", "PEER_LIST_LIMIT", "build_toolset"]
 
 # What the audit trail stores of each call (read by `audit_repository.collect_audit_policy`, through
 # the registered builder's module). The handle names the child the call was about and the mode and
@@ -54,7 +59,8 @@ AUDIT_ALLOW: dict[str, frozenset[str]] = {
 }
 
 _QUESTION_PREVIEW = 80
-_LISTED = 20
+# How many a `peer_list` shows (the newest); the rest are reported as a count (C1o).
+PEER_LIST_LIMIT = 20
 
 _NO_SEAT = "background agents are not available in this deployment"
 _UNKNOWN = "No background agent with the handle {handle!r} exists in this conversation."
@@ -89,7 +95,8 @@ async def _available(ctx: RunContext[Any], tool_def: ToolDefinition) -> ToolDefi
     return None
 
 
-def _seat(ctx: RunContext[TurnContext]) -> Any:
+def _background_seat(ctx: RunContext[TurnContext]) -> tuple[BackgroundAgents, BackgroundOwner]:
+    """The seat and the owner conversation of this turn (C1o: the typed pair, not `Any`)."""
     deps = ctx.deps
     if deps.background is None or deps.background_owner is None:
         raise RuntimeError(_NO_SEAT)  # `prepare` hides the tools; this is a wiring bug
@@ -99,13 +106,13 @@ def _seat(ctx: RunContext[TurnContext]) -> Any:
 async def peer_list(ctx: RunContext[TurnContext]) -> str:
     """List the background agents of this conversation: their handles, who they are and whether
     they are still working. Only this conversation's are shown."""
-    seat, owner = _seat(ctx)
-    asks = await seat.list(owner)
+    seat, owner = _background_seat(ctx)
+    asks = await seat.list(owner, limit=PEER_LIST_LIMIT)
     if not asks:
         return _NONE
-    shown = asks[:_LISTED]
-    lines = "\n".join(_line(ask) for ask in shown)
-    more = "" if len(asks) <= _LISTED else f"\n(and {len(asks) - _LISTED} older ones)"
+    lines = "\n".join(_line(ask) for ask in asks)
+    older = await seat.count(owner) - len(asks)
+    more = f"\n(and {older} older ones)" if older > 0 else ""
     return f"Background agents in this conversation, newest first:\n{lines}{more}"
 
 
@@ -115,7 +122,7 @@ async def peer_status(ctx: RunContext[TurnContext], handle: str) -> str:
     Args:
         handle: The handle of the background ask.
     """
-    seat, owner = _seat(ctx)
+    seat, owner = _background_seat(ctx)
     ask = await seat.status(owner, handle)
     if ask is None:
         return _UNKNOWN.format(handle=handle)
@@ -138,7 +145,7 @@ async def peer_message(
         text: What to tell it. It reads this and nothing else of your conversation.
         mode: `steer` or `follow_up` (default).
     """
-    seat, owner = _seat(ctx)
+    seat, owner = _background_seat(ctx)
     result = await seat.message(
         owner, handle, text, MessageMode(mode), call_id=str(ctx.tool_call_id)
     )
@@ -158,7 +165,7 @@ async def peer_stop(ctx: RunContext[TurnContext], handle: str) -> str:
     Args:
         handle: The handle of the background ask.
     """
-    seat, owner = _seat(ctx)
+    seat, owner = _background_seat(ctx)
     outcome = await seat.stop(owner, handle)
     if outcome is StopResult.STOPPED:
         return f"Stopped background agent {handle}. It will not answer."

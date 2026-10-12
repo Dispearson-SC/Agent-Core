@@ -210,6 +210,50 @@ def test_a_poisoned_background_callee_still_reports_to_the_conversation(
     assert recorder.signals == []
 
 
+def test_a_poisoned_background_callee_delivers_through_the_one_delivery_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1o: the poison path built and enqueued its own follow-up, a second copy of the delivery."""
+    recorder = _setup(monkeypatch)
+    delivered: list[str] = []
+
+    async def deliver(job: turn_workflow.PeerTurnJob) -> None:
+        delivered.append(job.correlation_id)
+
+    monkeypatch.setattr(turn_workflow, "_deliver_background_answer", deliver)
+
+    asyncio.run(turn_workflow._settle_poisoned_peer(_job(), "peer-wf", "poisoned"))  # noqa: SLF001
+
+    assert delivered == [CORRELATION] and recorder.enqueued == []
+
+
+def test_a_failed_follow_up_enqueue_is_logged_loudly_and_does_not_skip_the_cleanup(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C1o: the failure was swallowed with the rest of the settle, which also skipped cancelling
+    what the poisoned callee had asked in turn."""
+    _setup(monkeypatch)
+    cleaned: list[str] = []
+
+    async def enqueue(request: TurnRequest, *, turn_id: TurnId | None = None) -> Any:
+        raise RuntimeError("queue is down")
+
+    async def clean(turn_id: str, reason: str) -> None:
+        cleaned.append(turn_id)
+
+    monkeypatch.setattr(turn_workflow, "enqueue_turn", enqueue)
+    monkeypatch.setattr(turn_workflow, "_cancel_open_asks", clean)
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(turn_workflow._settle_poisoned_peer(_job(), "peer-wf", "poisoned"))  # noqa: SLF001
+
+    assert cleaned == ["peer-wf"]
+    assert any(
+        CORRELATION in record.getMessage() and "follow-up" in record.getMessage()
+        for record in caplog.records
+    ), "the lost delivery must name the ask"
+
+
 # --- the worker builds the return address from the claimed row -----------------------------------
 
 

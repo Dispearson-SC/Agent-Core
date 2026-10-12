@@ -161,7 +161,10 @@ asked in turn) and returns the handles it ended; like `cancel_turn` it runs outs
 asking TURN (`cancel_turn`) does not touch them. A follow-up turn already created for an ask that
 finished before the close still runs. If the answer is recorded and the follow-up never appeared (the
 enqueue failed: the callee workflow is in `ERROR`), the answer is on the row
-(`SELECT answer FROM peer_messages WHERE correlation_id = '<handle>'`); nothing re-enqueues it.
+(`SELECT answer FROM peer_messages WHERE correlation_id = '<handle>'`); nothing re-enqueues it. The
+same holds for a callee given up as poison: its failure answer is recorded, and a follow-up that
+could not be enqueued is logged at `ERROR` ("could not enqueue the follow-up for poisoned background
+ask <handle>").
 
 ## Peer redelivery lease
 

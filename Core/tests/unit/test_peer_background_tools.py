@@ -36,7 +36,7 @@ from agent_core.adapters.driven.tools.background import (
     MessageResult,
     StopResult,
 )
-from agent_core.adapters.driven.tools.peer_background import build_toolset
+from agent_core.adapters.driven.tools.peer_background import PEER_LIST_LIMIT, build_toolset
 from agent_core.domain.peers import AgentId, AgentRef, BackgroundAsk, BackgroundState, PeerPolicy
 from agent_core.domain.policy import Effect, PolicyRule, RuleSet
 from agent_core.domain.profile import AgentProfile
@@ -72,14 +72,21 @@ class _Seat:
     def __init__(self) -> None:
         self.asks: tuple[BackgroundAsk, ...] = (_ask(),)
         self.owners: list[BackgroundOwner] = []
+        self.limits: list[int] = []
+        self.total: int | None = None  # the store's count when it is more than `asks`
         self.stopped: list[str] = []
         self.messages: list[tuple[str, str, MessageMode, str]] = []
         self.stop_result = StopResult.STOPPED
         self.message_result = MessageResult(handle="h-2")
 
-    async def list(self, owner: BackgroundOwner) -> tuple[BackgroundAsk, ...]:
+    async def list(self, owner: BackgroundOwner, *, limit: int) -> tuple[BackgroundAsk, ...]:
         self.owners.append(owner)
-        return self.asks
+        self.limits.append(limit)
+        return self.asks[:limit]
+
+    async def count(self, owner: BackgroundOwner) -> int:
+        self.owners.append(owner)
+        return len(self.asks) if self.total is None else self.total
 
     async def status(self, owner: BackgroundOwner, handle: str) -> BackgroundAsk | None:
         self.owners.append(owner)
@@ -194,6 +201,20 @@ def test_list_reports_each_background_agent_with_its_handle_and_state() -> None:
     assert "h-1" in returned and "running" in returned and "billing" in returned
     assert "h-0" in returned and "answered" in returned
     assert "check every invoice of 2025" in returned
+
+
+def test_list_says_how_many_older_asks_it_left_out_from_the_stores_count() -> None:
+    """C1o: the 'older' figure is the store's count minus what was listed, not a guess from a
+    window that was itself cut."""
+    seat = _Seat()
+    seat.asks = tuple(_ask(f"h-{n}") for n in range(PEER_LIST_LIMIT + 5))
+    seat.total = PEER_LIST_LIMIT + 75
+
+    (returned,), _ = _run([("peer_list", {})], seat=seat)
+
+    assert seat.limits == [PEER_LIST_LIMIT], "the tool asks for exactly what it will show"
+    assert returned.count("- handle") == PEER_LIST_LIMIT
+    assert "and 75 older ones" in returned
 
 
 def test_list_of_an_empty_conversation_says_so() -> None:

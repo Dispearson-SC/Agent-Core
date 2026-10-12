@@ -26,7 +26,12 @@ from agent_core.adapters.driven.tools.background import (
 )
 from agent_core.adapters.driving.workflow import turn_workflow
 from agent_core.adapters.driving.workflow.background_agents import WorkflowBackgroundAgents
-from agent_core.domain.peers import AgentId, BackgroundState
+from agent_core.domain.peers import (
+    BACKGROUND_LIST_LIMIT,
+    AgentId,
+    BackgroundState,
+    background_followup_turn_id,
+)
 from agent_core.domain.turn import (
     CallerIdentity,
     SessionId,
@@ -145,6 +150,32 @@ def test_status_of_a_handle_from_another_conversation_is_unknown(
 
     assert found is not None and found.state is BackgroundState.QUEUED
     assert foreign is None and unknown is None
+
+
+def test_a_handle_older_than_the_listing_window_is_still_found_and_stoppable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1o: status and stop used to look the handle up in a listing of the newest 50."""
+    world = _World(monkeypatch)
+
+    async def scenario() -> tuple[Any, StopResult, int, int]:
+        oldest = await world.ask_in_background("oldest", key="tc-old")
+        for n in range(BACKGROUND_LIST_LIMIT + 2):
+            await world.ask_in_background(f"q{n}", key=f"tc-{n}")
+        listed = {a.handle for a in await world.seat.list(OWNER)}
+        assert oldest not in listed
+        return (
+            await world.seat.status(OWNER, oldest),
+            await world.seat.stop(OWNER, oldest),
+            await world.seat.count(OWNER),
+            len(listed),
+        )
+
+    status, stopped, total, shown = run(scenario())
+
+    assert status is not None and status.question == "oldest"
+    assert stopped is StopResult.STOPPED
+    assert (total, shown) == (BACKGROUND_LIST_LIMIT + 3, BACKGROUND_LIST_LIMIT)
 
 
 # --- stop -------------------------------------------------------------------------------------
@@ -348,6 +379,62 @@ def test_a_message_counts_toward_the_conversations_background_cap(
     result = run(scenario())
 
     assert result.handle is None and "background" in (result.refusal or "")
+
+
+def test_replaying_a_message_at_the_cap_returns_the_same_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1o: the replay found its own earlier message open and counted it against the cap, so the
+    second call of a tool that is meant to be idempotent was refused."""
+    world = _World(monkeypatch, max_background_asks=2)
+
+    async def scenario() -> tuple[Any, Any]:
+        handle = await world.ask_in_background()
+        first = await world.seat.message(OWNER, handle, "hi", MessageMode.STEER, call_id="c")
+        replay = await world.seat.message(OWNER, handle, "hi", MessageMode.STEER, call_id="c")
+        return first, replay
+
+    first, replay = run(scenario())
+
+    assert first.handle is not None and replay.refusal is None
+    assert replay.handle == first.handle and len(world.mailbox.rows) == 2
+
+
+def test_a_follow_up_turn_may_not_message_a_background_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1o: a message is a background ask, so it would restart the chain the follow-up cannot."""
+    world = _World(monkeypatch)
+
+    async def scenario() -> tuple[Any, int]:
+        handle = await world.ask_in_background()
+        await world.mailbox.answer(handle, "done", answer_token=world.mailbox.token_of(handle))
+        in_follow_up = dataclasses.replace(OWNER, turn_id=background_followup_turn_id(handle))
+        result = await world.seat.message(
+            in_follow_up, handle, "more", MessageMode.FOLLOW_UP, call_id="c"
+        )
+        return result, len(world.mailbox.rows)
+
+    result, rows = run(scenario())
+
+    assert result.handle is None and "follow-up" in (result.refusal or "")
+    assert rows == 1, "nothing was sent"
+
+
+def test_a_missing_asker_profile_is_not_reported_as_an_unknown_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _World(monkeypatch)
+
+    async def scenario() -> Any:
+        handle = await world.ask_in_background()
+        del world.profiles[fanout.ASKER]
+        return await world.seat.message(OWNER, handle, "hi", MessageMode.STEER, call_id="c")
+
+    result = run(scenario())
+
+    assert result.handle is None
+    assert "profile" in (result.refusal or "") and "handle" not in (result.refusal or "")
 
 
 def test_a_profile_that_did_not_opt_in_cannot_message(monkeypatch: pytest.MonkeyPatch) -> None:
