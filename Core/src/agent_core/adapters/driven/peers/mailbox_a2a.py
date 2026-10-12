@@ -83,6 +83,7 @@ from typing import Any, Final
 import httpx
 
 from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peers import (
     BACKGROUND_LIST_LIMIT,
     AgentId,
@@ -93,6 +94,7 @@ from agent_core.domain.peers import (
     PeerBackgroundRefusedError,
     PeerContinuationRefusedError,
     PeerPolicy,
+    PeerSubagentRefusedError,
     new_answer_token,
     peer_ask_id,
 )
@@ -184,6 +186,8 @@ class A2AAgentMailbox:
         continue_session: str | None = None,
         root_turn_id: str | None = None,
         background_caller: CallerIdentity | None = None,
+        kind: DelegationKind = DelegationKind.PEER,
+        subagent_depth: int = 0,
     ) -> str:
         """Send one A2A `message/send` request and return the task id as correlation id.
 
@@ -204,6 +208,10 @@ class A2AAgentMailbox:
         replayed send carries the same id and a peer that de-duplicates on it runs the task
         once. Omitted, no `messageId` is sent (the previous behaviour).
         """
+        if kind is not DelegationKind.PEER:
+            # A subagent is a child workflow the asking turn OWNS (cancelled with it, resumed with
+            # it). An A2A peer is another process that owns its own turns: it cannot be one.
+            raise PeerSubagentRefusedError("a subagent cannot be spawned over A2A")
         if background_caller is not None:
             # The answer of a background ask is delivered to a conversation that has moved on, from
             # a row that survives a restart. This adapter's answers live in this process's memory

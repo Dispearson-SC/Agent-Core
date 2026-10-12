@@ -55,6 +55,7 @@ from agent_core.domain.peers import (
     PeerVisibility,
     Topology,
 )
+from agent_core.domain.subagents import SubagentPolicy
 from agent_core.domain.typed_answer import AnswerSchemaError, canonical_schema
 
 
@@ -506,6 +507,33 @@ def _build_agent_ref(data: object) -> AgentRef:
     )
 
 
+def _build_subagent_policy(data: object) -> SubagentPolicy:
+    """The `subagents:` block (C28). Strict throughout: it grants the power to start agents, so a
+    misspelt key, a string where a list belongs or a duplicate id refuses to load."""
+    mapping = _require_mapping(data, where="subagents")
+    _reject_unknown_keys(mapping, {f.name for f in fields(SubagentPolicy)}, where="subagents")
+    defaults = SubagentPolicy()
+    raw = mapping.get("agents", defaults.agents)
+    if not isinstance(raw, (list, tuple)):
+        raise ProfileValidationError(f"subagents.agents must be a list of agent ids, got {raw!r}")
+    agents: list[AgentId] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise ProfileValidationError(
+                f"subagents.agents must be non-empty strings, got {item!r}"
+            )
+        if AgentId(item) in agents:
+            raise ProfileValidationError(f"subagents.agents lists {item!r} twice")
+        agents.append(AgentId(item))
+    return SubagentPolicy(
+        enabled=_strict_bool(
+            mapping.get("enabled", defaults.enabled), where="subagents.enabled"
+        ),
+        agents=tuple(agents),
+        depth=_positive_int(mapping.get("depth", defaults.depth), where="subagents.depth"),
+    )
+
+
 def _build_peer_policy(data: object) -> PeerPolicy:
     mapping = _require_mapping(data, where="peers")
     _reject_unknown_keys(mapping, {f.name for f in fields(PeerPolicy)}, where="peers")
@@ -785,6 +813,9 @@ class AgentProfile:
     # never a branch in core code.
     knowledge: KnowledgePolicy = field(default_factory=KnowledgePolicy)
     peers: PeerPolicy = field(default_factory=PeerPolicy)
+    # C28 (D62). Which agents this profile may spawn as subagents, and how deep a chain through it
+    # may go. Disabled by default; part of the content hash.
+    subagents: SubagentPolicy = field(default_factory=SubagentPolicy)
 
     # Instruction fragments selected by the turn's channel / modality hint, appended to the
     # persona by the runner as instructions - never as text in the user's message. Stored as
@@ -892,6 +923,11 @@ class AgentProfile:
             ),
             peers=(
                 _build_peer_policy(mapping["peers"]) if "peers" in mapping else defaults.peers
+            ),
+            subagents=(
+                _build_subagent_policy(mapping["subagents"])
+                if "subagents" in mapping
+                else defaults.subagents
             ),
             public_alias=_build_public_alias(mapping.get("public_alias")),
             description=_build_description(mapping.get("description")),

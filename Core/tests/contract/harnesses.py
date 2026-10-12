@@ -14,11 +14,23 @@ import psycopg
 
 from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
 from agent_core.adapters.driven.peers.mailbox_a2a import A2AAgentMailbox
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peers import AgentId
 from agent_core.domain.turn import CallerIdentity, SessionRef, TurnId
 from tests.contract.mailbox_conformance import ASKER, LEASE, POLICY, SESSION, TARGET
 from tests.fakes.controlled_mailbox import ControlledMailbox
 from tests.fakes.memory_mailbox import InMemoryAgentMailbox
+
+
+def _delegation(kind: DelegationKind, subagent_depth: int) -> dict[str, Any]:
+    """The subagent kwargs, passed only when they differ from a peer's (older asserts on the call
+    kwargs hold, and an adapter that predates them is not handed names it does not know)."""
+    extra: dict[str, Any] = {}
+    if kind is not DelegationKind.PEER:
+        extra["kind"] = kind
+    if subagent_depth:
+        extra["subagent_depth"] = subagent_depth
+    return extra
 
 
 class PgHarness:
@@ -27,6 +39,7 @@ class PgHarness:
     supports_queue = True
     supports_continuation = True
     supports_background = True
+    supports_subagents = True
 
     def __init__(self, conninfo: str) -> None:
         self._conninfo = conninfo
@@ -45,6 +58,8 @@ class PgHarness:
         continue_session: str | None = None,
         root_turn_id: str | None = None,
         background_caller: CallerIdentity | None = None,
+        kind: DelegationKind = DelegationKind.PEER,
+        subagent_depth: int = 0,
     ) -> str:
         policy = (
             POLICY
@@ -63,6 +78,7 @@ class PgHarness:
             continue_session=continue_session,
             root_turn_id=root_turn_id,
             **({} if background_caller is None else {"background_caller": background_caller}),
+            **_delegation(kind, subagent_depth),
         )
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -112,6 +128,7 @@ class A2AHarness:
     supports_queue = False
     supports_continuation = False
     supports_background = False
+    supports_subagents = False
 
     def __init__(self) -> None:
         self._messages: dict[str, dict[str, Any]] = {}  # task id -> first message
@@ -144,6 +161,8 @@ class A2AHarness:
         continue_session: str | None = None,
         root_turn_id: str | None = None,
         background_caller: CallerIdentity | None = None,
+        kind: DelegationKind = DelegationKind.PEER,
+        subagent_depth: int = 0,
     ) -> str:
         policy = (
             POLICY
@@ -162,6 +181,7 @@ class A2AHarness:
             continue_session=continue_session,
             root_turn_id=root_turn_id,
             **({} if background_caller is None else {"background_caller": background_caller}),
+            **_delegation(kind, subagent_depth),
         )
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -179,6 +199,7 @@ class MemoryHarness:
     supports_queue = True
     supports_continuation = True
     supports_background = True
+    supports_subagents = True
 
     def __init__(self, *, controlled: bool = False) -> None:
         self.inner = InMemoryAgentMailbox()
@@ -197,6 +218,8 @@ class MemoryHarness:
         continue_session: str | None = None,
         root_turn_id: str | None = None,
         background_caller: CallerIdentity | None = None,
+        kind: DelegationKind = DelegationKind.PEER,
+        subagent_depth: int = 0,
     ) -> str:
         policy = (
             POLICY
@@ -215,6 +238,7 @@ class MemoryHarness:
             continue_session=continue_session,
             root_turn_id=root_turn_id,
             **({} if background_caller is None else {"background_caller": background_caller}),
+            **_delegation(kind, subagent_depth),
         )
 
     def callee_token(self, correlation_id: str) -> str | None:

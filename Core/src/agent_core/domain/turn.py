@@ -41,6 +41,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import NewType
 
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.media import MediaRef
 
 TurnId = NewType("TurnId", str)
@@ -254,6 +255,11 @@ class PeerOwner:
     # C19. Set only for a BACKGROUND ask: where its answer is delivered instead of waking the asking
     # turn (which has moved on).
     background: BackgroundReturn | None = None
+    # C28. Whether this turn was asked of a peer or spawned as a subagent, and how many subagent
+    # links the chain down to it holds (0 for a peer chain with no subagent in it). Both are set
+    # where the claimed row is in hand, never by a model.
+    kind: DelegationKind = DelegationKind.PEER
+    subagent_depth: int = 0
 
 
 @dataclass(frozen=True, slots=True)

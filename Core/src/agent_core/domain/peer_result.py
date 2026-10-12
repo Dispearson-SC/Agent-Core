@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from html import escape
 
+from agent_core.domain.agent_mode import DelegationKind
+
 
 class PeerStatus(StrEnum):
     """How an ask ended, from the asker's point of view.
@@ -64,6 +66,9 @@ class PeerResult:
     # C25. The answer came from the answer cache, not from a peer run just now. It opens no peer
     # session (there is nothing to continue), so `session` is None on such a result.
     cached: bool = False
+    # C28. Which tool made the delegation. Only a subagent is named in the tag, so a peer's envelope
+    # stays byte-for-byte what it was.
+    kind: DelegationKind = DelegationKind.PEER
 
     def render(self) -> str:
         """The tagged form the model reads. Attributes are escaped: `peer` is model-written."""
@@ -72,6 +77,8 @@ class PeerResult:
             attributes.append(f'session="{_attribute(self.session)}"')
         if self.handle is not None:
             attributes.append(f'handle="{_attribute(self.handle)}"')
+        if self.kind is not DelegationKind.PEER:
+            attributes.append(f'kind="{self.kind.value}"')
         attributes.append(f'status="{self.status.value}"')
         if self.truncated:
             attributes.append('truncated="true"')

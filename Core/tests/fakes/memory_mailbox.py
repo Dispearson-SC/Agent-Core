@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from agent_core.adapters.driven.peers.mailbox import PeerAsk, wrap_peer_answer
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peers import (
     BACKGROUND_LIST_LIMIT,
     AgentId,
@@ -63,6 +64,8 @@ class _Row:
     enqueued_at: datetime | None = None
     finished_at: datetime | None = None
     request_key: str | None = None
+    kind: DelegationKind = DelegationKind.PEER
+    subagent_depth: int = 0
 
 
 class InMemoryAgentMailbox:
@@ -91,6 +94,8 @@ class InMemoryAgentMailbox:
         continue_session: str | None = None,
         root_turn_id: str | None = None,
         background_caller: CallerIdentity | None = None,
+        kind: DelegationKind = DelegationKind.PEER,
+        subagent_depth: int = 0,
     ) -> str:
         if continue_session is not None:
             self._check_continuation(continue_session, target, from_session, asker)
@@ -117,6 +122,8 @@ class InMemoryAgentMailbox:
             max_concurrent=policy.max_concurrent_asks,
             root_turn_id=root_turn_id if root_turn_id is not None else str(turn_id),
             background_caller=background_caller,
+            kind=kind,
+            subagent_depth=subagent_depth,
             request_key=request_key,
             enqueued_at=self._clock(),
             peer_session_id=(
@@ -229,6 +236,7 @@ class InMemoryAgentMailbox:
             session=row.peer_session_id,
             hop=row.hop,
             root_turn_id=row.root_turn_id,
+            kind=row.kind,
         )
 
     async def background_ask(self, session: SessionRef, handle: str) -> BackgroundAsk | None:
@@ -312,6 +320,8 @@ class InMemoryAgentMailbox:
             peer_session_id=row.peer_session_id,
             root_turn_id=row.root_turn_id,
             background_caller=row.background_caller,
+            kind=row.kind,
+            subagent_depth=row.subagent_depth,
         )
 
     def _at_its_cap(self, row: _Row) -> bool:

@@ -41,3 +41,15 @@ class AgentMode(StrEnum):
     def spawnable(self) -> bool:
         """A parent turn may spawn it as a subagent (`spawn_subagent`, C28)."""
         return self in (AgentMode.SUBAGENT, AgentMode.ALL)
+
+
+class DelegationKind(StrEnum):
+    """Which tool made a delegation: `ask_peer` (a PEER) or `spawn_subagent` (a SUBAGENT, C28).
+
+    Both run the callee as a durable child workflow owned by the asking turn and resolve to the
+    same C8 envelope; the kind decides the gate (allowlists and modes), the depth rules and how
+    the ownership tree labels the child.
+    """
+
+    PEER = "peer"
+    SUBAGENT = "subagent"

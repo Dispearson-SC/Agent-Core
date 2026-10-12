@@ -26,6 +26,7 @@ from agent_core.adapters.driven.peers.mailbox import PeerAsk
 from agent_core.adapters.driving.channels.registry import ChannelRegistry
 from agent_core.adapters.driving.peers.worker import peer_turn_request
 from agent_core.adapters.driving.workflow import turn_workflow
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peers import AgentId
 from agent_core.domain.turn import (
     PeerOwner,
@@ -170,3 +171,18 @@ def test_an_approval_of_a_peer_session_is_addressed_to_the_case_the_person_is_in
 
 def test_an_ordinary_session_is_addressed_as_before() -> None:
     assert _gateway()._recipient(CASE).subject_id == "case-77"  # noqa: SLF001
+
+
+def test_the_owner_of_a_spawned_subagent_says_so_and_carries_its_depth() -> None:
+    """C28. The row that started the callee knows whether it was asked or spawned and how deep the
+    subagent chain down to it is; the worker copies both onto the owner, never a model."""
+    session = SessionRef(session_id=SessionId("peer~case-77~key"), tenant_id=TENANT)
+
+    plain = peer_turn_request(_ask(), session=session).owner
+    spawned = peer_turn_request(
+        _ask(kind=DelegationKind.SUBAGENT, subagent_depth=2), session=session
+    ).owner
+
+    assert plain is not None and spawned is not None
+    assert (plain.kind, plain.subagent_depth) == (DelegationKind.PEER, 0)
+    assert (spawned.kind, spawned.subagent_depth) == (DelegationKind.SUBAGENT, 2)

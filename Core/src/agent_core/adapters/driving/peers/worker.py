@@ -135,6 +135,7 @@ from typing import Final, Protocol, runtime_checkable
 from uuid import uuid4
 
 from agent_core.adapters.driven.peers.mailbox import PeerAsk
+from agent_core.domain.agent_mode import AgentMode
 from agent_core.domain.peers import (
     PEER_ASK_FAILED_ANSWER,
     AgentId,
@@ -498,6 +499,9 @@ def peer_turn_request(ask: PeerAsk, *, session: SessionRef) -> TurnRequest:
             asker=None if ask.asker is None else str(ask.asker),
             call=ask.correlation_id,
             background=_background_return(ask),
+            # C28. Asked or spawned, and how deep the subagent chain is: both off the row.
+            kind=ask.kind,
+            subagent_depth=ask.subagent_depth,
         ),
     )
 
@@ -773,11 +777,23 @@ def answerable_targets(profiles: Mapping[str, AgentProfile]) -> tuple[AgentId, .
 
     `peers.enabled` is the feature switch (`domain/peers.py`), and it fails closed: a
     profile that never opted in is not polled, so a deployment does not acquire an
-    answering agent by accident. Sorted for the reason `run_peer_worker` polls in order.
+    answering agent by accident. A SUBAGENT (C28) opts in the other way: its mode says
+    `subagent`, or a profile with `subagents.enabled` lists it among the agents it may spawn.
+    Sorted for the reason `run_peer_worker` polls in order.
     """
+    spawnable = {
+        agent
+        for profile in profiles.values()
+        if profile.subagents.enabled
+        for agent in profile.subagents.agents
+    }
     return tuple(
         sorted(
-            AgentId(profile_id) for profile_id, profile in profiles.items() if profile.peers.enabled
+            AgentId(profile_id)
+            for profile_id, profile in profiles.items()
+            if profile.peers.enabled
+            or profile.mode is AgentMode.SUBAGENT
+            or AgentId(profile_id) in spawnable
         )
     )
 

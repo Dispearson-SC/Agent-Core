@@ -96,6 +96,7 @@ from agent_core.adapters.driven.agent_pydantic.runner import UNTRUSTED_CLOSE, UN
 from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
 from agent_core.adapters.driven.peers.mailbox_a2a import A2AAgentMailbox
 from agent_core.adapters.driving.workflow import turn_workflow
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
@@ -198,6 +199,8 @@ class _SilentMailbox:
         continue_session: str | None = None,
         root_turn_id: str | None = None,
         background_caller: CallerIdentity | None = None,
+        kind: DelegationKind = DelegationKind.PEER,
+        subagent_depth: int = 0,
     ) -> str:
         self.sent.append((target, question, hop))
         return "corr-1"
@@ -270,6 +273,8 @@ def test_every_send_carries_a_required_hop_count() -> None:
         "continue_session",
         "root_turn_id",
         "background_caller",
+        "kind",
+        "subagent_depth",
     ], (
         "ask is frozen at the policy that authorises it, the peer, the question, the "
         "originating session and turn, the depth, and who is asking. The policy travels "
@@ -503,6 +508,7 @@ def _stub(*, read_answer: bool) -> str:
     return f'''
 from __future__ import annotations
 
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peers import AgentId, AgentRef, BackgroundAsk, BackgroundKeys, PeerPolicy
 from agent_core.domain.turn import CallerIdentity, SessionRef, TurnId
 from agent_core.ports.agent_mailbox import AgentMailbox
@@ -526,6 +532,8 @@ class StubMailbox:
         continue_session: str | None = None,
         root_turn_id: str | None = None,
         background_caller: CallerIdentity | None = None,
+        kind: DelegationKind = DelegationKind.PEER,
+        subagent_depth: int = 0,
     ) -> str:
         raise NotImplementedError
 
@@ -648,9 +656,11 @@ class _RecordsWhoAsked:
         continue_session: str | None = None,
         root_turn_id: str | None = None,
         background_caller: CallerIdentity | None = None,
+        kind: DelegationKind = DelegationKind.PEER,
+        subagent_depth: int = 0,
     ) -> str:
         del policy, target, question, from_session, turn_id, hop, request_key
-        del continue_session, root_turn_id, background_caller
+        del continue_session, root_turn_id, background_caller, kind, subagent_depth
         self.askers.append(asker)
         return f"corr-{len(self.askers)}"
 
@@ -778,6 +788,8 @@ def test_every_send_names_who_is_asking() -> None:
         "continue_session",
         "root_turn_id",
         "background_caller",
+        "kind",
+        "subagent_depth",
     ], (
         "ask is frozen at the policy that authorises it, the peer, the question, the "
         "originating session and turn, the depth, and who is asking. The policy travels "

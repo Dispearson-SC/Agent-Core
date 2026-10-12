@@ -114,6 +114,7 @@ from typing import Any, Final
 import psycopg
 
 from agent_core.adapters.driven.agent_pydantic.runner import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peers import (
     BACKGROUND_LIST_LIMIT,
     AgentId,
@@ -163,8 +164,8 @@ _ENQUEUE_COLUMNS = """
     INSERT INTO peer_messages
         (correlation_id, target_agent_id, from_session_id, from_tenant_id,
          turn_id, hop, question, from_agent_id, answer_token, request_key, max_concurrent,
-         peer_session_id, root_turn_id, background)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+         peer_session_id, root_turn_id, background, kind, subagent_depth)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
 """
 _ENQUEUE_KEYED_SQL = (
     _ENQUEUE_COLUMNS
@@ -224,7 +225,7 @@ _CLAIM_ONE_SQL = """
     WHERE correlation_id = %s AND state = 'queued'
     RETURNING correlation_id, target_agent_id, from_session_id, from_tenant_id,
               turn_id, hop, question, from_agent_id, answer_token, redeliveries, callee_failures,
-              peer_session_id, root_turn_id, background
+              peer_session_id, root_turn_id, background, kind, subagent_depth
 """
 # `answered_at IS NULL` is the idempotency guard and it lives in the WHERE clause rather
 # than in a preceding SELECT, for the reason every other guard in this module does: two
@@ -281,7 +282,7 @@ _CANCEL_BACKGROUND_SQL = """
 # statements below (C1o), so a long-lived conversation never loses an open ask to the window.
 _BACKGROUND_COLUMNS = """
     SELECT correlation_id, target_agent_id, question, enqueued_at, state, answer_failed,
-           answered_at, cancelled_at, peer_session_id, hop, root_turn_id
+           answered_at, cancelled_at, peer_session_id, hop, root_turn_id, kind
     FROM peer_messages
     WHERE from_tenant_id = %s AND from_session_id = %s AND background IS NOT NULL
 """
@@ -425,6 +426,10 @@ class PeerAsk:
     # C19. Where the answer goes when the ask is a BACKGROUND one (the asking conversation moved
     # on); None for an ordinary ask.
     background_caller: CallerIdentity | None = None
+    # C28. Whether the callee was asked as a peer or spawned as a subagent, and the subagent depth
+    # the chain down to it holds.
+    kind: DelegationKind = DelegationKind.PEER
+    subagent_depth: int = 0
 
 
 def _caller_to_json(caller: CallerIdentity) -> str:
@@ -523,6 +528,7 @@ def _background_ask_of(row: Sequence[object]) -> BackgroundAsk:
         session=None if row[8] is None else str(row[8]),
         hop=int(row[9]),  # type: ignore[call-overload]
         root_turn_id=None if row[10] is None else str(row[10]),
+        kind=DelegationKind(str(row[11])),
     )
 
 
@@ -566,6 +572,8 @@ class PgAgentMailbox:
         continue_session: str | None = None,
         root_turn_id: str | None = None,
         background_caller: CallerIdentity | None = None,
+        kind: DelegationKind = DelegationKind.PEER,
+        subagent_depth: int = 0,
     ) -> str:
         """Enqueue durably and return the correlation id the answer will arrive with.
 
@@ -612,6 +620,8 @@ class PgAgentMailbox:
             continue_session,
             root_turn_id,
             None if background_caller is None else _caller_to_json(background_caller),
+            kind,
+            subagent_depth,
         )
 
     def _enqueue_sync(
@@ -627,6 +637,8 @@ class PgAgentMailbox:
         continue_session: str | None,
         root_turn_id: str | None,
         background: str | None,
+        kind: DelegationKind,
+        subagent_depth: int,
     ) -> str:
         correlation_id = (
             secrets.token_urlsafe(_CORRELATION_ID_BYTES)
@@ -658,6 +670,8 @@ class PgAgentMailbox:
                     # C16. A direct ask hangs from its own asking turn.
                     root_turn_id if root_turn_id is not None else str(turn_id),
                     background,
+                    kind.value,
+                    subagent_depth,
                 ),
             ).fetchone()
         if row is None:  # pragma: no cover - DO UPDATE always returns the surviving row
@@ -751,6 +765,8 @@ class PgAgentMailbox:
             peer_session_id=None if row[11] is None else str(row[11]),
             root_turn_id=None if row[12] is None else str(row[12]),
             background_caller=_caller_from_json(row[13], TenantId(str(row[3]))),
+            kind=DelegationKind(str(row[14])),
+            subagent_depth=int(row[15]),
         )
 
     async def reclaim_stale(

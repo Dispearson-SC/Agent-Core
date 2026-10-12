@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peers import (
     BACKGROUND_LIST_LIMIT,
     AgentId,
@@ -132,8 +133,16 @@ class ControlledMailbox:
         continue_session: str | None = None,
         root_turn_id: str | None = None,
         background_caller: CallerIdentity | None = None,
+        kind: DelegationKind = DelegationKind.PEER,
+        subagent_depth: int = 0,
     ) -> str:
-        extra = {} if background_caller is None else {"background_caller": background_caller}
+        extra: dict[str, Any] = (
+            {} if background_caller is None else {"background_caller": background_caller}
+        )
+        if kind is not DelegationKind.PEER:
+            extra["kind"] = kind
+        if subagent_depth:
+            extra["subagent_depth"] = subagent_depth
         return await self._invoke(  # type: ignore[no-any-return]
             "ask",
             policy,

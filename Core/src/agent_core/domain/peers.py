@@ -33,6 +33,7 @@ from enum import StrEnum
 from typing import Final, NewType
 from uuid import UUID, uuid5
 
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.answer_cache import AnswerCacheScope
 
 AgentId = NewType("AgentId", str)
@@ -198,6 +199,18 @@ class PeerBackgroundRefusedError(Exception):
         self.reason = reason
 
 
+class PeerSubagentRefusedError(Exception):
+    """An ask asked to spawn a subagent where the transport cannot (C28, D62).
+
+    Raised by a mailbox that cannot own a child workflow (the A2A client: the peer is another
+    process and owns its own turns). The workflow turns it into a refused result.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 PEER_WORKFLOW_NAMESPACE: Final[UUID] = UUID("5b0f6a3e-2c1d-5e47-9a68-7d3c4f1b8e20")
 """The fixed namespace of peer workflow ids. NEVER change it: it is part of every id already
 issued, and a changed namespace names every in-flight peer workflow differently."""
@@ -285,6 +298,8 @@ class BackgroundAsk:
     # hangs from: what a message to the same child carries, so no verb needs the asking turn's own.
     hop: int = 0
     root_turn_id: str | None = None
+    # C28. Whether the child is a peer that was asked or a subagent that was spawned.
+    kind: DelegationKind = DelegationKind.PEER
 
     @property
     def is_open(self) -> bool:

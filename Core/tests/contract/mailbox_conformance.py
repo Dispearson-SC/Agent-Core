@@ -41,6 +41,7 @@ from typing import Any, Protocol
 import pytest
 
 from agent_core.adapters.driven.agent_pydantic.runner import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peers import (
     BACKGROUND_LIST_LIMIT,
     AgentId,
@@ -51,6 +52,7 @@ from agent_core.domain.peers import (
     PeerBackgroundRefusedError,
     PeerContinuationRefusedError,
     PeerPolicy,
+    PeerSubagentRefusedError,
     background_followup_turn_id,
     new_answer_token,
     peer_root_origin,
@@ -87,6 +89,7 @@ class MailboxHarness(Protocol):
     supports_queue: bool
     supports_continuation: bool
     supports_background: bool
+    supports_subagents: bool
 
     async def ask(
         self,
@@ -101,12 +104,15 @@ class MailboxHarness(Protocol):
         continue_session: str | None = None,
         root_turn_id: str | None = None,
         background_caller: CallerIdentity | None = None,
+        kind: DelegationKind = DelegationKind.PEER,
+        subagent_depth: int = 0,
     ) -> str:
         """Enqueue one ask through the port and return its correlation id. `max_concurrent`
         overrides the asking policy's `max_concurrent_asks` (C11); `continue_session` asks to run
         in an earlier peer session (C12); `root_turn_id` names the turn a person started when the
         asking turn is itself a callee's (C16); `background_caller` makes it a background ask
-        whose answer goes back to that identity (C19)."""
+        whose answer goes back to that identity (C19); `kind` and `subagent_depth` mark a subagent
+        spawn and the depth it travels at (C28)."""
         ...
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -613,6 +619,61 @@ class MailboxConformance:
         assert [c.root_turn_id for c in claimed] == ["root-turn", "root-turn"], (
             "a direct ask hangs from its own asking turn, a nested one from the root it was given"
         )
+
+    # --- subagents (C28) -------------------------------------------------------------------------
+
+    async def test_a_claimed_ask_says_whether_it_is_a_subagent_and_how_deep(
+        self, harness: MailboxHarness
+    ) -> None:
+        queue = _queue(harness)
+        if not queue.supports_subagents:
+            pytest.skip("this adapter cannot run a subagent")
+        peer = await queue.ask("a peer question", request_key="tc-1")
+        sub = await queue.ask(
+            "a task", request_key="tc-2", kind=DelegationKind.SUBAGENT, subagent_depth=2
+        )
+
+        claimed = [await queue.claim(), await queue.claim()]
+
+        assert [c.correlation_id for c in claimed] == [peer, sub]
+        assert [(c.kind, c.subagent_depth) for c in claimed] == [
+            (DelegationKind.PEER, 0),
+            (DelegationKind.SUBAGENT, 2),
+        ]
+
+    async def test_a_replayed_subagent_spawn_names_the_same_ask(
+        self, harness: MailboxHarness
+    ) -> None:
+        if not harness.supports_subagents:
+            pytest.skip("this adapter cannot run a subagent")
+        first = await harness.ask("task", kind=DelegationKind.SUBAGENT, subagent_depth=1)
+        replay = await harness.ask("task", kind=DelegationKind.SUBAGENT, subagent_depth=1)
+
+        assert replay == first
+
+    async def test_a_listed_background_subagent_says_what_it_is(
+        self, harness: MailboxHarness
+    ) -> None:
+        _background(harness)
+        if not harness.supports_subagents:
+            pytest.skip("this adapter cannot run a subagent")
+        sub = await harness.ask(
+            "slow task", request_key="tc-1", kind=DelegationKind.SUBAGENT, background_caller=CALLER
+        )
+        peer = await harness.ask("slow ask", request_key="tc-2", background_caller=CALLER)
+
+        listed = {a.handle: a.kind for a in await harness.mailbox.background_asks(SESSION)}
+
+        assert listed == {sub: DelegationKind.SUBAGENT, peer: DelegationKind.PEER}
+
+    async def test_an_adapter_that_cannot_run_a_subagent_refuses_it_visibly(
+        self, harness: MailboxHarness
+    ) -> None:
+        if harness.supports_subagents:
+            pytest.skip("this adapter supports subagents")
+
+        with pytest.raises(PeerSubagentRefusedError):
+            await harness.ask("task", kind=DelegationKind.SUBAGENT)
 
     # --- background asks (C19, C20) -------------------------------------------------------------
 

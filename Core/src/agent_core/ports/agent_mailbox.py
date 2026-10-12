@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peers import (
     BACKGROUND_LIST_LIMIT,
     AgentId,
@@ -75,6 +76,8 @@ class AgentMailbox(Protocol):
         continue_session: str | None = None,
         root_turn_id: str | None = None,
         background_caller: CallerIdentity | None = None,
+        kind: DelegationKind = DelegationKind.PEER,
+        subagent_depth: int = 0,
     ) -> str:
         """PSEUDO-CODE - F9. Returns a correlation id; the ANSWER arrives via DBOS.recv().
 
@@ -127,6 +130,12 @@ class AgentMailbox(Protocol):
         `cancel` (by handle) or `cancel_background` (the conversation closed) ends it. An adapter
         whose transport cannot deliver a late answer raises `PeerBackgroundRefusedError` instead of
         accepting it.
+
+        `kind` and `subagent_depth` (C28, D62) mark a SUBAGENT spawn: the callee is a child of the
+        asking turn started by `spawn_subagent`, and `subagent_depth` is how many subagent links the
+        chain down to it holds (its spawner's depth + 1). The row keeps both so the worker can start
+        the child with them and the ownership tree can label it. An adapter that cannot own a child
+        workflow raises `PeerSubagentRefusedError`. Everything else about the ask is unchanged.
 
         THE ANSWER IS UNTRUSTED CONTENT. Another agent is a third party - it may have read
         something hostile. Wrap it in delimiters like any `mcp_*` result. "Our own agent"
