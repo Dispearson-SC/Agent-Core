@@ -9,10 +9,11 @@ because it must authenticate and authorise by the SAME rules (same identity head
 that is only formatting: a `FeedItem` to the bytes of one SSE frame.
 
 FRAMES
-    event: snapshot   id: <last seq>   data: {"root_turn_id", "last_seq", "settled", "turns": [...]}
+    event: snapshot   id: <last seq>   data: {"root_turn_id", "last_seq", "settled", "open_asks",
+                                              "turns": [...]}
     event: <kind>     id: <seq>        data: {one event}
     : keepalive                         (a comment; keeps proxies from closing a quiet stream)
-    event: end                          (the tree settled; the server closes after it)
+    event: end                          (a snapshot showed the tree settled; the server closes)
 
 `Last-Event-ID` is accepted and not needed: every connection starts with a snapshot, which
 supersedes anything the client held (see `application/event_feed.py`).
@@ -44,6 +45,7 @@ def snapshot_json(snapshot: FeedSnapshot) -> dict[str, Any]:
         "root_turn_id": snapshot.root_turn_id,
         "last_seq": snapshot.last_seq,
         "settled": snapshot.settled,
+        "open_asks": snapshot.open_asks,
         "turns": [
             {
                 "turn_id": t.turn_id,

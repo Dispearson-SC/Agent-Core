@@ -30,6 +30,8 @@ from agent_core.domain.events import (
     fold_snapshot,
     progress_event_id,
 )
+from agent_core.domain.peers import BackgroundState
+from agent_core.domain.task_graph import AskRecord
 
 T0 = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 ROOT = "root-1"
@@ -282,6 +284,94 @@ def test_a_quiet_tree_yields_keepalives() -> None:
     assert run(scenario()) == [FeedKind.KEEPALIVE, FeedKind.KEEPALIVE]
 
 
+# --- a missed terminal event and background asks (C1p) ---
+
+
+def test_a_missed_terminal_event_is_corrected_by_a_snapshot_and_the_stream_ends() -> None:
+    """The broker never pumps the FINISHED event (a lost wake-up, a read that failed): the idle
+    wait must not trust the queue alone. The next idle period reads a snapshot, which shows the
+    tree settled, and the stream ends instead of yielding keepalives forever."""
+    store = Store()
+    store.add(_event(ROOT, EventKind.STARTED))
+    feed = _feed(store)
+
+    async def scenario() -> list[FeedKind]:
+        await feed.pump()
+        stream = feed.follow("t", ROOT, keepalive_seconds=0.02)
+        kinds = [(await anext(stream)).kind]
+        store.add(_event(ROOT, EventKind.FINISHED, elapsed=3))  # NOT pumped: the broker missed it
+        for _ in range(8):
+            try:
+                item = await asyncio.wait_for(anext(stream), 1)
+            except StopAsyncIteration:
+                break
+            kinds.append(item.kind)
+        return kinds
+
+    kinds = run(scenario())
+
+    assert FeedKind.END in kinds, f"the stream never ended: {kinds}"
+    assert kinds[-1] is FeedKind.END
+    assert FeedKind.SNAPSHOT in kinds[1:], "the correction is a snapshot that replaces the state"
+
+
+class _Asks:
+    """A `TaskGraphReader` whose asks the test flips."""
+
+    def __init__(self, *states: BackgroundState) -> None:
+        self.states = list(states)
+
+    async def asks_under(
+        self, tenant_id: str, root_turn_id: str, *, limit: int = 500
+    ) -> tuple[AskRecord, ...]:
+        return tuple(
+            AskRecord(f"h{n}", "billing", "a", root_turn_id, state, True, 0, T0)
+            for n, state in enumerate(self.states)
+        )
+
+
+def test_the_stream_stays_open_while_a_background_ask_runs_and_ends_when_it_is_done() -> None:
+    """The root turn finished, but an ask it left running is still part of the tree: ending now
+    would tell the client nothing is left while a peer is working."""
+    store = Store()
+    store.add(_event(ROOT, EventKind.STARTED))
+    store.add(_event(ROOT, EventKind.FINISHED, elapsed=3))
+    asks = _Asks(BackgroundState.RUNNING)
+    feed = EventFeed(store, store, poll_seconds=0.01, asks=asks)
+
+    async def scenario() -> tuple[Any, list[FeedKind], list[FeedKind]]:
+        stream = feed.follow("t", ROOT, keepalive_seconds=0.02)
+        first = await anext(stream)
+        while_running = [(await asyncio.wait_for(anext(stream), 1)).kind for _ in range(2)]
+        asks.states = [BackgroundState.ANSWERED]
+        after: list[FeedKind] = []
+        for _ in range(8):
+            try:
+                after.append((await asyncio.wait_for(anext(stream), 1)).kind)
+            except StopAsyncIteration:
+                break
+        return first, while_running, after
+
+    first, while_running, after = run(scenario())
+
+    assert first.kind is FeedKind.SNAPSHOT and first.snapshot.open_asks == 1
+    assert not first.snapshot.settled, "a running background ask keeps the tree unsettled"
+    assert FeedKind.END not in while_running
+    assert after[-1] is FeedKind.END
+
+
+def test_a_queued_background_ask_also_keeps_the_stream_open() -> None:
+    store = Store()
+    store.add(_event(ROOT, EventKind.STARTED))
+    store.add(_event(ROOT, EventKind.FINISHED, elapsed=3))
+    feed = EventFeed(store, store, poll_seconds=0.01, asks=_Asks(BackgroundState.QUEUED))
+
+    async def scenario() -> Any:
+        return await anext(feed.follow("t", ROOT))
+
+    assert run(scenario()).snapshot.open_asks == 1
+
+
 # --- the SSE frames ---
 
 
@@ -298,4 +388,5 @@ def test_the_frames_are_valid_sse_with_ids_to_resume_from() -> None:
     assert snapshot_frame.startswith("event: snapshot\nid: 2\ndata: ")
     body = json.loads(snapshot_frame.split("data: ", 1)[1])
     assert body["settled"] is True and body["turns"][0]["state"] == "finished"
+    assert body["open_asks"] == 0
     assert end_frame.startswith("event: end\n") and snapshot_frame.endswith("\n\n")

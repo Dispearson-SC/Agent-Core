@@ -2137,3 +2137,17 @@ is each doing" (Pi's `taskGraph()`), from the mailbox, with no new table.
   node), and the live view (the feed of D53 is the live one).
 - **Replay shape: unchanged by C23** (the `.10` bump was taken by C21).
 
+
+## D55 · Agent-comms v2: slice 14 advisories for the feed and the graph (C1p)
+
+The review of C21-C23 approved them with advisories; this closes them.
+
+- **The end of a stream is decided from a snapshot, never from the live events alone.** A missed
+  `finished` (a lost wake-up, a read that failed) used to leave the stream open for ever, and a
+  root that had finished while a background ask still ran ended it too early. Now every idle period
+  (`min(keepalive, reconcile_seconds)`, default 5 s) reads a snapshot; one that differs from what
+  the client holds is yielded (it replaces the client's state), and one that shows the tree settled
+  is followed by `end`. A snapshot counts as settled only when no turn is running AND no ask under
+  the tree is `queued` or `running` (`open_asks`, read through the `TaskGraphReader` port the feed
+  now takes; the field is in the snapshot JSON). Cost: one extra tree read and one mailbox read per
+  idle subscriber per 5 s, both indexed.

@@ -134,11 +134,18 @@ class FeedSnapshot:
     root_turn_id: str
     last_seq: int
     turns: tuple[TurnProgress, ...]
+    open_asks: int = 0
 
     @property
     def settled(self) -> bool:
-        """The root turn and everything under it has finished or failed (nothing is running)."""
-        return bool(self.turns) and all(t.state is not TurnState.RUNNING for t in self.turns)
+        """The root turn and everything under it has finished or failed: no turn is running and no
+        ask recorded under the tree is still queued or running (`open_asks`, which a background
+        ask keeps above zero after the turn that made it has ended)."""
+        return (
+            bool(self.turns)
+            and self.open_asks == 0
+            and all(t.state is not TurnState.RUNNING for t in self.turns)
+        )
 
 
 def fold_snapshot(root_turn_id: str, events: tuple[StoredEvent, ...]) -> FeedSnapshot:

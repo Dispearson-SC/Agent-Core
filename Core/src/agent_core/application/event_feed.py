@@ -37,15 +37,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Final
 
 from agent_core.domain.events import EventKind, FeedSnapshot, StoredEvent, fold_snapshot
+from agent_core.domain.peers import BackgroundState
 from agent_core.ports.event_reader import EventReader, EventWakeup
+from agent_core.ports.task_graph_reader import TaskGraphReader
 
 __all__ = [
     "DEFAULT_KEEPALIVE_SECONDS",
+    "DEFAULT_RECONCILE_SECONDS",
     "DEFAULT_QUEUE_SIZE",
     "EventFeed",
     "FeedItem",
@@ -56,7 +59,11 @@ _LOG = logging.getLogger(__name__)
 
 DEFAULT_QUEUE_SIZE: Final[int] = 64
 DEFAULT_KEEPALIVE_SECONDS: Final[float] = 15.0
+DEFAULT_RECONCILE_SECONDS: Final[float] = 5.0
 _POLL_SECONDS: Final[float] = 2.0
+_OPEN_ASKS: Final[frozenset[BackgroundState]] = frozenset(
+    {BackgroundState.QUEUED, BackgroundState.RUNNING}
+)
 _BATCH: Final[int] = 500
 
 
@@ -109,6 +116,8 @@ class EventFeed:
         *,
         queue_size: int = DEFAULT_QUEUE_SIZE,
         poll_seconds: float = _POLL_SECONDS,
+        asks: TaskGraphReader | None = None,
+        reconcile_seconds: float = DEFAULT_RECONCILE_SECONDS,
     ) -> None:
         if queue_size < 1:
             raise ValueError("queue_size must be at least 1")
@@ -116,6 +125,8 @@ class EventFeed:
         self._wakeup = wakeup
         self._queue_size = queue_size
         self._poll = poll_seconds
+        self._asks = asks
+        self._reconcile = reconcile_seconds
         self._subscribers: set[_Subscription] = set()
         self._cursor: int | None = None
 
@@ -163,7 +174,15 @@ class EventFeed:
     # --- one subscriber ------------------------------------------------------------------------
 
     async def _snapshot(self, tenant_id: str, root_turn_id: str) -> FeedSnapshot:
-        return fold_snapshot(root_turn_id, await self._reader.tree(tenant_id, root_turn_id))
+        """The tree as it is now: its events folded, plus how many asks under it are still open
+        (a background ask outlives the turn that made it, and its callee may not have started)."""
+        snapshot = fold_snapshot(root_turn_id, await self._reader.tree(tenant_id, root_turn_id))
+        if self._asks is None:
+            return snapshot
+        records = await self._asks.asks_under(tenant_id, root_turn_id)
+        return replace(
+            snapshot, open_asks=sum(1 for record in records if record.state in _OPEN_ASKS)
+        )
 
     async def follow(
         self,
@@ -174,29 +193,52 @@ class EventFeed:
     ) -> AsyncIterator[FeedItem]:
         """The feed of one tree: a snapshot, then events, until the tree has settled.
 
-        Ends (after an `END` item) when the root turn and everything under it has finished or
-        failed. A tree that is still running keeps the stream open; a keepalive is yielded
-        whenever `keepalive_seconds` pass quietly. Cancel the iteration to unsubscribe.
+        Ends (after an `END` item) when a SNAPSHOT shows the tree settled: the root turn and
+        everything under it finished or failed and no ask under it is still open. The end is never
+        decided from the live events alone, because a missed one (a lost wake-up, a failed read)
+        would then keep the stream open for ever, and a finished root with a running background
+        ask would end it too early.
+
+        The idle wait is bounded by `reconcile_seconds`: every idle period reads a snapshot, so
+        whatever the live path missed is corrected by the next one (yielded when it differs from
+        what the client holds). A keepalive is yielded whenever `keepalive_seconds` pass quietly.
+        Cancel the iteration to unsubscribe.
         """
         sub = _Subscription(tenant_id, root_turn_id, self._queue_size)
         self._subscribers.add(sub)
+        idle = min(keepalive_seconds, self._reconcile)
+        clock = asyncio.get_running_loop().time
         try:
             snapshot = await self._snapshot(tenant_id, root_turn_id)
             yield FeedItem(FeedKind.SNAPSHOT, snapshot=snapshot)
-            floor = snapshot.last_seq
+            floor, shown_open, last_sent = snapshot.last_seq, snapshot.open_asks, clock()
             if snapshot.settled:
                 yield FeedItem(FeedKind.END, snapshot=snapshot)
                 return
             while True:
                 try:
-                    stored = await asyncio.wait_for(sub.queue.get(), timeout=keepalive_seconds)
+                    stored = await asyncio.wait_for(sub.queue.get(), timeout=idle)
                 except TimeoutError:
-                    yield FeedItem(FeedKind.KEEPALIVE)
+                    snapshot = await self._snapshot(tenant_id, root_turn_id)
+                    changed = snapshot.last_seq > floor or snapshot.open_asks != shown_open
+                    if changed or snapshot.settled:
+                        floor, shown_open, last_sent = (
+                            snapshot.last_seq,
+                            snapshot.open_asks,
+                            clock(),
+                        )
+                        yield FeedItem(FeedKind.SNAPSHOT, snapshot=snapshot)
+                    elif clock() - last_sent >= keepalive_seconds:
+                        last_sent = clock()
+                        yield FeedItem(FeedKind.KEEPALIVE)
+                    if snapshot.settled:
+                        yield FeedItem(FeedKind.END, snapshot=snapshot)
+                        return
                     continue
                 if stored is None:  # this subscriber fell behind: the newest state replaces it
                     sub.lagging = False
                     snapshot = await self._snapshot(tenant_id, root_turn_id)
-                    floor = snapshot.last_seq
+                    floor, shown_open, last_sent = snapshot.last_seq, snapshot.open_asks, clock()
                     yield FeedItem(FeedKind.SNAPSHOT, snapshot=snapshot)
                     if snapshot.settled:
                         yield FeedItem(FeedKind.END, snapshot=snapshot)
@@ -204,10 +246,11 @@ class EventFeed:
                     continue
                 if stored.seq <= floor:
                     continue
-                floor = stored.seq
+                floor, last_sent = stored.seq, clock()
                 yield FeedItem(FeedKind.EVENT, event=stored)
                 if stored.event.kind in (EventKind.FINISHED, EventKind.FAILED):
                     snapshot = await self._snapshot(tenant_id, root_turn_id)
+                    shown_open = snapshot.open_asks
                     if snapshot.settled:
                         yield FeedItem(FeedKind.END, snapshot=snapshot)
                         return

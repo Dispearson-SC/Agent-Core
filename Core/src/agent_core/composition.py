@@ -1932,6 +1932,7 @@ def build_container(
     resolve_evidence = _pg_evidence_correlate(resolved.app_conninfo, profiles)
     signal_evidence = _pg_evidence_signal(resolved.app_conninfo)
 
+    task_graph = PgTaskGraphReader(resolved.app_conninfo)
     container = Container(
         settings=resolved,
         domain_pool=domain_pool,
@@ -1941,9 +1942,11 @@ def build_container(
         audit=audit,
         events=events,
         event_feed=EventFeed(
-            PgEventReader(resolved.app_conninfo), PgEventWakeup(resolved.app_conninfo)
+            PgEventReader(resolved.app_conninfo),
+            PgEventWakeup(resolved.app_conninfo),
+            asks=task_graph,
         ),
-        task_graph=PgTaskGraphReader(resolved.app_conninfo),
+        task_graph=task_graph,
         audit_reader=audit_reader,
         transcripts=transcripts,
         knowledge_admin=knowledge_admin,
