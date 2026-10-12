@@ -98,6 +98,11 @@ class PolicyRuleFileError(ValueError):
     """
 
 
+# C15. `ask` is how a rule file spells NEEDS_APPROVAL for a per-peer rule ("ask a person first").
+# The stored effect is the existing one; only the file accepts the shorter word.
+_EFFECT_ALIASES: dict[str, str] = {"ask": Effect.NEEDS_APPROVAL.value}
+
+
 def parse_policy_rules(text: str, *, source: str) -> tuple[PolicyRule, ...]:
     """One rule document to domain rules, in file order.
 
@@ -241,6 +246,8 @@ def _definition(rule: PolicyRule) -> dict[str, Any]:
     }
     if rule.tenant_id is not None:
         definition["tenant_id"] = str(rule.tenant_id)
+    if rule.resource_pattern is not None:
+        definition["resource_pattern"] = rule.resource_pattern
     return definition
 
 
@@ -259,9 +266,9 @@ def _to_rule(entry: Any, *, source: str, position: int) -> PolicyRule:
     tool_pattern = _required_text(entry, "tool_pattern", where)
     effect_name = _required_text(entry, "effect", where)
     try:
-        effect = Effect(effect_name)
+        effect = Effect(_EFFECT_ALIASES.get(effect_name, effect_name))
     except ValueError as error:
-        permitted = ", ".join(member.value for member in Effect)
+        permitted = ", ".join([*(member.value for member in Effect), *_EFFECT_ALIASES])
         raise PolicyRuleFileError(
             f"{where}: effect {effect_name!r} is not one of {permitted}."
         ) from error
@@ -274,6 +281,13 @@ def _to_rule(entry: Any, *, source: str, position: int) -> PolicyRule:
             "with none leaves both audiences with nothing."
         )
 
+    resource = entry.get("resource")
+    if resource is not None and (not isinstance(resource, str) or not resource.strip()):
+        raise PolicyRuleFileError(
+            f"{where}: `resource` must be a non-empty string (for ask_peer, a peer id or a "
+            "prefix ending in `*`); leave the key out for a rule about the whole tool."
+        )
+
     tenant = entry.get("tenant_id")
     return PolicyRule(
         rule_id=rule_id,
@@ -283,6 +297,7 @@ def _to_rule(entry: Any, *, source: str, position: int) -> PolicyRule:
         subject_roles=_text_set(entry.get("subject_roles"), "subject_roles", where),
         channels=_text_set(entry.get("channels"), "channels", where),
         tenant_id=None if tenant is None else TenantId(str(tenant)),
+        resource_pattern=None if resource is None else resource.strip(),
     )
 
 

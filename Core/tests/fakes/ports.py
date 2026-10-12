@@ -33,7 +33,13 @@ from decimal import Decimal
 
 from agent_core.domain.compaction import CompactionCheckpoint
 from agent_core.domain.media import MediaId, MediaKind, MediaRef
-from agent_core.domain.policy import EFFECT_PRECEDENCE, Effect, PolicyDecision, RuleSet
+from agent_core.domain.policy import (
+    EFFECT_PRECEDENCE,
+    Effect,
+    PolicyDecision,
+    RuleSet,
+    resource_of,
+)
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.transcript import (
     VISIBILITY,
@@ -154,7 +160,13 @@ class FakeToolPolicy:
         # Keep everything except DENY - NEEDS_APPROVAL tools stay advertised so the model
         # may still ask for them, per the port's own docstring.
         return tuple(
-            name for name in tool_names if self.decide(rules, name, {}).effect is not Effect.DENY
+            name
+            for name in tool_names
+            if self.decide(rules, name, {}).effect is not Effect.DENY
+            or (
+                self.decide(rules, name, {}).reason == "no matching rule"
+                and rules.grants_some_resource(name)
+            )
         )
 
     def decide(
@@ -163,7 +175,7 @@ class FakeToolPolicy:
         tool_name: str,
         arguments: dict[str, object],
     ) -> PolicyDecision:
-        applicable = rules.applicable(tool_name)
+        applicable = rules.applicable(tool_name, resource=resource_of(tool_name, arguments))
         for effect in EFFECT_PRECEDENCE:
             for rule in applicable:
                 if rule.effect is effect:

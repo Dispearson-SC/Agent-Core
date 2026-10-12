@@ -666,6 +666,13 @@ stored on each ask and enforced where an ask is claimed (the answering side), so
 queued - not refused - until one answers, is cancelled or is requeued. The asker's
 `reply_timeout_seconds` keeps running while an ask waits its turn.
 
+**Per-peer permission rules (C15, D41).** A policy rule may carry a `resource` next to its
+`tool_pattern`; for `ask_peer` the resource is the peer id. `allow`, `ask` (the existing
+`needs_approval`) and `deny` work per peer, with the existing precedence (DENY beats ASK beats
+ALLOW, whatever the order of the rules). `ask` suspends that call on the usual human approval
+BEFORE anything is dispatched; `deny` removes the peer from the catalogue and refuses a call that
+names it anyway.
+
 **Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
 and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the
 two-sided gate), the caller's policy rules and each callee profile's `description`. A denied,

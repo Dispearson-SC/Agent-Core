@@ -126,4 +126,6 @@ def test_the_snapshot_really_carries_the_narrowing_the_port_drops() -> None:
     assert {"subject_roles", "channel"} <= set(RuleSet.__dataclass_fields__)
 
     applicable = inspect.signature(RuleSet.applicable)
-    assert [name for name in applicable.parameters if name != "self"] == ["tool_name"]
+    # C15 added `resource`: WHAT the call acts on, not WHO is calling. Still no roles, channel or
+    # tenant parameter, which is the property this test exists to pin.
+    assert [name for name in applicable.parameters if name != "self"] == ["tool_name", "resource"]

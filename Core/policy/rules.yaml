@@ -19,6 +19,16 @@
 #                 before matching, so a provider advertising `Pricing_Apply` still matches.
 #   effect        allow | needs_approval | deny. DENY beats NEEDS_APPROVAL beats ALLOW,
 #                 whatever the order here or the specificity of the pattern.
+#   resource      OPTIONAL. Narrows the rule to what the call acts on: for `ask_peer`, the id of the
+#                 peer being asked (exact, or a trailing `*` for a prefix, lowercased). Absent, the
+#                 rule is about the whole tool, as before. A narrowed rule does not apply to a call
+#                 that names no peer. `effect: ask` is accepted as a spelling of `needs_approval`:
+#                     - rule_id: ask-fraud-first
+#                       tool_pattern: ask_peer
+#                       resource: fraud_analyst
+#                       effect: ask          # a person confirms before the question leaves
+#                       reason: The fraud desk sees customer data; a person agrees first.
+#                 A DENY on a peer also hides it from the agent's `ask_peer` menu (C14).
 #   reason        REQUIRED, and it has two audiences. On DENY the model reads it as the
 #                 tool result and can adapt; on NEEDS_APPROVAL a human reads it as the ask.
 #   subject_roles empty or absent means ANY ROLE - not "no roles". Same for `channels` and

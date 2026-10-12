@@ -1631,3 +1631,40 @@ does not load, both part of the content hash), with Pi's numbers as defaults:
   lease requeues it (C3). The A2A adapter has no claim side (the remote peer owns its queue), so it
   does not enforce the concurrent cap.
 - **Replay shape: unchanged** (`agent-core-turns.7` stays). Migration `0033` is additive.
+
+## D41 · Agent-comms v2: per-peer permission rules (C15)
+
+Policy rules matched on the tool name only, so one verdict covered every peer: an operator could not
+say "billing freely, the fraud desk only with a person's agreement, payroll never". A rule may now
+carry a `resource` (`PolicyRule.resource_pattern`, YAML `resource:`, stored in the `definition`
+jsonb as `resource_pattern`), narrowing it to what a call acts on. The resource of a call is
+`domain.policy.resource_of(tool, arguments)`: today only `ask_peer`, whose `target` is the peer id.
+
+- **Same grammar and same precedence as the rest of the engine.** The pattern is exact or a trailing
+  `*` prefix, lowercased, like `tool_pattern`. Verdicts reduce by `EFFECT_PRECEDENCE`, DENY beats
+  NEEDS_APPROVAL beats ALLOW, so `allow ask_peer` plus `ask fraud` means fraud asks a person and
+  every other peer is allowed. The task text said "ordered, last match wins" (OpenCode); that was NOT
+  adopted: the rule store is an unordered set of rows (file order is not stored and "decides
+  nothing", `load_policy_rules`), a later allow overriding an earlier deny is the very thing D-policy
+  forbids, and a second ordering rule next to the first would be the silent-bug shape CLAUDE.md warns
+  about. "Ordered" would be a product change to the whole engine, not to peers.
+- **A narrowed rule is about the peer, not the tool.** It matches only a call that names a resource
+  that fits. A call without a target matches no peer rule (the workflow refuses a malformed ask
+  anyway); a rule without `resource` matches every call, so every rule stored before C15 means what
+  it did. The effect word `ask` is accepted by the rule file as a spelling of `needs_approval`; the
+  stored value is unchanged.
+- **`ask` is the existing approval, before dispatch.** `PolicyEnforcement.before_tool_execute`
+  already calls `decide` with the call's arguments, so a NEEDS_APPROVAL on `ask_peer`+`fraud`
+  suspends that call for a person (`PendingKind.APPROVAL`, with the rule's reason) while its
+  siblings are asked as usual; once approved the call becomes the usual delegation. No new
+  workflow step.
+- **`deny` hides and refuses.** The C14 catalogue already drops a peer whose
+  `decide(rules, "ask_peer", {"target": id})` is DENY, so it leaves the `target` enum; a model that
+  names it anyway is refused by the hook with the rule's reason as the tool result.
+- **Offering the tool.** `filter_toolset` decides with no arguments, where no resource is named. A
+  tool whose only grants are per-peer rules would match nothing and be dropped before the model could
+  name a peer, so a tool that no rule matched, but that a resource rule allows or asks for, is kept
+  (`RuleSet.grants_some_resource`); a tool-wide DENY still removes it.
+- **Spawn of subagents (W5)** will call the same `decide` with its own resource argument: add the
+  tool to `RESOURCE_ARGUMENTS`.
+- **Replay shape: unchanged.**

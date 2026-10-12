@@ -22,8 +22,11 @@ ORDERING RULE - settle this in F1, do not leave it implicit
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
+from typing import Final
 
 from agent_core.domain.turn import CallerIdentity, TenantId
 
@@ -32,6 +35,26 @@ class Effect(StrEnum):
     ALLOW = "allow"
     NEEDS_APPROVAL = "needs_approval"
     DENY = "deny"
+
+
+# C15 (D41). Which argument of a tool call names the THING it acts on, for the tools whose rules can
+# be narrowed to it. Today only `ask_peer`: its `target` is the peer id. A tool that is not listed
+# has no resource, and a rule that names one never matches it.
+RESOURCE_ARGUMENTS: Final[Mapping[str, str]] = MappingProxyType({"ask_peer": "target"})
+
+
+def resource_of(tool_name: str, arguments: Mapping[str, object]) -> str | None:
+    """The resource a call acts on, or None when the tool has none or the call names none.
+
+    Pure, and total over whatever a model wrote: a missing, empty or non-text argument is "no
+    resource", never an error. A rule narrowed to a resource does not apply to a call without one
+    (see `PolicyRule.matches`), so a malformed call cannot be matched to a peer by accident.
+    """
+    argument = RESOURCE_ARGUMENTS.get(tool_name.lower())
+    if argument is None:
+        return None
+    value = arguments.get(argument)
+    return value if isinstance(value, str) and value else None
 
 
 # Resolution order for conflicting matches. Index 0 wins. Do not reorder without a test.
@@ -81,6 +104,9 @@ class PolicyRule:
     subject_roles: frozenset[str] = frozenset()
     channels: frozenset[str] = frozenset()
     tenant_id: TenantId | None = None
+    # C15 (D41). Narrows the rule to the THING a call acts on (for `ask_peer`: the peer id), same
+    # pattern grammar as `tool_pattern`. None = every resource, i.e. the rule is about the tool.
+    resource_pattern: str | None = None
 
     def matches(
         self,
@@ -88,6 +114,7 @@ class PolicyRule:
         roles: frozenset[str],
         channel: str,
         tenant: TenantId | None = None,
+        resource: str | None = None,
     ) -> bool:
         """True only when every POPULATED constraint on this rule matched.
 
@@ -108,10 +135,34 @@ class PolicyRule:
            forgotten narrowing that fails open is the whole defect this seat closes; a
            forgotten narrowing that fails closed is an inconvenience.
 
+        6. (C15) A rule with a `resource_pattern` applies only to a call that NAMES a resource, and
+           only to one the pattern matches (same grammar as the tool pattern: lowercased, a
+           trailing '*' is a prefix). `resource` DEFAULTS TO None, which is "this decision is about
+           the tool as a whole": a rule narrowed to one peer says nothing about it. A rule without
+           a pattern is about the tool and matches every resource, so rules stored before C15 mean
+           what they always meant.
+
         NOTE the deliberate asymmetry with `MediaPolicy.accepts`, where empty means
         "nothing". Different defaults because the failure modes differ: a permissive
         policy rule is inconvenient, permissive media handling is an incident.
         """
+        if not self.applies_to_caller(tool_name, roles, channel, tenant):
+            return False
+        if self.resource_pattern is not None and (
+            resource is None or not _glob(self.resource_pattern, resource)
+        ):
+            return False
+        return True
+
+    def applies_to_caller(
+        self,
+        tool_name: str,
+        roles: frozenset[str],
+        channel: str,
+        tenant: TenantId | None = None,
+    ) -> bool:
+        """Steps 1-5 of `matches`: the tool, the roles, the channel and the tenant, and nothing
+        about the resource."""
         if not self._pattern_matches(tool_name):
             return False
         if self.subject_roles and self.subject_roles.isdisjoint(roles):
@@ -123,11 +174,16 @@ class PolicyRule:
         return True
 
     def _pattern_matches(self, tool_name: str) -> bool:
-        pattern = self.tool_pattern.lower()
-        name = tool_name.lower()
-        if pattern.endswith("*"):
-            return name.startswith(pattern[:-1])
-        return name == pattern
+        return _glob(self.tool_pattern, tool_name)
+
+
+def _glob(pattern: str, value: str) -> bool:
+    """Exact match, or a PREFIX match when the pattern ends in '*'; both lowercased."""
+    pattern = pattern.lower()
+    value = value.lower()
+    if pattern.endswith("*"):
+        return value.startswith(pattern[:-1])
+    return value == pattern
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,8 +258,15 @@ class RuleSet:
             default_effect=default_effect,
         )
 
-    def applicable(self, tool_name: str) -> tuple[PolicyRule, ...]:
+    def applicable(
+        self, tool_name: str, *, resource: str | None = None
+    ) -> tuple[PolicyRule, ...]:
         """Every rule matching this tool for THIS snapshot's caller, unreduced.
+
+        `resource` (C15, keyword-only so that a tenant or a role passed positionally is still a
+        TypeError) is what the call acts on (`resource_of`): the rules narrowed to a resource
+        match only when it is given and fits; without it only the rules about the tool as a whole
+        do.
 
         No roles, no channel and NO TENANT parameter on purpose: they are the narrowing
         this snapshot was loaded for. `decide()` reduces the result by EFFECT_PRECEDENCE and
@@ -214,5 +277,21 @@ class RuleSet:
         return tuple(
             rule
             for rule in self.rules
-            if rule.matches(tool_name, self.subject_roles, self.channel, self.tenant_id)
+            if rule.matches(
+                tool_name, self.subject_roles, self.channel, self.tenant_id, resource
+            )
+        )
+
+    def grants_some_resource(self, tool_name: str) -> bool:
+        """Whether a rule narrowed to a resource could still ALLOW or ask for this tool (C15).
+
+        For the one question asked without a call: should the tool be OFFERED at all
+        (`ToolPolicy.filter_toolset`). A tool whose only grants name particular peers matches no
+        rule until a peer is named, and would otherwise be dropped before the model could name one.
+        """
+        return any(
+            rule.effect is not Effect.DENY
+            for rule in self.rules
+            if rule.resource_pattern is not None
+            and rule.applies_to_caller(tool_name, self.subject_roles, self.channel, self.tenant_id)
         )

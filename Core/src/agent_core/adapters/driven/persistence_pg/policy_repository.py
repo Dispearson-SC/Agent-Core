@@ -62,6 +62,7 @@ from agent_core.domain.policy import (
     PolicyDecision,
     PolicyRule,
     RuleSet,
+    resource_of,
 )
 from agent_core.domain.turn import CallerIdentity, TenantId
 
@@ -201,10 +202,21 @@ class PgToolPolicy:
 
         Defined as `decide` with empty arguments so the two can never disagree: a name
         kept here and denied there only ever wastes the model's budget.
+
+        ONE EXCEPTION, ON PURPOSE (C15): a tool that NO rule matched without a resource, but that a
+        rule narrowed to a resource (a particular peer) allows or asks for, is kept. With empty
+        arguments no resource is named, so those rules cannot match, and dropping the tool here
+        would hide `ask_peer` from an agent whose policy grants it per peer. `decide` still decides
+        each call; a tool-wide DENY still wins (it matches, so it is not the no-match default).
         """
-        return tuple(
-            name for name in tool_names if self.decide(rules, name, {}).effect is not Effect.DENY
-        )
+        kept: list[str] = []
+        for name in tool_names:
+            decision = self.decide(rules, name, {})
+            if decision.effect is not Effect.DENY or (
+                decision.rule_id is None and rules.grants_some_resource(name)
+            ):
+                kept.append(name)
+        return tuple(kept)
 
     def decide(
         self,
@@ -214,17 +226,16 @@ class PgToolPolicy:
     ) -> PolicyDecision:
         """Sync and pure - the hot path, one call per tool call.
 
-        `arguments` is accepted because the port's contract is argument-aware while F1's
-        stored rule shape is not yet: nothing here branches on a value, so nothing reads
-        it. Dropping the parameter would turn the first argument-matching rule into a
-        signature change across every call site.
+        `arguments` is read for ONE thing since C15: the resource a call acts on
+        (`domain.policy.resource_of`: the `target` of `ask_peer`), so a rule can be narrowed to a
+        peer. Nothing else about a value is matched.
 
         Reduction is by EFFECT_PRECEDENCE - DENY beats NEEDS_APPROVAL beats ALLOW - so a
         rule that grants can never overturn a rule that forbids, whatever its specificity
         or insertion order. No match at all falls back to the snapshot's `default_effect`,
         which is DENY, the fail-closed snapshot included.
         """
-        matched = rules.applicable(tool_name)
+        matched = rules.applicable(tool_name, resource=resource_of(tool_name, arguments))
         if not matched:
             # WHICH refusal this is comes from the snapshot's TYPE, never from how many
             # rules it holds: a reachable, empty `policy_rules` and a store whose query
@@ -294,6 +305,7 @@ class PgToolPolicy:
         Absent or JSON-null means ALL TENANTS, matching `PolicyRule.tenant_id`.
         """
         tenant = definition.get("tenant_id")
+        resource = definition.get("resource_pattern")
         try:
             return PolicyRule(
                 rule_id=rule_id,
@@ -303,6 +315,7 @@ class PgToolPolicy:
                 subject_roles=frozenset(definition.get("subject_roles") or ()),
                 channels=frozenset(definition.get("channels") or ()),
                 tenant_id=None if tenant is None else TenantId(str(tenant)),
+                resource_pattern=None if resource is None else str(resource),
             )
         except (KeyError, TypeError, ValueError) as error:
             self._on_error(error)

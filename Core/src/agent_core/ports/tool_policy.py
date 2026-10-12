@@ -113,8 +113,10 @@ class ToolPolicy(Protocol):
         `rules` is the snapshot `load_rules` returned; it already knows whose rules these
         are, which is why the verdict needs only the tool name and its arguments.
 
-        1. rules.applicable(tool_name) - the snapshot matches against the roles and the
-           channel it was narrowed for.
+        1. rules.applicable(tool_name, resource=...) - the snapshot matches against the roles
+           and the channel it was narrowed for, and (C15) against the resource the call acts
+           on (`domain.policy.resource_of(tool_name, arguments)`: the `target` of `ask_peer`)
+           for the rules that name one.
         2. Reduce by EFFECT_PRECEDENCE - DENY wins, then NEEDS_APPROVAL, then ALLOW.
         3. No match at all -> return `rules.default_effect`.
 
