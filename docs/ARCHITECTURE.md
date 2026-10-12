@@ -659,7 +659,7 @@ the model `status="cancelled"` for them and resumes the turn once. A refusal nev
 person's pending approval in the same round is still waited for.
 
 **How many asks run at once (C11, D40).** Two caps on the asking profile. `peers.max_parallel_asks`
-(default 8) is how many asks one model step may make: the tail of the step in call order is refused
+(default 8) is how many asks one model step may make: the tail of the step in `tool_call_id` order is refused (the workflow sorts a step's calls by id)
 with a `status="refused"` result the model can read, and a refusal holds no slot. And
 `peers.max_concurrent_asks` (default 4) is how many asks of one asking turn may RUN at once: it is
 stored on each ask and enforced where an ask is claimed (the answering side), so the rest stay

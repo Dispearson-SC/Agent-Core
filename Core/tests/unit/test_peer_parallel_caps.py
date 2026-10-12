@@ -83,6 +83,25 @@ def test_the_parallel_cap_is_the_asking_profiles_own(monkeypatch: pytest.MonkeyP
     assert 'status="refused"' in str(dict(world.resume.calls[0])["tc-03"])
 
 
+def test_the_excess_is_decided_in_tool_call_id_order_not_emission_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1m. One contract: the workflow sorts a step's pending calls by tool_call_id before it
+    dispatches (CLAUDE.md non-negotiable #7), so the tail that is refused is the tail of THAT
+    order, whatever order the model or the runner listed the calls in."""
+    asks = tuple(fanout.ask(tool_call_id) for tool_call_id in ("tc-z", "tc-a", "tc-m"))
+    world = fanout.install(
+        monkeypatch, asks, [fanout.answer("corr-1", "a"), fanout.answer("corr-2", "b")]
+    )
+    fanout.asker_policy(max_parallel_asks=2)
+
+    _run()
+
+    results = dict(world.resume.calls[0])
+    refused = [t for t in ("tc-a", "tc-m", "tc-z") if 'status="refused"' in str(results[t])]
+    assert refused == ["tc-z"], "the last id is refused even though it was emitted first"
+
+
 def test_the_defaults_are_eight_and_four() -> None:
     policy = PeerPolicy()
 

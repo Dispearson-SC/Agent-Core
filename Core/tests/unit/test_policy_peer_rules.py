@@ -180,6 +180,21 @@ def test_the_tool_stays_offered_while_some_peer_may_still_be_asked() -> None:
     assert policy.filter_toolset(unscoped_deny, ("ask_peer",)) == (), "a tool-wide DENY wins"
 
 
+def test_both_policies_tell_no_match_from_a_rule_by_its_id_not_by_its_reason() -> None:
+    """C1m. A tool-wide DENY whose reason happens to read like the default's is still a rule that
+    matched, so it wins over a per-peer grant in the fake exactly as in the Postgres adapter."""
+    lookalike = PolicyRule(
+        rule_id="no-peers",
+        tool_pattern="ask_peer",
+        effect=Effect.DENY,
+        reason="no matching rule",
+    )
+    rules = _ruleset(lookalike, _rule("billing-ok", Effect.ALLOW, resource="billing"))
+
+    assert _policy().filter_toolset(rules, ("ask_peer",)) == ()
+    assert fakes.FakeToolPolicy(rules).filter_toolset(rules, ("ask_peer",)) == ()
+
+
 # --- the catalogue and the call -----------------------------------------------------------------
 
 

@@ -1703,3 +1703,33 @@ the cause three files away.
   generate); checking rules that depend on the caller's roles, channel or tenant (a caller is not
   known at startup).
 - **Replay shape: unchanged.**
+
+## D43 · Agent-comms v2: slice 11 advisories (C1m)
+
+Decisions taken while closing the review advisories of the caps / rules / topology slice.
+
+- **The claim holds one turn lock, never two.** The claim used to take the per-turn advisory lock of
+  every candidate it scanned, skipped ones included, and keep them until commit; two workers (other
+  targets) scanning the same two turns in opposite order could each wait for the lock the other held.
+  Now the transaction picks the oldest claimable ask in SQL, locks only THAT ask's turn, recounts the
+  running asks under the lock and claims. If the recount finds the turn full after all, the
+  transaction ends, the turn is excluded and the claim starts again. Rejected: `pg_try_advisory_xact_lock`
+  and skip (two workers claiming asks of the same turn would see each other's lock and return nothing
+  although an ask was claimable, which the "claims are exclusive" conformance test caught in design).
+- **No scan window.** The 100-ask window is gone: the candidate query already leaves out the asks of
+  a turn at its cap (an unlocked count that the recount under the lock confirms), so a backlog of
+  capped asks cannot hide an uncapped turn's ask. Bounded by one query per claim, not a list.
+- **A2A: the task state carries the failure.** An A2A task reported `failed` (or `rejected`) in the
+  `message/send` response is recorded as a failed answer (the status message text, or a fixed
+  sentence), so the asker sees `status="error"` instead of waiting out its timeout. A failure
+  delivered later through `answer(failed=True)` already worked.
+- **`max_parallel_asks` order is `tool_call_id` order.** D40 said so and the code does it: the body
+  sorts a step's pending calls by id (non-negotiable #7) because the runner may build them from a
+  dict. "Call order" in ARCHITECTURE was loose wording and is corrected; model emission order is not
+  used since it is not replay-stable by itself. Test: non-sorted ids refuse the last id.
+- **Callee expiry is not a redelivery failure.** A callee that expires waiting for a person returns
+  normally and answers the asker with the closed text flagged as a failed answer (the asker sees
+  `error`: its question was not answered). The workflow does not raise, so the row is answered and
+  never requeued, and the redelivery cap (which counts workflows that ended in ERROR) is not touched.
+  Pinned by a test; no code change.
+- **Replay shape: unchanged** by this item.

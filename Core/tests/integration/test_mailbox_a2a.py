@@ -186,6 +186,11 @@ class _FixturePeer:
                     "id": f"task-{uuid.uuid4()}",
                     "status": {"state": peer.next_result["state"]},
                 }
+                if peer.next_result["state"] == "failed" and "text" in peer.next_result:
+                    result["status"]["message"] = {
+                        "role": "agent",
+                        "parts": [{"kind": "text", "text": peer.next_result["text"]}],
+                    }
                 if peer.next_result["state"] == "completed":
                     result["artifacts"] = [
                         {"parts": [{"kind": "text", "text": peer.next_result["text"]}]}
@@ -285,6 +290,49 @@ async def test_ask_round_trips_a_question_and_a_synchronous_answer_over_real_soc
         "third party and 'it is our own agent' is not a trust argument - CLAUDE.md #10"
     )
     assert "yes, free after 3pm" in delivered
+
+
+@pytest.mark.asyncio
+async def test_a_task_the_peer_reports_failed_is_a_failed_answer(
+    fixture_peer: _FixturePeer,
+) -> None:
+    """C1m. The failure of a remote callee is DATA on the answer (C1l), and over A2A it is the
+    task state: a task reported `failed` in the response is an answer the asker reads as an error,
+    not an ask that never resolves (and never as an ok)."""
+    fixture_peer.next_result = {"state": "failed", "text": "the calendar service is down"}
+    mailbox = await _mailbox()
+
+    correlation_id = await mailbox.ask(
+        _policy_for(fixture_peer),
+        _ASSISTANT,
+        f"q [{uuid.uuid4()}]",
+        from_session=_session(),
+        turn_id=TurnId(str(uuid.uuid4())),
+        hop=0,
+    )
+
+    delivered = await mailbox.read_answer(correlation_id)
+    assert delivered is not None, "a failed task left the ask waiting for an answer"
+    assert "the calendar service is down" in delivered
+    assert await mailbox.answer_failed(correlation_id) is True
+
+
+@pytest.mark.asyncio
+async def test_a_completed_task_is_not_a_failed_answer(fixture_peer: _FixturePeer) -> None:
+    fixture_peer.next_result = {"state": "completed", "text": "fine"}
+    mailbox = await _mailbox()
+
+    correlation_id = await mailbox.ask(
+        _policy_for(fixture_peer),
+        _ASSISTANT,
+        f"q [{uuid.uuid4()}]",
+        from_session=_session(),
+        turn_id=TurnId(str(uuid.uuid4())),
+        hop=0,
+    )
+
+    assert await mailbox.read_answer(correlation_id) is not None
+    assert await mailbox.answer_failed(correlation_id) is False
 
 
 @pytest.mark.asyncio

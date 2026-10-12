@@ -181,8 +181,11 @@ def test_fail_fast_still_waits_for_a_person_deciding_in_the_same_round(
     assert list(world.mailbox.cancelled) == ["corr-2"]
 
 
-def test_the_policy_is_read_in_a_recorded_step_not_from_the_live_profile() -> None:
-    """A replay after a profile edit must take the path the first run took (CLAUDE.md #2)."""
+def test_the_policy_is_read_through_a_step_of_its_own() -> None:
+    """The policy is read by a step function, not from the live profile in the workflow body, so
+    that DBOS can record it (CLAUDE.md #2). This only pins the structure; that a replay after a
+    profile edit takes the first run's path is DBOS's recording, which the body-only tests here do
+    not run."""
     assert hasattr(turn_workflow, "_step_peer_fan_out")
 
 

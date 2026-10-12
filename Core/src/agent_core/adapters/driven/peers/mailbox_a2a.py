@@ -97,6 +97,21 @@ _AGENT_CARD_PATH: Final[str] = "/.well-known/agent-card.json"
 
 _LOG = logging.getLogger(__name__)
 
+# A2A task states that end a task without a result. Both are the callee's failure to answer.
+_FAILED_STATES: Final[frozenset[str]] = frozenset({"failed", "rejected"})
+_FAILED_TASK_TEXT: Final[str] = "The peer reported that the task failed."
+
+
+def _status_text(result: dict[str, Any]) -> str:
+    """The first text part of the task's status message, or "" when it sent none."""
+    message = result["status"].get("message")
+    if not isinstance(message, dict):
+        return ""
+    for part in message.get("parts", []):
+        if isinstance(part, dict) and isinstance(part.get("text"), str):
+            return str(part["text"])
+    return ""
+
 
 class A2AAgentMailbox:
     """A2A wire-protocol adapter for `ports.agent_mailbox.AgentMailbox`.
@@ -227,10 +242,19 @@ class A2AAgentMailbox:
         correlation_id = str(result["id"])
         self._tokens.setdefault(correlation_id, answer_token)
         self._turns.setdefault(correlation_id, str(turn_id))
-        if result["status"]["state"] == "completed":
+        state = result["status"]["state"]
+        if state == "completed":
             artifacts: list[dict[str, Any]] = result.get("artifacts", [])
             if artifacts:
                 self._answers[correlation_id] = str(artifacts[0]["parts"][0]["text"])
+        elif state in _FAILED_STATES:
+            # C1m. The callee's failure is DATA on the answer (C1l), and over A2A it is the task
+            # state. Without this a remote failure never resolved the ask (or, once delivered
+            # through `answer`, was indistinguishable from a reply). The text is the peer's own
+            # status message when it sent one: it is untrusted like every answer and is wrapped on
+            # read.
+            self._answers[correlation_id] = _status_text(result) or _FAILED_TASK_TEXT
+            self._failed.add(correlation_id)
         return correlation_id
 
     async def answer(

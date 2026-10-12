@@ -1079,8 +1079,9 @@ async def _step_ask_peers(
 
         if len(handles) >= caller_policy.max_parallel_asks:
             # C11. Only asks that would LEAVE count toward the cap (a refusal above holds no slot),
-            # and the excess is the tail of the step in call order, so which asks run never
-            # depends on arrival order (CLAUDE.md non-negotiable #7).
+            # and the excess is the tail of the step in tool_call_id order (`pending` was
+            # sorted by `_in_deterministic_order`), so which asks run never depends on arrival
+            # order (CLAUDE.md non-negotiable #7).
             refusals.append(
                 (
                     ask.tool_call_id,
@@ -2258,9 +2259,15 @@ async def run_peer_turn_workflow(job: PeerTurnJob) -> TurnOutcome:
     # C1e. "Closed unanswered" is the TYPED `_TurnEnd.closed` (abandoned after too many rounds,
     # expired waiting for a person), never a comparison with the sentinel sentences: a callee's
     # genuine answer may read the same.
-    # `result is None` cannot happen for a finished turn (I2) and only narrows the type.
-    closed = end.closed or result is None
-    text = PEER_ASK_CLOSED_ANSWER if closed or result is None else result.text
+    #
+    # A callee that expired waiting for a person is closed, not crashed (D43): the asker is told it
+    # went unanswered (a failed answer), but the workflow returns normally, so the redelivery lease
+    # never sees it in ERROR and the expiry does not count toward the redelivery cap.
+    if end.closed or result is None:
+        # `result is None` cannot happen for a finished turn (I2); the test only narrows the type.
+        text, closed = PEER_ASK_CLOSED_ANSWER, True
+    else:
+        text, closed = result.text, False
     await _close_peer_ask(job, text, failed=closed)
     await _forget_attempts()
     return end.outcome

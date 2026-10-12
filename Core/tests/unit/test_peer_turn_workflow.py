@@ -199,6 +199,28 @@ def test_a_callee_turn_closed_without_an_answer_says_so_instead_of_inventing_one
     assert recorder.signals == [(str(ASKING_TURN), CORRELATION)]
 
 
+def test_a_callee_that_expires_waiting_for_a_person_ends_normally_so_it_is_never_requeued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1m (D43). The asker is told the ask went unanswered (a failed answer), but the workflow
+    itself ends WITHOUT raising: it is not a crash, so the lease never sees a workflow in ERROR and
+    the expiry cannot count toward the redelivery cap."""
+
+    async def suspends(turn_id: TurnId, request: TurnRequest) -> TurnOutcome:
+        return TurnOutcome(turn_id=turn_id, pending=(_approval(),))
+
+    async def expire(turn_id: TurnId) -> TurnOutcome:
+        return TurnOutcome(turn_id=turn_id, result=TurnResult(text=turn_workflow._NO_ANSWER))
+
+    recorder = _setup(monkeypatch, start_step=suspends, script=[fanout.nobody_answers(1)])
+    monkeypatch.setattr(turn_workflow, "_step_expire", expire)
+
+    outcome = _run()  # does not raise
+
+    assert outcome.result is not None
+    assert recorder.world.mailbox.failed == {CORRELATION}
+
+
 def test_an_asker_that_is_gone_does_not_fail_a_recorded_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

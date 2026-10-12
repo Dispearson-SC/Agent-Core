@@ -164,7 +164,7 @@ class FakeToolPolicy:
             for name in tool_names
             if self.decide(rules, name, {}).effect is not Effect.DENY
             or (
-                self.decide(rules, name, {}).reason == "no matching rule"
+                self.decide(rules, name, {}).rule_id is None
                 and rules.grants_some_resource(name)
             )
         )
