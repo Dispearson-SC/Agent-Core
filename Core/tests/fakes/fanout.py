@@ -88,6 +88,7 @@ class Mailbox:
         self.refuse_answers = False
         self.cancelled: dict[str, str] = {}  # correlation id -> reason, in cancel order
         self.turn_of: dict[str, str] = {}
+        self.redelivered: dict[str, int] = {}  # correlation id -> redeliveries (the generation)
         self.answers: dict[str, str] = {}
         self._ids: dict[tuple[str, str], str] = {}
 
@@ -109,6 +110,9 @@ class Mailbox:
 
     async def is_cancelled(self, correlation_id: str) -> bool:
         return correlation_id in self.cancelled
+
+    async def redeliveries(self, correlation_id: str) -> int:
+        return self.redelivered.get(correlation_id, 0)
 
     async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
         ids = sorted(

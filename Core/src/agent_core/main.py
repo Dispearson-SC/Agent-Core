@@ -791,7 +791,9 @@ def run_peer_worker_process(arguments: argparse.Namespace) -> None:
         asyncio.run(
             run_peer_worker(
                 queue,
-                DurablePeerTurnStarter(),
+                DurablePeerTurnStarter(
+                    retire_other_versions=container.settings.retire_other_versions
+                ),
                 targets=targets,
                 wake=signal_peer_answer,
                 idle_seconds=arguments.poll,

@@ -1320,3 +1320,42 @@ would have touched the transcript view, five tables and every adapter that reads
 - Not covered by the new test: a human request or an approval of the callee (its `turn_id` is the
   same UUID in `human_requests`, so the same fix covers it, but the scripted callee asks nobody);
   the audit trail of its tool call is asserted.
+
+**C1j.1 · retiring a workflow of another version is opt-in (R1-001).** D32's `exists` treated a
+workflow left OPEN under another application version as absent, and the lease then cancelled it
+(`retire`) and reran the ask. During a rolling deploy the other version's executor can be alive:
+that workflow may be running right now, or be parked on a person. DBOS offers no liveness signal
+for an executor (the pinned version exposes an executor id on a workflow, no heartbeat), so the
+evidence "the old executor is gone" can only come from the operator.
+
+- `Settings.retire_other_versions` (`AGENT_CORE_RETIRE_OTHER_VERSIONS`, true/false/1/0, default
+  false; anything else stops startup) is passed to `DurablePeerTurnStarter(retire_other_versions=)`.
+  OFF, a workflow open under another version counts as existing and nothing cancels it (an ask
+  behind it stays `delivered` until the operator acts). ON, the D32 behaviour: absent, retired,
+  rerun as the next generation.
+- Chosen over automatic detection (a version is "gone" when it is not the latest application
+  version in DBOS' table) because that table records deploys, not live executors, and a wrong
+  guess cancels a person's pending approval. The cost is that after the `.5` bump the operator
+  must either drain or set the flag once the old executors are stopped (OPERATIONS.md).
+
+**C1j.2 · retire-then-requeue converges.** `retire` is the engine cancel followed by the cancel of
+the asks the stranded run made, and the requeue is a third write. A failure or a death between
+them left the row `delivered` behind a `CANCELLED` workflow, and `exists` (true for every finished
+workflow) kept the row out of reach for ever. Now `exists` is False for a workflow that ended
+without a result (`CANCELLED`, `ERROR`); a `SUCCESS` is still True. `retire` can be run again on a
+`CANCELLED` workflow and finishes the nested asks (`cancel_open` ends each ask once, so it is
+idempotent). A cancelled workflow is requeued without the operator flag: no executor of any
+version runs it. Tested with a mailbox that fails `cancel_open` once (the retry converges and the
+rerun answers), and with a workflow cancelled directly (the death between retire and requeue).
+`ERROR` is not a new risk: a callee that raises writes the failure answer first, so its row is not
+stale. Known remaining gap: asks already ended by a `cancel_open` that then failed before their
+workflows were cancelled are not found again (D32).
+
+**C1j.3 · the cancel cascade reaches every generation.** `_peer_workflow_ids` walked generations
+"until DBOS does not know one", so a lost generation (its workflow never started) stopped the walk
+and a live later one was never cancelled. The row's `redeliveries` is the generation, so the port
+gained `AgentMailbox.redeliveries(correlation_id) -> int` (0 when unknown, and always 0 for the
+A2A adapter, which has no lease) and the cascade names `0..redeliveries`. Ids DBOS does not know
+are cancelled harmlessly. Pinned by the shared conformance suite and by a real-DBOS scenario
+(gen 0 retired, gen 1 lost, gen 2 live: `cancel_turn` cancels gen 2).
+

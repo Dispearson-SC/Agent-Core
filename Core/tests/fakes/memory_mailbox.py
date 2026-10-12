@@ -130,6 +130,10 @@ class InMemoryAgentMailbox:
         row = self.rows.get(correlation_id)
         return row is not None and row.state == "cancelled"
 
+    async def redeliveries(self, correlation_id: str) -> int:
+        row = self.rows.get(correlation_id)
+        return 0 if row is None else row.redeliveries
+
     async def read_answer(self, correlation_id: str) -> str | None:
         row = self.rows.get(correlation_id)
         if row is None or row.answer is None:

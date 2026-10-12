@@ -158,6 +158,17 @@ class AgentMailbox(Protocol):
         from a live one without waiting for a reply that cannot come."""
         ...
 
+    async def redeliveries(self, correlation_id: str) -> int:
+        """How many times the lease put this ask back on the queue: its current GENERATION.
+
+        0 for an ask that was never redelivered and for an unknown id. The callee workflow of
+        generation `n` has its own id (`turn_workflow.peer_workflow_id`), so a cancel that must
+        reach whichever generation is live iterates `0..redeliveries` instead of probing for
+        the next one and stopping at the first gap (D33). An implementation without a redelivery
+        lease (the A2A client) answers 0.
+        """
+        ...
+
     async def read_answer(self, correlation_id: str) -> str | None:
         """The peer's answer WRAPPED as untrusted content, or None if it has not answered.
 

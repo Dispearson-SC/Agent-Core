@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any, Protocol
 
 import pytest
@@ -256,6 +256,9 @@ class MailboxConformance:
         assert await harness.mailbox.cancel_open(callee_turn, "asker gave up") == (nested,)
         assert await harness.mailbox.is_cancelled(nested) is True
 
+    async def test_an_unknown_ask_has_no_redeliveries(self, harness: MailboxHarness) -> None:
+        assert await harness.mailbox.redeliveries("never-asked") == 0
+
     # --- queue side (adapters with an answering-side queue) -------------------------------------
 
     async def test_claims_are_exclusive_oldest_first_and_skip_cancelled_asks(
@@ -308,6 +311,8 @@ class MailboxConformance:
         assert retired == [(stale, 0)], "retired before the requeue, at the generation it judged"
         assert sorted(c for c, _ in asked) == sorted((stale, running))
         assert queue.redeliveries(stale) == 1 and queue.redeliveries(fresh) == 0
+        assert await queue.mailbox.redeliveries(stale) == 1, "the port reports the generation"
+        assert await queue.mailbox.redeliveries(fresh) == 0
         again = await queue.claim()
         assert again is not None and again.correlation_id == stale
         assert again.redeliveries == 1, "the claim carries the generation"
@@ -331,7 +336,3 @@ class MailboxConformance:
 
 async def _never_exists(correlation_id: str, generation: int) -> bool:
     return False
-
-
-def now_plus(delta: timedelta) -> datetime:
-    return datetime.now(UTC) + delta

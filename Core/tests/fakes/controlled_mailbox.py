@@ -149,6 +149,9 @@ class ControlledMailbox:
     async def is_cancelled(self, correlation_id: str) -> bool:
         return await self._invoke("is_cancelled", correlation_id)  # type: ignore[no-any-return]
 
+    async def redeliveries(self, correlation_id: str) -> int:
+        return await self._invoke("redeliveries", correlation_id)  # type: ignore[no-any-return]
+
     async def read_answer(self, correlation_id: str) -> str | None:
         return await self._invoke("read_answer", correlation_id)  # type: ignore[no-any-return]
 

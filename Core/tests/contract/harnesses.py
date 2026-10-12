@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -169,7 +169,3 @@ class MemoryHarness:
 
 def database_name_for(suffix: str) -> str:
     return re.sub(r"\W", "_", f"agent_core_conformance_{suffix}")
-
-
-def utcnow() -> datetime:
-    return datetime.now(UTC)

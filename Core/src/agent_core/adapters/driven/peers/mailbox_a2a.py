@@ -283,6 +283,10 @@ class A2AAgentMailbox:
     async def is_cancelled(self, correlation_id: str) -> bool:
         return correlation_id in self._cancelled
 
+    async def redeliveries(self, correlation_id: str) -> int:
+        """A2A has no redelivery lease on this side: the peer owns its queue. Always 0."""
+        return 0
+
     async def read_answer(self, correlation_id: str) -> str | None:
         """The peer's answer, WRAPPED as untrusted content, or None if none has arrived.
 

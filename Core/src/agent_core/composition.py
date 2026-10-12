@@ -601,6 +601,12 @@ class Settings:
     # past the same point before it is failed instead of retried again: the poison-turn budget.
     # `AGENT_CORE_MAX_TURN_ATTEMPTS`, default 10.
     max_turn_attempts: int = DEFAULT_MAX_TURN_ATTEMPTS
+    # D33 (R1-001). Whether the peer worker's lease may cancel and rerun a callee workflow that is
+    # still open under ANOTHER application version. Off by default: during a rolling deploy the
+    # other version's executor may be alive and running (or parked on a human) that workflow, and
+    # DBOS offers no liveness signal for it. The operator switches it on once the old executors
+    # are gone (OPERATIONS.md). `AGENT_CORE_RETIRE_OTHER_VERSIONS`, true/false/1/0.
+    retire_other_versions: bool = False
 
     @property
     def resolved_audit_conninfo(self) -> str:
@@ -668,7 +674,22 @@ class Settings:
             dbos_conductor_key=env.get("DBOS_CONDUCTOR_KEY"),
             peer_lease_seconds=_parse_lease_seconds(env.get("AGENT_CORE_PEER_LEASE_SECONDS")),
             max_turn_attempts=_parse_max_turn_attempts(env.get("AGENT_CORE_MAX_TURN_ATTEMPTS")),
+            retire_other_versions=_parse_flag(
+                "AGENT_CORE_RETIRE_OTHER_VERSIONS", env.get("AGENT_CORE_RETIRE_OTHER_VERSIONS")
+            ),
         )
+
+
+def _parse_flag(name: str, raw: str | None) -> bool:
+    """A boolean switch: unset is off; anything but true/false/1/0 stops startup."""
+    if raw is None:
+        return False
+    lowered = raw.strip().lower()
+    if lowered in {"true", "1"}:
+        return True
+    if lowered in {"false", "0"}:
+        return False
+    raise ValueError(f"{name} must be true, false, 1 or 0, got {raw!r}")
 
 
 def _parse_lease_seconds(raw: str | None) -> int:

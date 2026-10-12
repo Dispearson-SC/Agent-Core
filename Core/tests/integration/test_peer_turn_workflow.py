@@ -127,6 +127,9 @@ class _Mailbox:
             self.queued.remove(correlation_id)
         return True
 
+    async def redeliveries(self, correlation_id: str) -> int:
+        return 0
+
     async def is_cancelled(self, correlation_id: str) -> bool:
         return correlation_id in self.cancelled
 

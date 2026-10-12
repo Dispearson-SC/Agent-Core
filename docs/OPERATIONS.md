@@ -106,8 +106,9 @@ workflow does not exist (D31, C3).
   `[peer] <agent> reclaimed <id>` for each.
 - A row that stays `delivered` past the lease with a workflow that exists is not reclaimed: look
   at that workflow (`dbos workflow get <peer_workflow_id>`, see above), not at the queue.
-- **After a version bump** (D32). A callee workflow a previous build left `PENDING` is never
-  recovered by the new one, so for the lease it counts as absent. Each worker pass cancels it
+- **After a version bump** (D32, gated by D33). A callee workflow a previous build left `PENDING`
+  is never recovered by the new one, so for the lease it counts as absent - but ONLY when
+  `AGENT_CORE_RETIRE_OTHER_VERSIONS=true` (below); by default it is left alone. Each worker pass cancels it
   (and the asks it made to third agents), requeues the ask with `redeliveries` + 1 and the next
   claim runs it as generation `n` (`peer_workflow_id(<id>, n)`); the worker prints `[peer] <agent> reclaimed <id>`. The stranded
   workflow stays visible as `CANCELLED`. The rerun starts the callee's turn from the beginning, so a
@@ -118,11 +119,22 @@ workflow does not exist (D31, C3).
   running under the NEW build; asks whose asker is also stranded still get their answer recorded
   on the row, but the asking workflow will not wake, so `stranded-turns` remains the check for it.
 
+### Rolling deploys: `AGENT_CORE_RETIRE_OTHER_VERSIONS` (D33)
+
+By default the lease NEVER cancels a callee workflow that is still open under another application
+version: during a rolling deploy the old executor may be running it, or it may be parked on a
+person. An ask behind such a workflow stays `delivered`. Once every executor of the old version is
+stopped, set `AGENT_CORE_RETIRE_OTHER_VERSIONS=true` on the peer worker (and restart it): its
+next passes cancel those workflows and rerun the asks as described above. Turn it off again once
+`stranded-turns` reports 0. A workflow that is already `CANCELLED` or `ERROR` behind an unanswered
+`delivered` row (an interrupted retire) is requeued without the flag.
+
 ## Cancelling a turn that is waiting on peers
 
 `turn_workflow.cancel_turn(turn_id, reason)` cancels the asking workflow, marks every open ask it
 made `cancelled` and cancels the callee workflows, then the asks and
-workflows those callees made in turn (A -> B -> C, D32). A bare
+workflows those callees made in turn (A -> B -> C, D32). Every generation of the callee is cancelled, from 0 up to
+`peer_messages.redeliveries`, even if an earlier one never started (D33). A bare
 `dbos workflow cancel <turn id>` cancels only that workflow: its callees keep running and their
 answers land on rows nobody reads. To see what a cancel did:
 `SELECT correlation_id, cancel_reason, cancelled_at FROM peer_messages WHERE state = 'cancelled';`

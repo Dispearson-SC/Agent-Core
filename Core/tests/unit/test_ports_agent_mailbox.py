@@ -290,10 +290,12 @@ def test_protocol_exposes_no_blocking_receive() -> None:
         "discover",
         "is_cancelled",
         "read_answer",
+        "redeliveries",
     ], (
         "AgentMailbox answers one question - how does one agent ask another - through "
         "discover + ask + answer + read_answer, plus the asker's way out of an ask it no "
-        "longer wants (C4: cancel, cancel_open, is_cancelled). "
+        "longer wants (C4: cancel, cancel_open, is_cancelled) and the generation a cancel must "
+        "reach (D33: redeliveries). "
         f"Found: {members}. Asking and "
         "reading the reply back are two halves of ONE question, and a port that declares "
         "only the first half forces application code to name a concrete adapter to get "
@@ -512,6 +514,9 @@ class StubMailbox:
         raise NotImplementedError
 
     async def is_cancelled(self, correlation_id: str) -> bool:
+        raise NotImplementedError
+
+    async def redeliveries(self, correlation_id: str) -> int:
         raise NotImplementedError
 {redemption if read_answer else ""}
 

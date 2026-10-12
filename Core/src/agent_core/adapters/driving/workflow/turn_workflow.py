@@ -1105,18 +1105,17 @@ async def _step_peer_ask_cancelled(correlation_id: str) -> bool:
 
 
 async def _peer_workflow_ids(correlation_id: str) -> tuple[str, ...]:
-    """Every workflow id that ever ran this ask: generation 0 and each later one DBOS knows.
+    """Every workflow id that may have run this ask: one per generation, 0 to the row's current.
 
     The lease starts a new generation when a stranded one is retired (C1g), and a cancel must
-    reach whichever one is live, so it walks the generations DBOS knows. Generation 0 is always
-    named, whether or not it exists: cancelling an unknown id is the cheap, harmless case.
+    reach whichever one is live. The row's `redeliveries` is the generation (D33), so ALL of
+    `0..redeliveries` are named, whether or not DBOS knows them: a generation whose workflow was
+    lost (never started, or its enqueue not recorded) is a gap, and walking "until DBOS does not
+    know one" stopped at the first gap and never reached a live later generation. Cancelling an
+    unknown id is the cheap, harmless case.
     """
-    ids = [peer_workflow_id(correlation_id)]
-    generation = 1
-    while await DBOS.get_workflow_status_async(peer_workflow_id(correlation_id, generation)):
-        ids.append(peer_workflow_id(correlation_id, generation))
-        generation += 1
-    return tuple(ids)
+    generations = await _require_peer_seat().mailbox.redeliveries(correlation_id)
+    return tuple(peer_workflow_id(correlation_id, n) for n in range(generations + 1))
 
 
 async def _cancel_callees(correlation_ids: tuple[str, ...], reason: str) -> tuple[str, ...]:
@@ -2310,6 +2309,9 @@ async def enqueue_peer_turn(
 
 
 _OPEN_STATUSES: Final[frozenset[str]] = frozenset({"PENDING", "ENQUEUED", "DELAYED"})
+# Ended without a result and so without an answer: no executor will run it again. A row still
+# `delivered` and unanswered past the lease behind one of these is a row nothing is working on.
+_DEAD_STATUSES: Final[frozenset[str]] = frozenset({"CANCELLED", "ERROR"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -2318,22 +2320,38 @@ class DurablePeerTurnStarter:
 
     Returns as soon as the workflow is enqueued: the worker never holds a claim open while
     the callee thinks or waits for its human, and the workflow, not the worker, answers.
+
+    `retire_other_versions` (D33, R1-001) is the operator's statement that no executor of another
+    application version is still running workflows. Off (the default), a workflow open under
+    another version counts as existing - it may be running right now on an old executor, or parked
+    on a human - so the lease never cancels it. On, it counts as absent: this build will not
+    recover it, and `retire` cancels it so the ask can be rerun (C1g, D32).
     """
 
-    async def exists(self, correlation_id: str, generation: int = 0) -> bool:
-        """Whether this ask's workflow of this generation is known to DBOS AND is this build's
-        to drive. C1d, C1g.
+    retire_other_versions: bool = False
 
-        A workflow still OPEN (`PENDING`, `ENQUEUED`, `DELAYED`) under another application version
-        is False: DBOS recovers a pending workflow only for the version the recovering process
-        claims, so this build will never run it. A finished one (`SUCCESS`, `ERROR`,
-        `CANCELLED`) stays True whatever its version: it ended, and re-running it is not the
-        lease's decision.
+    async def exists(self, correlation_id: str, generation: int = 0) -> bool:
+        """Whether a workflow of this generation will still answer this ask. C1d, C1g, D33.
+
+        False when DBOS has no such workflow, and when it ended WITHOUT an answer (`CANCELLED`,
+        `ERROR`): nothing will run it again, and a row that is still `delivered` and unanswered
+        behind one is what an interrupted `retire` leaves (the workflow cancelled, the requeue
+        never done). A `SUCCESS` stays True whatever its version: it ended, and re-running it is
+        not the lease's decision.
+
+        With `retire_other_versions` ON, a workflow still OPEN (`PENDING`, `ENQUEUED`, `DELAYED`)
+        under another application version is False too: DBOS recovers a pending workflow only for
+        the version the recovering process claims, so this build will never run it. OFF (the
+        default) it is True - an old executor may be running it right now.
         """
         found = await DBOS.get_workflow_status_async(peer_workflow_id(correlation_id, generation))
-        if found is None:
+        if found is None or found.status in _DEAD_STATUSES:
             return False
-        stranded = found.status in _OPEN_STATUSES and found.app_version != DBOS.application_version
+        stranded = (
+            self.retire_other_versions
+            and found.status in _OPEN_STATUSES
+            and found.app_version != DBOS.application_version
+        )
         return not stranded
 
     async def retire(self, correlation_id: str, generation: int = 0) -> None:
@@ -2342,14 +2360,20 @@ class DurablePeerTurnStarter:
         Called by the lease before it requeues an ask whose workflow `exists` judged dead. The
         stranded run holds the one queue slot its peer session has (DBOS' partition probe is not
         scoped by version), so leaving it open would block the next generation for ever; its own
-        asks to third agents are cancelled with it. A workflow that is gone or already finished
-        is left alone.
+        asks to third agents are cancelled with it. A workflow that is gone or finished with a
+        result is left alone.
+
+        RE-RUNNABLE AFTER A CRASH (D33). The engine cancel and the cancel of the nested asks are
+        two writes. If the second one raised, the workflow is already `CANCELLED`; the next pass
+        comes back here (`exists` is False for it) and finishes the nested asks, which
+        `cancel_open` ends idempotently.
         """
         workflow_id = peer_workflow_id(correlation_id, generation)
         found = await DBOS.get_workflow_status_async(workflow_id)
-        if found is None or found.status not in _OPEN_STATUSES:
+        if found is None or not (found.status in _OPEN_STATUSES or found.status in _DEAD_STATUSES):
             return
-        await DBOS.cancel_workflow_async(workflow_id)
+        if found.status in _OPEN_STATUSES:
+            await DBOS.cancel_workflow_async(workflow_id)
         nested = await _require_peer_seat().mailbox.cancel_open(workflow_id, _CANCEL_RETIRED)
         await _cancel_callees(nested, _CANCEL_RETIRED)
 

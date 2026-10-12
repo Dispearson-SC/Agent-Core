@@ -212,6 +212,7 @@ _CANCEL_OPEN_SQL = """
 """
 
 _IS_CANCELLED_SQL = "SELECT state = 'cancelled' FROM peer_messages WHERE correlation_id = %s"
+_REDELIVERIES_SQL = "SELECT redeliveries FROM peer_messages WHERE correlation_id = %s"
 
 # C3. Candidates: delivered, unanswered, past the lease (`delivered_at + lease < now`). The
 # database's clock decides unless a test passes `now`. Oldest first, bounded so one pass never
@@ -575,6 +576,15 @@ class PgAgentMailbox:
         with psycopg.connect(self._conninfo) as conn:
             row = conn.execute(_IS_CANCELLED_SQL, (correlation_id,)).fetchone()
         return row is not None and bool(row[0])
+
+    async def redeliveries(self, correlation_id: str) -> int:
+        """The ask's generation (how often the lease requeued it); 0 if unknown. See the port."""
+        return await asyncio.to_thread(self._redeliveries_sync, correlation_id)
+
+    def _redeliveries_sync(self, correlation_id: str) -> int:
+        with psycopg.connect(self._conninfo) as conn:
+            row = conn.execute(_REDELIVERIES_SQL, (correlation_id,)).fetchone()
+        return 0 if row is None else int(row[0])
 
     async def read_answer(self, correlation_id: str) -> str | None:
         """The peer's answer, WRAPPED as untrusted content, or None if it has not answered.

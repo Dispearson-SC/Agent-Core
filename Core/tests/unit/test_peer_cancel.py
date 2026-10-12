@@ -158,3 +158,21 @@ def test_the_cascade_stops_at_an_ask_that_was_already_answered(
     _run()
 
     assert list(world.mailbox.cancelled) == ["corr-1"], "an answered ask is history"
+
+
+def test_the_cascade_reaches_every_generation_even_across_a_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D33 (R3): gen 0 was stranded, gen 1 was lost (its workflow never started), gen 2 is the live
+    one. The cancel used to walk `peer-<id>`, `-r1`, ... until DBOS did not know one, so it stopped
+    at the gap and never reached gen 2. The row's `redeliveries` says how far to go."""
+    world = fanout.install(
+        monkeypatch, (fanout.ask("tc-1"),), [fanout.nobody_answers(fanout.REPLY_TIMEOUT)]
+    )
+    world.mailbox.redelivered["corr-1"] = 2
+
+    _run()
+
+    assert world.cancelled_workflows == [
+        turn_workflow.peer_workflow_id("corr-1", generation) for generation in (0, 1, 2)
+    ]
