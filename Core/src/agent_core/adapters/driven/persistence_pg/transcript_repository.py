@@ -114,6 +114,11 @@ _PAGE_SQL = """
     LIMIT %s
 """
 
+# The same page walked from the newest entry back (C1n): only the comparison and the order flip.
+_PAGE_NEWEST_FIRST_SQL = _PAGE_SQL.replace("(at, entry_id) > (", "(at, entry_id) < (").replace(
+    "ORDER BY at ASC, entry_id ASC", "ORDER BY at DESC, entry_id DESC"
+)
+
 # The sort column is chosen from this closed map and never from anything a caller sent.
 # `ports/transcript_reader.py` refuses to offer a free-form filter for exactly this
 # reason: the moment one exists, the tenant predicate stops being the port's guarantee.
@@ -232,8 +237,9 @@ class PgTranscriptReader:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        newest_first: bool = False,
     ) -> TranscriptPage:
-        """One page of the timeline, oldest first, filtered for `audience`.
+        """One page of the timeline, oldest first (or newest first), filtered for `audience`.
 
         The tenant travels inside `session` and reaches the SQL as a bound parameter; the
         cursor is decoded before the thread hop so a malformed one raises on the caller's
@@ -244,7 +250,13 @@ class PgTranscriptReader:
         kinds = _requested_kinds(audience)
 
         rows = await asyncio.to_thread(
-            self._fetch_page_sync, session, kinds, cursor_at, cursor_entry_id, bounded
+            self._fetch_page_sync,
+            session,
+            kinds,
+            cursor_at,
+            cursor_entry_id,
+            bounded,
+            _PAGE_NEWEST_FIRST_SQL if newest_first else _PAGE_SQL,
         )
 
         has_more = len(rows) > bounded
@@ -267,6 +279,7 @@ class PgTranscriptReader:
         cursor_at: datetime | None,
         cursor_entry_id: str | None,
         limit: int,
+        sql: str = _PAGE_SQL,
     ) -> list[tuple[Any, ...]]:
         # limit + 1 so `has_more` is answered by the same round trip. A separate COUNT
         # over a union of five tables costs more than the page it describes.
@@ -280,7 +293,7 @@ class PgTranscriptReader:
             limit + 1,
         )
         with self._connect() as connection:
-            rows: list[tuple[Any, ...]] = connection.execute(_PAGE_SQL, params).fetchall()
+            rows: list[tuple[Any, ...]] = connection.execute(sql, params).fetchall()
         return rows
 
     def _to_entry(self, row: tuple[Any, ...], audience: Audience) -> TranscriptEntry:

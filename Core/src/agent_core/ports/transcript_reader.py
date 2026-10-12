@@ -49,8 +49,14 @@ class TranscriptReader(Protocol):
         *,
         cursor: str | None = None,
         limit: int = 50,
+        newest_first: bool = False,
     ) -> TranscriptPage:
         """PSEUDO-CODE - F10.
+
+        `newest_first` (C1n) reverses the order of the timeline AND of the cursor walk: the first
+        page is the newest entries, newest first, and `next_cursor` continues towards the oldest.
+        A caller that reads a bounded number of pages and needs the end of the conversation (what
+        a peer is told about it) uses it so the bound drops the oldest entries, never the newest.
 
         1. Merge messages, audit rows and pending state into one timeline ordered by time.
         2. Filter kinds through VISIBLE_TO[audience].

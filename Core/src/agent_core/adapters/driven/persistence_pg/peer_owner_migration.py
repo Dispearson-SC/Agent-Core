@@ -30,8 +30,8 @@ import psycopg
 
 from agent_core.adapters.driven.persistence_pg.migrations import Migration
 from agent_core.adapters.driven.persistence_pg.transcript_migration import (
+    TRANSCRIPT_CONVERSATIONS_VIEW_SQL,
     TRANSCRIPT_ENTRIES_VIEW_SQL,
-    TRANSCRIPT_PROJECTION_MIGRATION,
 )
 
 _OLD_PENDING_BRANCH = """
@@ -96,10 +96,6 @@ def _replaced(text: str, old: str, new: str) -> str:
     return text.replace(old, new)
 
 
-_CONVERSATIONS_VIEW_SQL = TRANSCRIPT_PROJECTION_MIGRATION.sql[
-    TRANSCRIPT_PROJECTION_MIGRATION.sql.index("CREATE OR REPLACE VIEW transcript_conversations") :
-]
-
 PEER_OWNER_MIGRATION = Migration(
     id="0035_peer_owner_chain",
     sql=f"""
@@ -112,7 +108,7 @@ PEER_OWNER_MIGRATION = Migration(
     CREATE INDEX IF NOT EXISTS ix_human_requests_root_turn
         ON human_requests (root_turn_id) WHERE root_turn_id IS NOT NULL;
     {_replaced(TRANSCRIPT_ENTRIES_VIEW_SQL, _OLD_PENDING_BRANCH, _NEW_PENDING_BRANCH)};
-    {_replaced(_CONVERSATIONS_VIEW_SQL, _OLD_WAITING, _NEW_WAITING)}
+    {_replaced(TRANSCRIPT_CONVERSATIONS_VIEW_SQL, _OLD_WAITING, _NEW_WAITING)};
     """,
 )
 

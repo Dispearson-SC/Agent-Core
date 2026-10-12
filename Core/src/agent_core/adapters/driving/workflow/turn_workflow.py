@@ -1381,9 +1381,8 @@ async def _peer_envelope(
     wrapped = await _read_wrapped_answer(correlation_id)
     if wrapped is None:
         return None
-    mailbox = _require_peer_seat().mailbox
-    failed = await mailbox.answer_failed(correlation_id)
     seat = _require_peer_seat()
+    failed = await seat.mailbox.answer_failed(correlation_id)
     cap = _asking_policy(seat, request.profile_id).max_answer_chars
     capped = cap_wrapped_answer(wrapped, cap)
     session = _peer_session_id(request, correlation_id, continued)

@@ -185,35 +185,9 @@ TRANSCRIPT_ENTRIES_VIEW_SQL = """
     JOIN session_tenant st ON st.session_id = c.session_id
 """
 
-# Id 0016 is pre-allocated to this anchor in docs/TASKS.md. Forward-only: it creates
-# views and indexes and never drops or rewrites a table. `CREATE OR REPLACE VIEW` and
-# `CREATE INDEX IF NOT EXISTS` make the SQL idempotent on its own, on top of the
-# `schema_migrations` tracking below.
-#
-# The indexes are additive and touch no audit table with DROP or ALTER - see the RULE in
-# migrations.py. They exist because the ordering key of every page query is a timestamp
-# per source, and a projection that sorts by a column nobody indexed degrades quietly as
-# conversations grow, which presents as "the viewer got slow" and traces back to nothing.
-TRANSCRIPT_PROJECTION_MIGRATION = Migration(
-    id="0016_transcript_projection",
-    sql=f"""
-    CREATE INDEX IF NOT EXISTS ix_turns_session_created
-        ON turns (session_id, created_at, turn_id);
-    CREATE INDEX IF NOT EXISTS ix_turns_tenant_session
-        ON turns (tenant_id, session_id);
-    CREATE INDEX IF NOT EXISTS ix_messages_session_created
-        ON messages (session_id, created_at, id);
-    CREATE INDEX IF NOT EXISTS ix_audit_tool_calls_turn_at
-        ON audit_tool_calls (turn_id, at);
-    CREATE INDEX IF NOT EXISTS ix_audit_human_decisions_turn_at
-        ON audit_human_decisions (turn_id, at);
-    CREATE INDEX IF NOT EXISTS ix_audit_turn_costs_turn
-        ON audit_turn_costs (turn_id);
-    CREATE INDEX IF NOT EXISTS ix_checkpoints_session_created
-        ON checkpoints (session_id, created_at);
-
-    {TRANSCRIPT_ENTRIES_VIEW_SQL};
-
+# The inbox view as its own statement (C1n): migration 0035 re-creates it with one branch patched
+# and must not depend on where it sits inside migration 0016's text.
+TRANSCRIPT_CONVERSATIONS_VIEW_SQL = """
     CREATE OR REPLACE VIEW transcript_conversations AS
     SELECT
         s.tenant_id                                             AS tenant_id,
@@ -247,7 +221,39 @@ TRANSCRIPT_PROJECTION_MIGRATION = Migration(
         FROM audit_turn_costs c
         JOIN turns t ON t.turn_id = c.turn_id
         WHERE t.session_id = s.session_id
-    ) spend ON TRUE;
+    ) spend ON TRUE
+"""
+
+# Id 0016 is pre-allocated to this anchor in docs/TASKS.md. Forward-only: it creates
+# views and indexes and never drops or rewrites a table. `CREATE OR REPLACE VIEW` and
+# `CREATE INDEX IF NOT EXISTS` make the SQL idempotent on its own, on top of the
+# `schema_migrations` tracking below.
+#
+# The indexes are additive and touch no audit table with DROP or ALTER - see the RULE in
+# migrations.py. They exist because the ordering key of every page query is a timestamp
+# per source, and a projection that sorts by a column nobody indexed degrades quietly as
+# conversations grow, which presents as "the viewer got slow" and traces back to nothing.
+TRANSCRIPT_PROJECTION_MIGRATION = Migration(
+    id="0016_transcript_projection",
+    sql=f"""
+    CREATE INDEX IF NOT EXISTS ix_turns_session_created
+        ON turns (session_id, created_at, turn_id);
+    CREATE INDEX IF NOT EXISTS ix_turns_tenant_session
+        ON turns (tenant_id, session_id);
+    CREATE INDEX IF NOT EXISTS ix_messages_session_created
+        ON messages (session_id, created_at, id);
+    CREATE INDEX IF NOT EXISTS ix_audit_tool_calls_turn_at
+        ON audit_tool_calls (turn_id, at);
+    CREATE INDEX IF NOT EXISTS ix_audit_human_decisions_turn_at
+        ON audit_human_decisions (turn_id, at);
+    CREATE INDEX IF NOT EXISTS ix_audit_turn_costs_turn
+        ON audit_turn_costs (turn_id);
+    CREATE INDEX IF NOT EXISTS ix_checkpoints_session_created
+        ON checkpoints (session_id, created_at);
+
+    {TRANSCRIPT_ENTRIES_VIEW_SQL};
+
+    {TRANSCRIPT_CONVERSATIONS_VIEW_SQL};
     """,
 )
 

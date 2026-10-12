@@ -85,11 +85,13 @@ class _Reader:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        newest_first: bool = False,
     ) -> TranscriptPage:
         self.audiences.append(audience)
         start = int(cursor or 0)
-        chunk = self.entries[start : start + 2]
-        more = start + 2 < len(self.entries)
+        ordered = list(reversed(self.entries)) if newest_first else self.entries
+        chunk = ordered[start : start + 2]
+        more = start + 2 < len(ordered)
         return TranscriptPage(
             session=session,
             audience=audience,
@@ -125,6 +127,20 @@ def _render(
 
     source = TranscriptAskerContext(reader, summariser if summary is not None else None)
     return asyncio.run(source.render(SESSION, mode, max_chars)), reader, seen
+
+
+def test_a_conversation_longer_than_the_read_bound_keeps_its_newest_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1n. The read is bounded (`_MAX_PAGES` pages); past the bound it is the OLDEST that go."""
+    from agent_core.adapters.driven.peers import asker_context
+
+    monkeypatch.setattr(asker_context, "_MAX_PAGES", 2)
+    entries = [_entry(n, EntryKind.USER_MESSAGE, f"message {n}") for n in range(1, 8)]
+
+    text, _, _ = _render(PeerVisibility.FULL, 10_000, entries=entries)
+
+    assert text.splitlines() == [f"User: message {n}" for n in (4, 5, 6, 7)]
 
 
 def test_full_is_the_conversations_messages_in_order_and_nothing_else() -> None:

@@ -98,6 +98,7 @@ class FakeTranscriptReader:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        newest_first: bool = False,
     ) -> TranscriptPage:
         self.pages.append((session, audience))
         visible = VISIBLE_TO[audience]

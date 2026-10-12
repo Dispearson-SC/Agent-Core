@@ -1868,3 +1868,23 @@ port's own comment promised "redact per `policy.visibility`" and the question al
   A2A carrying the context as a message part instead of question text (it travels in the text, so it
   crosses the wire unchanged).
 
+
+## D48 · Agent-comms v2: slice 12 advisories (C1n)
+
+- **The gateway resolves the recipient before it records.** `ChannelHumanGateway.publish` used to
+  write the correlation row and then compute the recipient; a recipient that raised left a row that
+  made every retry of the step silent, so the person was never asked. The recipient is now settled
+  first, and a session id with a `~` that is NOT `peer~<origin>~<uuid>` is addressed as itself
+  (`peer_root_origin` still refuses it elsewhere) instead of failing the publish.
+- **The asker's conversation is read newest first.** `TranscriptReader.page` gains
+  `newest_first: bool = False` (the cursor walks backwards too). `TranscriptAskerContext` reads from
+  the end and reverses, so the bound (`_MAX_PAGES` x `_PAGE`) drops the OLDEST messages; it used to
+  read from the start and drop the newest, the opposite of "newest kept".
+- **Migration 0035 no longer slices migration 0016's text.** The inbox view is its own constant
+  (`TRANSCRIPT_CONVERSATIONS_VIEW_SQL`), 0016 is built from it, and 0035 patches that constant, so a
+  statement later appended to 0016 is never re-run by 0035.
+- Tidying: `_peer_envelope` binds the peer seat once; the mailbox's refusal text is
+  `_CONTINUATION_REFUSED_REASON` (the workflow keeps `_CONTINUATION_REFUSED`); the "to_seven" version
+  test is named for what it checks; the claim-lock test waits on `pg_locks` for the claiming backend to
+  be waiting instead of sleeping.
+- **Replay shape: unchanged.**

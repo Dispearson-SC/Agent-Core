@@ -511,6 +511,7 @@ class FakeTranscriptReader:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        newest_first: bool = False,
     ) -> TranscriptPage:
         self.page_calls.append((session, audience))
         entries = self._entries

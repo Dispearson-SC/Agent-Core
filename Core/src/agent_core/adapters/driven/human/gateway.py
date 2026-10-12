@@ -218,6 +218,10 @@ class ChannelHumanGateway:
         and is recoverable; a message with no row is a handle a human holds that the
         system cannot resolve, and it looks to them like the system lost their answer.
         """
+        # Who to ask is settled BEFORE anything is recorded (C1n). The row is the idempotency key
+        # of a retried step: written first, a recipient that could not be resolved would leave a
+        # row that makes every retry silent and the person is never asked.
+        recipient = self._recipient(session)
         for request in requests:
             correlation_id = await asyncio.to_thread(self._record_sync, turn_id, request, owner)
             if correlation_id is None:
@@ -226,7 +230,7 @@ class ChannelHumanGateway:
                 # the handle they already have and is not asked a second time.
                 continue
             await self._registry.get(self._channel_id).send(
-                self._recipient(session), render_ask(request, correlation_id)
+                recipient, render_ask(request, correlation_id)
             )
 
     def _record_sync(
@@ -270,9 +274,16 @@ class ChannelHumanGateway:
         with the reply and is `DecideApproval`'s input (t-f3-03, t-f3-05), not this one.
         """
         # C16. A peer session (`peer~<case>~<key>`) is not a conversation anybody is in: the person
-        # to ask is in the case it belongs to.
+        # to ask is in the case it belongs to. An id with a `~` that is NOT a peer session (a
+        # channel that allowed the character) is addressed as itself rather than refused: refusing
+        # here used to happen after the row was written (C1n) and, even now, would leave a person
+        # with a pending approval nobody can see.
+        try:
+            subject_id = peer_root_origin(session.session_id)
+        except ValueError:
+            subject_id = session.session_id
         return CallerIdentity(
-            subject_id=peer_root_origin(session.session_id),
+            subject_id=subject_id,
             channel=self._channel_id,
             tenant_id=session.tenant_id,
         )

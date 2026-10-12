@@ -33,9 +33,9 @@ _OMITTED = "[earlier messages omitted]\n"
 _CUT = " [...cut]"
 _ROLES = {EntryKind.USER_MESSAGE: "User", EntryKind.AGENT_MESSAGE: "Assistant"}
 _PAGE = 200
-# A conversation is read to its end (the NEWEST messages are what survive the cap), but not without
-# bound: this many pages of `_PAGE` entries is far past anything a cap of a few thousand characters
-# can use.
+# A conversation is read from its END backwards (the NEWEST messages are what survive the cap), and
+# not without bound: this many pages of `_PAGE` entries is far past anything a cap of a few thousand
+# characters can use. Past the bound it is the OLDEST that are dropped.
 _MAX_PAGES = 50
 
 
@@ -69,7 +69,9 @@ class TranscriptAskerContext:
         lines: list[str] = []
         cursor: str | None = None
         for _ in range(_MAX_PAGES):
-            page = await self._reader.page(session, Audience.USER, cursor=cursor, limit=_PAGE)
+            page = await self._reader.page(
+                session, Audience.USER, cursor=cursor, limit=_PAGE, newest_first=True
+            )
             for entry in page.entries:
                 role = _ROLES.get(entry.kind)
                 said = "\n".join(_said(entry.payload.get("content"))).strip()
@@ -78,6 +80,7 @@ class TranscriptAskerContext:
             if not page.has_more or page.next_cursor is None:
                 break
             cursor = page.next_cursor
+        lines.reverse()  # read newest first; the peer is told oldest first
         return lines
 
 

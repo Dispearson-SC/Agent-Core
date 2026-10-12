@@ -112,3 +112,44 @@ def test_full_reads_the_messages_of_the_askers_own_session_and_nothing_else() ->
         )
     )
     assert other == "", "the same session id under another tenant reads nothing"
+
+
+def test_newest_first_walks_the_timeline_backwards_page_by_page() -> None:
+    """C1n. `newest_first` flips the order AND the cursor walk: no entry is skipped or repeated."""
+    asyncio.run(migrations.ensure_databases(_ADMIN, app_database=_DB, dbos_database=f"{_DB}_dbos"))
+    conninfo = re.sub(r"/[^/?]+(\?.*)?$", rf"/{_DB}\1", _ADMIN)
+    asyncio.run(migrations.apply_all_migrations(conninfo))
+    base = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        conn.execute("DELETE FROM messages WHERE session_id = 'ctx-page'")
+        conn.execute("DELETE FROM turns WHERE session_id = 'ctx-page'")
+        conn.execute(
+            "INSERT INTO turns (turn_id, session_id, tenant_id, profile_id, state, "
+            "created_at, profile_version, profile_snapshot) "
+            "VALUES (%s, 'ctx-page', 't-ctx', 'p', 'started', %s, 1, '{}')",
+            (str(uuid.uuid4()), base),
+        )
+        for n in range(1, 6):
+            conn.execute(
+                "INSERT INTO messages (session_id, seq, role, content, created_at) "
+                "VALUES ('ctx-page', %s, 'user', %s, %s)",
+                (n, _message("request", "user-prompt", f"m{n}"), base + timedelta(seconds=n)),
+            )
+    reader = transcript_repository.PgTranscriptReader(_Connect(conninfo))
+    session = SessionRef(session_id=SessionId("ctx-page"), tenant_id=TenantId("t-ctx"))
+
+    async def walk() -> list[str]:
+        from agent_core.domain.transcript import Audience
+
+        seen: list[str] = []
+        cursor: str | None = None
+        while True:
+            page = await reader.page(
+                session, Audience.USER, cursor=cursor, limit=2, newest_first=True
+            )
+            seen += [e.payload["content"]["parts"][0]["content"] for e in page.entries]
+            if not page.has_more:
+                return seen
+            cursor = page.next_cursor
+
+    assert asyncio.run(walk()) == ["m5", "m4", "m3", "m2", "m1"]

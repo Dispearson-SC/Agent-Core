@@ -583,7 +583,7 @@ def test_the_round_and_position_ask_key_moved_the_pinned_application_version_to_
     assert int(composition.PINNED_DBOS_APPLICATION_VERSION.rsplit(".", 1)[1]) >= 6
 
 
-def test_the_fan_out_step_moved_the_pinned_application_version_to_seven() -> None:
+def test_the_fan_out_step_is_recorded_and_the_version_is_at_least_seven() -> None:
     """D39 (C10): a round waiting on a peer records `_step_peer_fan_out` after the reply timeout and
     `_step_read_peer_answer` returns the failure flag, so a turn suspended under .6 replays into
     another step sequence and is stranded on purpose (drain first, OPERATIONS.md)."""

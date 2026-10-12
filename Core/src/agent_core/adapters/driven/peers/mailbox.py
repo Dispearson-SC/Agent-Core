@@ -297,7 +297,7 @@ _SESSION_OWNERS_SQL = """
     SELECT from_session_id, from_agent_id FROM peer_messages
     WHERE peer_session_id = %s AND target_agent_id = %s AND from_tenant_id = %s
 """
-_CONTINUATION_REFUSED: Final[str] = (
+_CONTINUATION_REFUSED_REASON: Final[str] = (
     "that session cannot be continued: it is not one this agent started with this peer"
 )
 
@@ -577,7 +577,7 @@ class PgAgentMailbox:
                 ).fetchall()
             )
         ):
-            raise PeerContinuationRefusedError(_CONTINUATION_REFUSED)
+            raise PeerContinuationRefusedError(_CONTINUATION_REFUSED_REASON)
 
     async def claim_next(self, target: AgentId) -> PeerAsk | None:
         """Take the oldest queued ask for `target`, or None when the queue is empty.

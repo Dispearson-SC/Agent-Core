@@ -27,6 +27,24 @@ _LOCK = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
 _TRY_LOCK = "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))"
 
 
+_WAITING_ON_ADVISORY_LOCK = """
+    SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database
+    WHERE l.locktype = 'advisory' AND NOT l.granted AND d.datname = current_database()
+"""
+
+
+def _wait_for_an_advisory_lock_wait(conninfo: str, timeout: float = 30.0) -> None:
+    """Block until some backend of this database is waiting for an advisory lock (a fixed sleep
+    guesses how long the claim takes to get there; `pg_locks` says when it has)."""
+    deadline = time.monotonic() + timeout
+    with psycopg.connect(conninfo, autocommit=True) as probe:
+        while time.monotonic() < deadline:
+            if probe.execute(_WAITING_ON_ADVISORY_LOCK).fetchone() is not None:
+                return
+            time.sleep(0.02)
+    raise AssertionError("no backend started waiting for the advisory lock within the timeout")
+
+
 @pytest.fixture(scope="module")
 def conninfo() -> Iterator[str]:
     if not peer_world.postgres_reachable():
@@ -62,7 +80,8 @@ def test_a_claim_waiting_on_one_turn_holds_no_other_turns_lock(conninfo: str) ->
         other.execute(_LOCK, (busy_turn,))
         worker = threading.Thread(target=lambda: claimed.append(asyncio.run(harness.claim())))
         worker.start()
-        time.sleep(1.0)  # the claim has scanned the capped turn and is now waiting on the busy one
+        # The claim has scanned the capped turn and is now waiting on the busy one.
+        _wait_for_an_advisory_lock_wait(conninfo)
         probe = psycopg.connect(conninfo)
         try:
             row = probe.execute(_TRY_LOCK, ("turn-capped",)).fetchone()
