@@ -44,7 +44,14 @@ from typing import Any
 from agent_core.domain.compaction import CompactionPolicy
 from agent_core.domain.knowledge import KnowledgePolicy, RetrievalMode
 from agent_core.domain.media import MediaDelivery, MediaKind, MediaPolicy
-from agent_core.domain.peers import AgentId, AgentRef, FanOutPolicy, PeerPolicy, PeerVisibility
+from agent_core.domain.peers import (
+    AgentId,
+    AgentRef,
+    FanOutPolicy,
+    PeerPolicy,
+    PeerVisibility,
+    Topology,
+)
 
 
 class ProfileValidationError(ValueError):
@@ -520,6 +527,7 @@ def _build_peer_policy(data: object) -> PeerPolicy:
             where="peers.max_answer_chars",
         ),
         fan_out=_fan_out(mapping.get("fan_out", defaults.fan_out)),
+        topology=_topology(mapping.get("topology", defaults.topology)),
         max_parallel_asks=_positive_int(
             mapping.get("max_parallel_asks", defaults.max_parallel_asks),
             where="peers.max_parallel_asks",
@@ -529,6 +537,19 @@ def _build_peer_policy(data: object) -> PeerPolicy:
             where="peers.max_concurrent_asks",
         ),
     )
+
+
+def _topology(value: object) -> Topology | None:
+    """`peers.topology` (C17): `star`, `tree` or `mesh`; absent or null means none declared."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            return Topology(value)
+        except ValueError:
+            pass
+    allowed = ", ".join(shape.value for shape in Topology)
+    raise ProfileValidationError(f"peers.topology must be one of {allowed}, got {value!r}")
 
 
 def _fan_out(value: object) -> FanOutPolicy:

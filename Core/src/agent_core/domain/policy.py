@@ -149,7 +149,7 @@ class PolicyRule:
         if not self.applies_to_caller(tool_name, roles, channel, tenant):
             return False
         if self.resource_pattern is not None and (
-            resource is None or not _glob(self.resource_pattern, resource)
+            resource is None or not pattern_matches(self.resource_pattern, resource)
         ):
             return False
         return True
@@ -174,10 +174,10 @@ class PolicyRule:
         return True
 
     def _pattern_matches(self, tool_name: str) -> bool:
-        return _glob(self.tool_pattern, tool_name)
+        return pattern_matches(self.tool_pattern, tool_name)
 
 
-def _glob(pattern: str, value: str) -> bool:
+def pattern_matches(pattern: str, value: str) -> bool:
     """Exact match, or a PREFIX match when the pattern ends in '*'; both lowercased."""
     pattern = pattern.lower()
     value = value.lower()

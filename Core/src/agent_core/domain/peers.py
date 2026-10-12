@@ -124,6 +124,21 @@ class FanOutPolicy(StrEnum):
     FAIL_FAST = "fail_fast"
 
 
+class Topology(StrEnum):
+    """The shape of who may ask whom, declared ONCE and checked at startup (C17, D42).
+
+    STAR - the declaring profile is the hub; the profiles it may ask are spokes and a spoke may talk
+           to nobody but the hub.
+    TREE - the declaring profile is the root; every other profile has exactly one parent (the one
+           that reached it) and may ask only its parent and its own children.
+    MESH - any profile may ask any other, but every allowlist entry must be mutual.
+    """
+
+    STAR = "star"
+    TREE = "tree"
+    MESH = "mesh"
+
+
 class PeerVisibility(StrEnum):
     """How much of a conversation a peer may be told about.
 
@@ -173,6 +188,10 @@ class PeerPolicy:
     max_answer_chars: int = DEFAULT_MAX_ANSWER_CHARS
     # C10 (D39). What a failed ask does to its siblings in the same step. Part of the content hash.
     fan_out: FanOutPolicy = FanOutPolicy.ALL_SETTLED
+    # C17 (D42). The topology this profile declares for the agents reachable from it, or None (no
+    # check, the behaviour before C17). Declared by ONE profile: the hub or root. Part of the
+    # content hash.
+    topology: Topology | None = None
     # C11 (D40). Asks one model step may make; the rest are REFUSED with a result the model can
     # read. And asks of one asking turn that may RUN at once; the rest wait queued until one
     # answers. Both per asking profile, both part of the content hash.

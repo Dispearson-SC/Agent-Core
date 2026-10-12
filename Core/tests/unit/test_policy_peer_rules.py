@@ -281,9 +281,7 @@ def test_an_ask_rule_suspends_that_call_for_a_person_before_anything_is_dispatch
 
 
 def test_a_deny_rule_refuses_that_peer_at_call_time_with_the_rules_reason() -> None:
-    rules = _ruleset(
-        _rule("all", Effect.ALLOW), _rule("no-fraud", Effect.DENY, resource="fraud")
-    )
+    rules = _ruleset(_rule("all", Effect.ALLOW), _rule("no-fraud", Effect.DENY, resource="fraud"))
     world = _world()
     returned: list[str] = []
 

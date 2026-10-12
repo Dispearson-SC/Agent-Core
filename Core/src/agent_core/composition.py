@@ -240,6 +240,7 @@ from agent_core.application.resume_turn import ResumeTurn
 from agent_core.application.start_turn import StartTurn
 from agent_core.domain.media import MediaRef
 from agent_core.domain.profile import AgentProfile, ProfileVersionRegistry
+from agent_core.domain.topology import validate_topology
 from agent_core.domain.turn import (
     CallerIdentity,
     PendingKind,
@@ -961,6 +962,20 @@ def _grant_peer_mechanism(profile: AgentProfile) -> AgentProfile:
     if not profile.peers.enabled or PEER_TOOLSET in profile.toolsets:
         return profile
     return replace(profile, toolsets=(*profile.toolsets, PEER_TOOLSET))
+
+
+def _refuse_topology_drift(profiles: Mapping[str, AgentProfile], policy_dir: Path) -> None:
+    """Fail startup when the declared peer topology disagrees with the profiles, hop limits or
+    policy rules (C17, D42). Nothing declared, nothing read.
+
+    The policy rules are checked only when the deployment manages policy from files (an existing
+    `policy_dir`, the same reading `start_container` applies); with no directory the rules live
+    only in the database, which a startup with no I/O cannot see, and they are left unchecked.
+    """
+    if not any(profile.peers.topology for profile in profiles.values()):
+        return
+    rules = load_policy_rules(policy_dir) if policy_dir.is_dir() else None
+    validate_topology(profiles, rules)
 
 
 def _refuse_unservable_profiles(
@@ -1738,6 +1753,9 @@ def build_container(
     # t-f11-05. Before anything else is wired: a profile that cannot resolve its toolsets
     # is refused HERE, naming the profile and the toolset, rather than on its first turn.
     _refuse_unservable_profiles(profiles, TOOL_PACKAGES)
+    # C17 (D42). The peer topology, declared once, against the profiles, their hop limits and the
+    # policy files: drift stops the process here, not as refused asks on a customer's turn.
+    _refuse_topology_drift(profiles, resolved.policy_dir)
 
     model = LiteLLMGateway(resolved.proxy_base_url)
     policy = PgToolPolicy(PoolConnections(domain_pool))

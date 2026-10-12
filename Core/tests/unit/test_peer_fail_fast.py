@@ -91,9 +91,7 @@ def test_fail_fast_cancels_the_callee_workflows_of_the_siblings_too(
 
     assert _statuses(world) == {"tc-1": "cancelled", "tc-2": "error", "tc-3": "cancelled"}
     assert sorted(world.mailbox.cancelled) == ["corr-1", "corr-3"]
-    expected = {
-        turn_workflow.peer_workflow_id(corr, 0) for corr in ("corr-1", "corr-3")
-    }
+    expected = {turn_workflow.peer_workflow_id(corr, 0) for corr in ("corr-1", "corr-3")}
     assert expected <= set(world.cancelled_workflows), "the C4 cascade reached the engine"
 
 

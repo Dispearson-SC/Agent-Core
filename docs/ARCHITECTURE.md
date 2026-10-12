@@ -673,6 +673,14 @@ ALLOW, whatever the order of the rules). `ask` suspends that call on the usual h
 BEFORE anything is dispatched; `deny` removes the peer from the catalogue and refuses a call that
 names it anyway.
 
+**One topology source (C17, D42).** Who may ask whom lived in three places (each profile's allowlist,
+its `max_hops`, the policy rules). One profile, the hub or root, may now declare `peers.topology:
+star | tree | mesh`; at startup `build_container` checks everything reachable from it against that
+declaration and refuses to start, listing every violation, on a spoke that allows another spoke, a
+one-sided or looping entry, a hop limit that would refuse a declared edge, a peer with no profile or
+with peers switched off, or (when the policy directory is managed from files) an edge no `ask_peer`
+rule allows or one that a rule denies for every caller. Nothing declared, nothing checked.
+
 **Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
 and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the
 two-sided gate), the caller's policy rules and each callee profile's `description`. A denied,

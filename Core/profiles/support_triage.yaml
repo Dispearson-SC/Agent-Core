@@ -59,6 +59,11 @@ peers:
       # No `endpoint`: both agents run in this process, so the ask travels through the
       # durable mailbox. An endpoint is what makes a peer a remote A2A target instead.
 
+  # OPTIONAL: declare the shape of this group ONCE, here on the hub, and the process refuses to
+  # start when the profiles, their hop limits or the policy files disagree with it (D42):
+  #     topology: star      # support_triage is the hub; billing_specialist must list only it
+  # Not declared today, so nothing is checked.
+
   # ONE LEG DEEP, DELIBERATELY. A hop is not a loop iteration: it is a complete turn with
   # model calls on both sides, so `max_hops: 1` caps one customer question at two turns
   # rather than an unbounded chain. WHAT IT COSTS WHEN IT FIRES: billing cannot ask us

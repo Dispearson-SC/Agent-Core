@@ -1668,3 +1668,38 @@ jsonb as `resource_pattern`), narrowing it to what a call acts on. The resource 
 - **Spawn of subagents (W5)** will call the same `decide` with its own resource argument: add the
   tool to `RESOURCE_ARGUMENTS`.
 - **Replay shape: unchanged.**
+
+## D42 · Agent-comms v2: a single topology source (C17)
+
+The shape of "who may ask whom" was written in three places that nothing compared: each profile's
+`peers.peers` allowlist, its `peers.max_hops`, and the policy rules for `ask_peer`. When they drifted
+(a specialist allowing another specialist, a one-sided entry, a limit of 1 under a two-deep chain, a
+rule denying an edge the profiles promise) the only symptom was a refused ask on a live turn, with
+the cause three files away.
+
+- **Where it is declared: `peers.topology` on the hub/root profile.** Options were a separate
+  "team file" or a key on the orchestrator profile. The repository has no team file concept and
+  adding one means a new loader, a new directory and a second thing to keep in step with the
+  profiles; a key on `PeerPolicy` rides the existing profile loader, content hash and review. Exactly
+  one profile declares it (two declaring is itself a violation); everything reachable from it over
+  allowlist entries is checked. Values: `star`, `tree`, `mesh`; absent = no check, so every profile
+  that exists today starts as before. The key changes every profile's content hash once (a new
+  field), like `fan_out` and the caps did.
+- **Entries are mutual, because the gate is.** `authorise_hop` lets A ask B only if both list each
+  other and both `max_hops` exceed the hop count. So a star spoke LISTS its hub (else the hub's asks
+  to it are refused) and must list nobody else; in a tree a profile lists its parent and its own
+  children; in a mesh every entry must be reciprocated. The hop limit is checked at the depth an edge
+  is made (0 for a hub or a mesh, the parent's depth in a tree) against the smaller of the two limits.
+- **Policy rules: only what is certain.** With a managed policy directory the rules are loaded at
+  startup (`load_policy_rules`, files only: the database is not read, `build_container` does no I/O)
+  and each asking edge needs a rule that can allow `ask_peer` to its target, with no rule that DENIES
+  it for every caller. A deny limited to roles, channels or a tenant is a narrowing and is not drift;
+  with no policy directory the rules live only in the database and are not checked.
+- **Where it runs and what it prints.** `composition._refuse_topology_drift`, right after the
+  toolset check and before anything is wired, raising `TopologyDriftError` (a `ValueError`) with every
+  violation, each naming the profiles and the file key to change. The pure check is
+  `domain/topology.py::topology_violations`.
+- **Not done:** deriving the allowlists from the topology (the declaration validates, it does not
+  generate); checking rules that depend on the caller's roles, channel or tenant (a caller is not
+  known at startup).
+- **Replay shape: unchanged.**
