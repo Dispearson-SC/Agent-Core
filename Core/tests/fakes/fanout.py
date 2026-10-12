@@ -11,6 +11,7 @@ must never import another test module's private helpers.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -296,3 +297,13 @@ def nobody_answers(advance: float) -> Callable[[World], Any]:
         return None
 
     return run
+
+
+def asker_policy(**changes: Any) -> None:
+    """Change the asking profile's `PeerPolicy` in the bound seat (after `install`)."""
+    seat = turn_workflow._dependencies.peers  # noqa: SLF001 - the test seam
+    assert seat is not None
+    asker = seat.profiles[ASKER]
+    seat.profiles[ASKER] = dataclasses.replace(
+        asker, peers=dataclasses.replace(asker.peers, **changes)
+    )

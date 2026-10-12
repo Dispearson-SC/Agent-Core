@@ -16,7 +16,7 @@ from agent_core.adapters.driving.cli import stranded_turns
 from agent_core.adapters.driving.cli.stranded_turns import StrandedWorkflow
 from agent_core.composition import Settings
 
-CURRENT = "agent-core-turns.6"
+CURRENT = "agent-core-turns.7"
 
 
 def _row(workflow_id: str = "wf-1", version: str = "agent-core-turns.1") -> StrandedWorkflow:

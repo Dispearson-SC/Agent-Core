@@ -5,7 +5,7 @@ changes. Decisions behind them are in `docs/DECISIONS.md`.
 
 ## Bumping the DBOS application version
 
-`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.6`) is bumped when a
+`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.7`) is bumped when a
 change makes turns that are already in flight incompatible with the new code: a workflow step
 added, removed, renamed or reordered, or a changed workflow argument (D28 took `.1` to `.2`;
 D31 took `.2` to `.3`: the peer job gained `answer_token` and the round gained the cancel
@@ -14,7 +14,8 @@ collected and resumed once, so a turn suspended on a person under `.3` is strand
 `.5`: a peer workflow is named by a UUID instead of `peer-<id>`, so a peer workflow still open
 under `.4` is stranded and the new build does not know its name, see "Deploying the UUID peer
 workflow ids"; D36 took `.5` to `.6`: the request key of a peer ask names its round and position, see
-"Deploying the ask keys". Peer asks in
+"Deploying the ask keys"; D39 took `.6` to `.7`: a round waiting on a peer records one more step
+(the fan-out policy), see "Deploying the fan-out policy". Peer asks in
 flight on `.2` are stranded too: `stranded-turns` lists them, and
 their mailbox rows stay `delivered` until the lease reclaims them: with
 `AGENT_CORE_RETIRE_OTHER_VERSIONS=true` (D33) the lease treats a workflow left open under another
@@ -112,6 +113,16 @@ Migration `0031` is applied by the new build at startup and is NOT safe to apply
 `.5` build: it drops the constraint the `.5` ask statement names (`ON CONFLICT ON CONSTRAINT
 uq_peer_messages_turn_target_question`), so every ask a `.5` process makes after it fails. Stop the
 `.5` processes first (the drain above), then start `.6`.
+
+## Deploying the fan-out policy (`.6` -> `.7`, D39)
+
+A round that waits on a peer now records one more step (`_step_peer_fan_out`, the asking profile's
+`peers.fan_out`) and the answer read returns the callee's failure flag. A turn suspended under `.6`
+would replay into another step sequence, so it is stranded like any stale-version workflow: drain
+before deploying `.7` exactly as for `.6` ("Deploying the ask keys" above: `stranded-turns` against the
+OLD build must report 0), then deploy `.7`, run `stranded-turns` again and cancel what it lists.
+Migration `0032` (`peer_messages.answer_failed`, `callee_failures`) is additive with defaults, so it
+is safe under a running `.6` build.
 
 ## Peer redelivery lease
 

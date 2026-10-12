@@ -483,7 +483,12 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # instead of the bare tool call id, so a re-executed ask step derives another correlation id than
 # the one an interrupted .5 run inserted and would post a second row. In-flight .5 turns are
 # stranded on purpose (drain first, OPERATIONS.md); no step name or order changed.
-PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.6"
+# .6 -> .7 with D39 (C10), ONCE for the C10/C11/C15/C17 batch: a round that waits on a peer now
+# records one more step (`_step_peer_fan_out`) right after the reply timeout, and
+# `_step_read_peer_answer` returns the callee's failure flag too, so a turn suspended under .6 would
+# replay into a different step sequence. In-flight .6 turns are stranded on purpose (drain first,
+# OPERATIONS.md). Nothing was deployed under .3-.6, so for this branch it is a formality.
+PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.7"
 
 # C5 (D32). The default of `Settings.max_turn_attempts` is `DEFAULT_MAX_TURN_ATTEMPTS`, defined once
 # in `turn_workflow` (where the budget is enforced) and imported above; D33 removed the second copy.

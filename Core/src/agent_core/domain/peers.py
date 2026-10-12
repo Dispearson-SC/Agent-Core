@@ -106,6 +106,19 @@ def peer_session_key(correlation_id: str) -> str:
     return str(uuid5(_PEER_ID_NAMESPACE, correlation_id))
 
 
+class FanOutPolicy(StrEnum):
+    """What one failed ask does to the other asks made in the same model step (C10, D39).
+
+    ALL_SETTLED - every ask runs to its own end (answer, error or timeout) and the turn resumes
+                  once with all of them. Default, and the behaviour before C10.
+    FAIL_FAST   - the first ask that ENDS IN ERROR cancels its siblings still out (the C4 cancel)
+                  and the turn resumes once, without waiting for them.
+    """
+
+    ALL_SETTLED = "all_settled"
+    FAIL_FAST = "fail_fast"
+
+
 class PeerVisibility(StrEnum):
     """How much of a conversation a peer may be told about.
 
@@ -153,6 +166,8 @@ class PeerPolicy:
     # the result says `truncated="true"`. Per asking profile, because it protects the asker's
     # context window.
     max_answer_chars: int = DEFAULT_MAX_ANSWER_CHARS
+    # C10 (D39). What a failed ask does to its siblings in the same step. Part of the content hash.
+    fan_out: FanOutPolicy = FanOutPolicy.ALL_SETTLED
 
     def may_ask(self, agent_id: AgentId) -> bool:
         """Whether this profile may address `agent_id`. Empty `peers` means nobody.

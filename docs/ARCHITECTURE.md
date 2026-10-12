@@ -652,6 +652,12 @@ with the fixed failure text. See DECISIONS D32 (C5).
 delimiters, cut to the asking profile's `peers.max_answer_chars` (default 50000); our own sentences
 (timeout, cancelled, refused) are plain. The stored row keeps the answer verbatim. See DECISIONS D35.
 
+**What one failed ask does to its siblings (C10, D39).** `peers.fan_out` on the asking profile:
+`all_settled` (default) lets every ask of a model step run to its own end; `fail_fast` cancels the
+siblings still out (the C4 cancel: row and callee workflow) as soon as one ask ends in `error`, hands
+the model `status="cancelled"` for them and resumes the turn once. A refusal never trips it, and a
+person's pending approval in the same round is still waited for.
+
 **Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
 and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the
 two-sided gate), the caller's policy rules and each callee profile's `description`. A denied,

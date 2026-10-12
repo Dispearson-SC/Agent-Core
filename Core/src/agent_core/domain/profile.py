@@ -44,7 +44,7 @@ from typing import Any
 from agent_core.domain.compaction import CompactionPolicy
 from agent_core.domain.knowledge import KnowledgePolicy, RetrievalMode
 from agent_core.domain.media import MediaDelivery, MediaKind, MediaPolicy
-from agent_core.domain.peers import AgentId, AgentRef, PeerPolicy, PeerVisibility
+from agent_core.domain.peers import AgentId, AgentRef, FanOutPolicy, PeerPolicy, PeerVisibility
 
 
 class ProfileValidationError(ValueError):
@@ -519,7 +519,20 @@ def _build_peer_policy(data: object) -> PeerPolicy:
             mapping.get("max_answer_chars", defaults.max_answer_chars),
             where="peers.max_answer_chars",
         ),
+        fan_out=_fan_out(mapping.get("fan_out", defaults.fan_out)),
     )
+
+
+def _fan_out(value: object) -> FanOutPolicy:
+    """`peers.fan_out` (C10): `all_settled` or `fail_fast`. Anything else refuses to load, because
+    a misspelt policy would silently fall back to the default and keep running every sibling."""
+    if isinstance(value, str):
+        try:
+            return FanOutPolicy(value)
+        except ValueError:
+            pass
+    allowed = ", ".join(policy.value for policy in FanOutPolicy)
+    raise ProfileValidationError(f"peers.fan_out must be one of {allowed}, got {value!r}")
 
 
 def _positive_int(value: object, *, where: str) -> int:

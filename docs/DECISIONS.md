@@ -1568,3 +1568,36 @@ that since C13 a repeat is a fresh ask (the handle-given-out-again path is the d
 adapter that folds repeats); `test_uuid_peer_workflow_ids_moved_the_pinned_application_version_to_five`
 is removed (the `== .6` test and the ">= 4" test cover the same ground); the dead `answers`
 parameter of `test_peer_catalogue._profile` is gone.
+
+## D39 · Agent-comms v2: the fan-out policy (C10)
+
+A model step that asks several peers always waited for every one of them (`_collect_round`, D28),
+even after one had already failed and the others' answers could no longer help. `peers.fan_out` on
+the ASKING profile chooses (`domain.peers.FanOutPolicy`, part of the content hash, an unknown value
+refuses to load):
+
+- `all_settled` (default): the behaviour before C10.
+- `fail_fast`: when an answer arrives that the callee recorded as a failure (`answer_failed`, C1l),
+  the asks of the same step still out are cancelled with the C4 cascade (`_step_cancel_peer_asks`:
+  the row first, then the callee workflow and what it asked in turn) and resolved as
+  `<peer ... status="cancelled">` with a sentence saying why; the round then resumes once. An ask the
+  cascade did not end (it was answered in the meantime) stays awaited and its answer is read as
+  usual. A cancelled sibling's late wake is skipped like a timed-out ask's.
+
+Decisions inside it:
+
+- **What trips it: a callee failure (`error`) only.** A timeout needs no trip (every ask of a round
+  shares the deadline, so the siblings time out together and are already cancelled by the C4 timeout
+  path). A `refused` ask never left (policy, an unknown peer, the parallel cap of C11) and its live
+  siblings were requested knowingly. The re-ask peek path (a mailbox that hands back a handle it
+  already gave out; no shipped adapter does since C13) does not trip it either.
+- **A person's approval in the same round is still waited for.** `fail_fast` stops the AGENTS, not a
+  human's decision; the turn resumes once, when the person has decided.
+- **The policy is read in a recorded step.** `_step_peer_fan_out` runs right after
+  `_step_peer_reply_timeout`, so a replay after a profile edit takes the path the first run took.
+  `_step_read_peer_answer` now returns `(tool_call_id, envelope, failed)`.
+- **Replay shape: `agent-core-turns.6` -> `.7`, ONCE for the C10/C11/C15/C17 batch.** A new step in
+  the default path and a changed step result: a turn suspended under `.6` replays into another
+  sequence, so it is stranded on purpose (OPERATIONS.md "Deploying the fan-out policy"). Nothing was
+  deployed under `.3`-`.6`, so on this branch it is a formality; C11, C15 and C17 add no step and need
+  no second bump.

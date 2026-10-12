@@ -580,4 +580,14 @@ def test_the_round_and_position_ask_key_moved_the_pinned_application_version_to_
     drain first (OPERATIONS.md)."""
     from agent_core import composition
 
-    assert composition.PINNED_DBOS_APPLICATION_VERSION == "agent-core-turns.6"
+    assert int(composition.PINNED_DBOS_APPLICATION_VERSION.rsplit(".", 1)[1]) >= 6
+
+
+def test_the_fan_out_step_moved_the_pinned_application_version_to_seven() -> None:
+    """D39 (C10): a round waiting on a peer records `_step_peer_fan_out` after the reply timeout and
+    `_step_read_peer_answer` returns the failure flag, so a turn suspended under .6 replays into
+    another step sequence and is stranded on purpose (drain first, OPERATIONS.md)."""
+    from agent_core import composition
+
+    assert composition.PINNED_DBOS_APPLICATION_VERSION == "agent-core-turns.7"
+    assert hasattr(turn_workflow, "_step_peer_fan_out")

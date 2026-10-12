@@ -169,6 +169,7 @@ from agent_core.domain.peers import (
     PEER_ASK_CLOSED_ANSWER,
     PEER_ASK_FAILED_ANSWER,
     AgentId,
+    FanOutPolicy,
     PeerAnswerRefusedError,
     PeerPolicy,
     peer_session_key,
@@ -327,7 +328,15 @@ _PEER_ASK_CANCELLED: Final[str] = (
     "answer is coming for this repeat of it. Tell the person it is unavailable or carry on "
     "without it."
 )
+# The result for ONE ask cancelled because a sibling of the same step failed (fail_fast, C10).
+# OUR text, not wrapped.
+_PEER_SIBLING_CANCELLED: Final[str] = (
+    "The peer {target!r} ask was cancelled because another ask made in the same step failed and "
+    "this agent stops its other asks when one fails, so no answer is coming for it. Say what "
+    "failed or carry on without it."
+)
 _CANCEL_TIMED_OUT: Final[str] = "reply timeout: the asking round gave up waiting"
+_CANCEL_FAIL_FAST: Final[str] = "fail_fast: a sibling ask of the same step failed"
 _CANCEL_EXPIRED: Final[str] = "asking turn expired before a person decided"
 _CANCEL_RETIRED: Final[str] = "stranded by a deploy: the application version moved on"
 _MALFORMED_ASK: Final[str] = (
@@ -1133,35 +1142,44 @@ async def _step_peer_reply_timeout(request: TurnRequest) -> int:
 
 
 @DBOS.step()
+async def _step_peer_fan_out(request: TurnRequest) -> str:
+    """The asking profile's `PeerPolicy.fan_out` (C10) as its text value. A step for the reason
+    `_step_peer_reply_timeout` is one: a recovered turn must take the path the crashed attempt took,
+    even if the profile file changed in between."""
+    return _asking_policy(_require_peer_seat(), request.profile_id).fan_out.value
+
+
+@DBOS.step()
 async def _step_read_peer_answer(
     turn_id: TurnId,
     answer: PeerAnswer,
     tool_call_id: ToolCallId,
     request: TurnRequest,
     target: str,
-) -> tuple[ToolCallId, str]:
+) -> tuple[ToolCallId, str, bool]:
     """Redeem one peer's handle WITHOUT resuming the turn.
 
     Refuses an answer addressed to another turn, a handle this turn never asked under and a
     wake with no answer recorded behind it (each is a turn resumed on something nobody sent), and
     follows the wrapping rule (the port wraps; nothing here wraps again), but the
-    result is only a `(tool_call_id, envelope)` pair that the body holds until every
+    result is only a `(tool_call_id, envelope, failed)` triple that the body holds until every
     ask of the round has one. Pydantic AI resumes a run only when it is handed results for
-    ALL of its deferred calls. The envelope is the C8 `<peer>` tag around the capped answer.
+    ALL of its deferred calls. The envelope is the C8 `<peer>` tag around the capped answer;
+    `failed` says the callee failed (the row's outcome, C1l), which `fail_fast` (C10) reacts to.
     """
     if answer.turn_id != turn_id:
         raise UnusableResumeAnswerError(
             f"a peer answer for turn {answer.turn_id!r} was delivered to turn {turn_id!r}. "
             "Applying it would resume this turn on an answer given to another one."
         )
-    wrapped = await _peer_envelope(answer.correlation_id, request, target)
-    if wrapped is None:
+    found = await _peer_envelope(answer.correlation_id, request, target)
+    if found is None:
         raise UnusableResumeAnswerError(
             f"the turn was woken for peer handle {answer.correlation_id!r} and the mailbox "
             "holds no answer under it. The wake and the record disagree; resuming on an "
             "empty result would hand the model an answer the peer never gave."
         )
-    return tool_call_id, wrapped
+    return tool_call_id, found[0], found[1]
 
 
 async def _read_wrapped_answer(correlation_id: str) -> str | None:
@@ -1173,8 +1191,11 @@ async def _read_wrapped_answer(correlation_id: str) -> str | None:
     return await _require_peer_seat().mailbox.read_answer(correlation_id)
 
 
-async def _peer_envelope(correlation_id: str, request: TurnRequest, target: str) -> str | None:
-    """A stored peer answer as the `<peer>` envelope, or None when none is stored (C8).
+async def _peer_envelope(
+    correlation_id: str, request: TurnRequest, target: str
+) -> tuple[str, bool] | None:
+    """A stored peer answer as `(the <peer> envelope, the callee failed)`, or None when none is
+    stored (C8).
 
     Reads through `_read_wrapped_answer` (the one reader) and applies the ASKER's
     `max_answer_chars`. The status comes from the row (`AgentMailbox.answer_failed`, C1l): the
@@ -1189,13 +1210,14 @@ async def _peer_envelope(correlation_id: str, request: TurnRequest, target: str)
     failed = await mailbox.answer_failed(correlation_id)
     cap = _asking_policy(_require_peer_seat(), request.profile_id).max_answer_chars
     capped = cap_wrapped_answer(wrapped, cap)
-    return PeerResult(
+    envelope = PeerResult(
         peer=target,
         status=PeerStatus.ERROR if failed else PeerStatus.OK,
         text=capped.wrapped,
         session=_peer_session_id(request, correlation_id),
         truncated=capped.truncated,
     ).render()
+    return envelope, failed
 
 
 @DBOS.step()
@@ -1208,9 +1230,11 @@ async def _step_peek_peer_answer(
     again (no shipped one does since C13, D36: a repeat in a later round is a fresh ask; a mailbox
     that folds repeats, or a replayed round, can still do it). The reply may have landed - and its
     wake-up been skipped - before the ask was made again. Same payload as a received answer: see
-    `_peer_envelope`.
+    `_peer_envelope`. A failure found this way does not trip `fail_fast` (C10): this path is the
+    defence for an adapter that folds repeats, and no shipped one does.
     """
-    return await _peer_envelope(correlation_id, request, target)
+    found = await _peer_envelope(correlation_id, request, target)
+    return None if found is None else found[0]
 
 
 @DBOS.step()
@@ -1504,6 +1528,34 @@ async def _step_resume_round(
     )
 
 
+async def _cancel_siblings(
+    request: TurnRequest,
+    awaiting: dict[str, ToolCallId],
+    peer_results: dict[ToolCallId, str],
+    timed_out: set[str],
+    targets: dict[ToolCallId, str],
+) -> None:
+    """`fail_fast` (C10): an ask of this step failed, so stop the asks still out. Body code.
+
+    The C4 cancel runs as ONE recorded step over every ask still waiting (the row first, then the
+    callee workflow and what it asked in turn). Each ask it actually ended is resolved as
+    `cancelled` and remembered in `timed_out`, so its late wake is skipped like a timed-out ask's;
+    an ask that was answered in the meantime is not in the returned set, so it stays awaited and
+    its answer is read as usual. The round then goes on to resume once, without them.
+    """
+    ended = set(await _step_cancel_peer_asks(tuple(sorted(awaiting)), _CANCEL_FAIL_FAST))
+    for corr in sorted(ended & set(awaiting)):
+        tool_call_id = awaiting.pop(corr)
+        timed_out.add(corr)
+        peer_results[tool_call_id] = _own_peer_result(
+            request,
+            target=targets[tool_call_id],
+            status=PeerStatus.CANCELLED,
+            text=_PEER_SIBLING_CANCELLED.format(target=targets[tool_call_id]),
+            correlation_id=corr,
+        )
+
+
 async def _collect_round(
     turn_id: TurnId,
     request: TurnRequest,
@@ -1581,9 +1633,12 @@ async def _collect_round(
             )
 
     seconds = 0
+    fan_out = FanOutPolicy.ALL_SETTLED
     peer_deadline = human_deadline = 0.0
     if awaiting or human_missing:
-        seconds = await _step_peer_reply_timeout(request) if awaiting else 0
+        if awaiting:
+            seconds = await _step_peer_reply_timeout(request)
+            fan_out = FanOutPolicy(await _step_peer_fan_out(request))
         started = await _step_round_clock()
         peer_deadline = started + seconds
         human_deadline = started + THREE_DAYS
@@ -1679,10 +1734,12 @@ async def _collect_round(
                 "model never issued, which Pydantic AI drops in silence."
             )
         del awaiting[answer.correlation_id]
-        _, wrapped = await _step_read_peer_answer(
+        _, wrapped, callee_failed = await _step_read_peer_answer(
             turn_id, answer, asked_id, request, targets[asked_id]
         )
         peer_results[asked_id] = wrapped
+        if callee_failed and fan_out is FanOutPolicy.FAIL_FAST and awaiting:
+            await _cancel_siblings(request, awaiting, peer_results, timed_out, targets)
 
     return _TurnEnd(
         await _step_resume_round(
