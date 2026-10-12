@@ -441,8 +441,8 @@ def _state(conninfo: str, correlation_id: str) -> tuple[str, int]:
     return str(row[0]), int(row[1])
 
 
-def _never_running(calls: list[str]) -> Callable[[str], Awaitable[bool]]:
-    async def exists(correlation_id: str) -> bool:
+def _never_running(calls: list[str]) -> Callable[[str, int], Awaitable[bool]]:
+    async def exists(correlation_id: str, generation: int) -> bool:
         calls.append(correlation_id)
         return False
 
@@ -486,7 +486,7 @@ def test_a_stale_row_whose_workflow_exists_is_not_reclaimed() -> None:
     _age(conninfo, claimed.correlation_id, _LEASE * 3)
     mailbox = PgAgentMailbox(conninfo)
 
-    async def running(correlation_id: str) -> bool:
+    async def running(correlation_id: str, generation: int) -> bool:
         return True
 
     reclaimed = asyncio.run(mailbox.reclaim_stale(_ASSISTANT, lease=_LEASE, exists=running))
@@ -508,7 +508,7 @@ def test_an_answered_row_and_a_failing_existence_check_are_never_reclaimed() -> 
     _age(conninfo, answered.correlation_id, _LEASE * 3)
     _age(conninfo, unknown.correlation_id, _LEASE * 3)
 
-    async def cannot_tell(correlation_id: str) -> bool:
+    async def cannot_tell(correlation_id: str, generation: int) -> bool:
         raise ConnectionError("dbos unreachable")
 
     reclaimed = asyncio.run(mailbox.reclaim_stale(_ASSISTANT, lease=_LEASE, exists=cannot_tell))

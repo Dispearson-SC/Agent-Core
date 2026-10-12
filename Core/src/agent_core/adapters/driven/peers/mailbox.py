@@ -171,7 +171,7 @@ _CLAIM_SQL = """
         LIMIT 1
     )
     RETURNING correlation_id, target_agent_id, from_session_id, from_tenant_id,
-              turn_id, hop, question, from_agent_id, answer_token
+              turn_id, hop, question, from_agent_id, answer_token, redeliveries
 """
 
 # `answered_at IS NULL` is the idempotency guard and it lives in the WHERE clause rather
@@ -218,7 +218,7 @@ _IS_CANCELLED_SQL = "SELECT state = 'cancelled' FROM peer_messages WHERE correla
 # database's clock decides unless a test passes `now`. Oldest first, bounded so one pass never
 # loads the whole backlog.
 _STALE_SQL = """
-    SELECT correlation_id
+    SELECT correlation_id, redeliveries
     FROM peer_messages
     WHERE target_agent_id = %s AND state = 'delivered' AND answered_at IS NULL
       AND delivered_at < COALESCE(%s::timestamptz, now()) - %s
@@ -228,11 +228,15 @@ _STALE_SQL = """
 
 # The requeue repeats every guard of the candidate query: between the listing and this UPDATE
 # the row may have been answered, or reclaimed by another worker. Only the statement that
-# changes the row decides, so two workers can never both reclaim the same delivery.
+# changes the row decides, so two workers can never both reclaim the same delivery. The listing's
+# `redeliveries` is part of the guard: it names the generation of the workflow that was judged
+# dead, and a row already requeued (and so a generation further) is not requeued again on a
+# stale verdict.
 _REQUEUE_SQL = """
     UPDATE peer_messages
     SET state = 'queued', delivered_at = NULL, redeliveries = redeliveries + 1
-    WHERE correlation_id = %s AND state = 'delivered' AND answered_at IS NULL
+    WHERE correlation_id = %s AND redeliveries = %s AND state = 'delivered'
+      AND answered_at IS NULL
       AND delivered_at < COALESCE(%s::timestamptz, now()) - %s
     RETURNING correlation_id
 """
@@ -278,6 +282,9 @@ class PeerAsk:
     # C1c. The per-ask secret the answering side must present to `answer`. repr=False so a
     # log line or traceback of the ask never prints it.
     answer_token: str | None = field(default=None, repr=False)
+    # C1g. How many times the lease put this ask back on the queue. It is the GENERATION of the
+    # callee workflow: 0 runs `peer-<id>`, n runs `peer-<id>-r<n>`.
+    redeliveries: int = 0
 
 
 def wrap_peer_answer(answer: str) -> str:
@@ -435,6 +442,7 @@ class PgAgentMailbox:
             question=str(row[6]),
             asker=None if row[7] is None else AgentId(str(row[7])),
             answer_token=None if row[8] is None else str(row[8]),
+            redeliveries=int(row[9]),
         )
 
     async def reclaim_stale(
@@ -442,50 +450,67 @@ class PgAgentMailbox:
         target: AgentId,
         *,
         lease: timedelta,
-        exists: Callable[[str], Awaitable[bool]],
+        exists: Callable[[str, int], Awaitable[bool]],
+        retire: Callable[[str, int], Awaitable[None]] | None = None,
         now: datetime | None = None,
     ) -> tuple[str, ...]:
-        """Put delivered-but-unanswered asks of `target` back on the queue. C3 / D31.
+        """Put delivered-but-unanswered asks of `target` back on the queue. C3, C1g / D31, D32.
 
         A claim marks the row `delivered` and nothing ran after it if the worker died between
         the claim and the workflow start. A row is RECLAIMABLE when it is delivered, unanswered
-        and `delivered_at` is older than `lease`, AND `exists(correlation_id)` says the workflow
-        `peer-<correlation_id>` is unknown to the engine. A row whose workflow exists is never
-        touched (it is running, waiting for its human, or finished: the workflow answers it).
-        Redelivery is safe anyway: the workflow id is deterministic, so a second start is a
-        no-op in DBOS.
+        and `delivered_at` is older than `lease`, AND `exists(correlation_id, generation)` says
+        no workflow will answer it. The generation is the row's `redeliveries`: the workflow of
+        the current attempt is `peer-<id>` for 0 and `peer-<id>-r<n>` for n. A row whose workflow
+        exists is never touched (it is running, waiting for its human, or finished: the workflow
+        answers it). "Exists" is the starter's judgement and EXCLUDES a workflow that is still
+        open under another application version: the new build never recovers it (D32).
 
-        `exists` is asked per candidate, outside any database transaction. If it raises the
-        answer is UNKNOWN and the row is left alone (unknown is not "does not exist"). The
-        requeue is one guarded UPDATE, so concurrent reclaimers cannot both win the same row.
+        `retire(correlation_id, generation)`, when given, runs before the requeue for every row
+        judged dead. It cancels what such a workflow left behind (the stranded run and the asks it
+        made), because that run still holds the queue slot of its peer session and would block
+        the new generation. A `retire` that raises leaves the row alone for the next pass.
+        Redelivery is safe either way: the new generation has a new workflow id, and the old one
+        is cancelled.
+
+        Both callbacks are asked per candidate, outside any database transaction. If `exists`
+        raises the answer is UNKNOWN and the row is left alone (unknown is not "does not exist").
+        The requeue is one guarded UPDATE, so concurrent reclaimers cannot both win the same row.
         Returns the reclaimed correlation ids, oldest first. `now` defaults to the database's
         clock.
         """
         candidates = await asyncio.to_thread(self._stale_sync, target, lease, now)
         reclaimed: list[str] = []
-        for correlation_id in candidates:
+        for correlation_id, generation in candidates:
             try:
-                if await exists(correlation_id):
+                if await exists(correlation_id, generation):
                     continue
+                if retire is not None:
+                    await retire(correlation_id, generation)
             except Exception:
                 _LOG.warning(
-                    "could not tell whether the workflow for peer ask %s exists; not reclaiming",
+                    "could not settle the workflow for peer ask %s (generation %d); "
+                    "not reclaiming",
                     correlation_id,
+                    generation,
                     exc_info=True,
                 )
                 continue
-            if await asyncio.to_thread(self._requeue_sync, correlation_id, lease, now):
+            if await asyncio.to_thread(self._requeue_sync, correlation_id, generation, lease, now):
                 reclaimed.append(correlation_id)
         return tuple(reclaimed)
 
-    def _stale_sync(self, target: AgentId, lease: timedelta, now: datetime | None) -> list[str]:
+    def _stale_sync(
+        self, target: AgentId, lease: timedelta, now: datetime | None
+    ) -> list[tuple[str, int]]:
         with psycopg.connect(self._conninfo) as conn:
             rows = conn.execute(_STALE_SQL, (target, now, lease, _RECLAIM_BATCH)).fetchall()
-        return [str(row[0]) for row in rows]
+        return [(str(row[0]), int(row[1])) for row in rows]
 
-    def _requeue_sync(self, correlation_id: str, lease: timedelta, now: datetime | None) -> bool:
+    def _requeue_sync(
+        self, correlation_id: str, generation: int, lease: timedelta, now: datetime | None
+    ) -> bool:
         with psycopg.connect(self._conninfo, autocommit=True) as conn:
-            row = conn.execute(_REQUEUE_SQL, (correlation_id, now, lease)).fetchone()
+            row = conn.execute(_REQUEUE_SQL, (correlation_id, generation, now, lease)).fetchone()
         return row is not None
 
     async def answer(

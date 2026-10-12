@@ -10,7 +10,9 @@ change makes turns that are already in flight incompatible with the new code: a 
 added, removed, renamed or reordered, or a changed workflow argument (D28 took `.1` to `.2`;
 D31 took `.2` to `.3`: the peer job gained `answer_token` and the round gained the cancel
 cascade steps. Peer asks in flight on `.2` are stranded too: `stranded-turns` lists them, and
-their mailbox rows stay `delivered` until the lease in D31 reclaims them under `.3`).
+their mailbox rows stay `delivered` until the lease reclaims them: since D32 the lease treats a
+workflow left open under another version as absent, cancels it and reruns the ask under the new
+build, see "Peer redelivery lease").
 
 DBOS recovers a PENDING workflow only when its row names the version the recovering process
 claims. After a bump, a turn that was suspended under the old version (waiting for a person or
@@ -76,6 +78,17 @@ workflow does not exist (D31, C3).
   `[peer] <agent> reclaimed <id>` for each.
 - A row that stays `delivered` past the lease with a workflow that exists is not reclaimed: look
   at that workflow (`dbos workflow get peer-<id>`), not at the queue.
+- **After a version bump** (D32). A callee workflow a previous build left `PENDING` is never
+  recovered by the new one, so for the lease it counts as absent. Each worker pass cancels it
+  (and the asks it made to third agents), requeues the ask with `redeliveries` + 1 and the next
+  claim runs it as `peer-<id>-r<n>`; the worker prints `[peer] <agent> reclaimed <id>`. The stranded
+  workflow stays visible as `CANCELLED`. The rerun starts the callee's turn from the beginning, so a
+  tool with side effects that the first run had already executed can run twice; approvals the first
+  run published stay open until they expire. If you would rather not rerun such an ask, cancel it
+  yourself before the lease runs out (`cancel_turn` on the asker cancels the row).
+  This needs the lease to be on (`AGENT_CORE_PEER_LEASE_SECONDS`, on by default) and a worker
+  running under the NEW build; asks whose asker is also stranded still get their answer recorded
+  on the row, but the asking workflow will not wake, so `stranded-turns` remains the check for it.
 
 ## Cancelling a turn that is waiting on peers
 

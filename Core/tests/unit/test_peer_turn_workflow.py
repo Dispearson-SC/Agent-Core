@@ -214,6 +214,14 @@ def test_the_peer_workflow_id_is_derived_from_the_correlation_id() -> None:
     assert turn_workflow.peer_workflow_id("abc") == "peer-abc"
 
 
+def test_a_redelivery_generation_gets_its_own_workflow_id() -> None:
+    """C1g: generation 0 keeps the historical id; a later one is suffixed so it cannot collide
+    with the stranded workflow the lease retired."""
+    assert turn_workflow.peer_workflow_id("abc", 0) == "peer-abc"
+    assert turn_workflow.peer_workflow_id("abc", 1) == "peer-abc-r1"
+    assert turn_workflow.peer_workflow_id("abc", 12) == "peer-abc-r12"
+
+
 def test_the_workflow_presents_the_answer_token_when_it_records_the_reply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

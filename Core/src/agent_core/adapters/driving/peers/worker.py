@@ -260,7 +260,8 @@ class StaleReclaimer(Protocol):
         target: AgentId,
         *,
         lease: timedelta,
-        exists: Callable[[str], Awaitable[bool]],
+        exists: Callable[[str, int], Awaitable[bool]],
+        retire: Callable[[str, int], Awaitable[None]] | None = None,
         now: datetime | None = None,
     ) -> tuple[str, ...]: ...
 
@@ -296,9 +297,18 @@ class PeerTurnStarter(Protocol):
     `exists` answers "is the workflow for this ask already enqueued or running?" (C1d). A
     `start` that raised may have committed first (a lost ack, a shutdown), so the worker asks
     before it closes the ask as failed.
+
+    GENERATIONS (C1g, D32). The lease can put an ask back on the queue, and each redelivery runs
+    under a new workflow id (`generation` is the row's `redeliveries`: 0 is `peer-<id>`, n is
+    `peer-<id>-r<n>`). `exists` is therefore asked of one generation, and answers False for a
+    workflow that is still open under ANOTHER application version: this build will never
+    recover it, so for the lease it is as good as absent. `retire` cancels such a stranded
+    workflow and the asks it made; it is idempotent and a no-op for a workflow that is gone.
     """
 
-    async def exists(self, correlation_id: str) -> bool: ...
+    async def exists(self, correlation_id: str, generation: int = 0) -> bool: ...
+
+    async def retire(self, correlation_id: str, generation: int = 0) -> None: ...
 
     async def start(
         self,
@@ -307,6 +317,7 @@ class PeerTurnStarter(Protocol):
         request: TurnRequest,
         *,
         answer_token: str | None = None,
+        generation: int = 0,
     ) -> None: ...
 
 
@@ -531,6 +542,7 @@ async def dispatch_next_ask(
             ask.turn_id,
             peer_turn_request(ask, session=session),
             answer_token=ask.answer_token,
+            generation=ask.redeliveries,
         )
     except (Exception, asyncio.CancelledError):
         # C1d. `start` can fail AFTER its enqueue committed (a lost ack, an engine shutdown
@@ -538,7 +550,7 @@ async def dispatch_next_ask(
         # while the workflow it holds a handle to goes on to answer for real. Close only when
         # the workflow DEFINITELY does not exist; otherwise leave the row `delivered` (the
         # redelivery lease, C3, reclaims one that really was lost) and let the error propagate.
-        if await _definitely_not_started(starter, ask.correlation_id):
+        if await _definitely_not_started(starter, ask.correlation_id, ask.redeliveries):
             await _answer_failed_ask(queue, ask, wake)
         raise
     return PeerTurnReport(
@@ -548,13 +560,15 @@ async def dispatch_next_ask(
     )
 
 
-async def _definitely_not_started(starter: PeerTurnStarter, correlation_id: str) -> bool:
-    """True only when the starter reports that `peer-<correlation_id>` does not exist.
+async def _definitely_not_started(
+    starter: PeerTurnStarter, correlation_id: str, generation: int
+) -> bool:
+    """True only when the starter reports that this ask's workflow (this generation) is absent.
 
     An error while asking is "unknown", and unknown is not "no": the caller leaves the ask open.
     """
     try:
-        return not await starter.exists(correlation_id)
+        return not await starter.exists(correlation_id, generation)
     except Exception:
         logger.warning(
             "could not tell whether the workflow for peer ask %s was enqueued; leaving the ask "
@@ -738,7 +752,7 @@ async def run_peer_worker(
             if lease is not None and isinstance(runner, PeerTurnStarter):
                 assert isinstance(queue, StaleReclaimer)  # checked above, for the type checker
                 for reclaimed in await queue.reclaim_stale(
-                    target, lease=lease, exists=runner.exists
+                    target, lease=lease, exists=runner.exists, retire=runner.retire
                 ):
                     handled = True
                     write_line(f"[peer] {target} reclaimed {reclaimed}")

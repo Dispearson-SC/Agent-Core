@@ -198,6 +198,10 @@ def install(
             world.cancelled_workflows.append(workflow_id)
 
         @staticmethod
+        async def get_workflow_status_async(workflow_id: str) -> None:
+            return None  # no later generation of any peer workflow exists in these runs
+
+        @staticmethod
         async def recv_async(topic: str | None = None, timeout_seconds: float = 60) -> Any:
             world.recv_timeouts.append(timeout_seconds)
             return script.pop(0)(world)

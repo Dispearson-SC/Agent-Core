@@ -425,8 +425,11 @@ class _LostStarter:
     known: set[str] = field(default_factory=set)
     starts: list[tuple[str, str | None]] = field(default_factory=list)
 
-    async def exists(self, correlation_id: str) -> bool:
+    async def exists(self, correlation_id: str, generation: int = 0) -> bool:
         return correlation_id in self.known
+
+    async def retire(self, correlation_id: str, generation: int = 0) -> None:
+        return None
 
     async def start(
         self,
@@ -435,6 +438,7 @@ class _LostStarter:
         request: TurnRequest,
         *,
         answer_token: str | None = None,
+        generation: int = 0,
     ) -> None:
         self.known.add(correlation_id)
         self.starts.append((correlation_id, answer_token))

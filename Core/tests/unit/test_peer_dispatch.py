@@ -47,6 +47,21 @@ def _ask(corr: str = "c1", hop: int = 1, token: str | None = "tok-c1") -> PeerAs
     )
 
 
+def _redelivered(times: int) -> PeerAsk:
+    base = _ask()
+    return PeerAsk(
+        correlation_id=base.correlation_id,
+        target=base.target,
+        question=base.question,
+        from_session=base.from_session,
+        turn_id=base.turn_id,
+        hop=base.hop,
+        asker=base.asker,
+        answer_token=base.answer_token,
+        redeliveries=times,
+    )
+
+
 @dataclass
 class _Queue:
     asks: list[PeerAsk]
@@ -72,12 +87,17 @@ class _Starter:
     commits_before_failing: bool = False
     exists_error: Exception | None = None
     exists_calls: list[str] = field(default_factory=list)
+    retired: list[tuple[str, int]] = field(default_factory=list)
+    generations: list[int] = field(default_factory=list)
 
-    async def exists(self, correlation_id: str) -> bool:
+    async def exists(self, correlation_id: str, generation: int = 0) -> bool:
         self.exists_calls.append(correlation_id)
         if self.exists_error is not None:
             raise self.exists_error
         return any(started[0] == correlation_id for started in self.started)
+
+    async def retire(self, correlation_id: str, generation: int = 0) -> None:
+        self.retired.append((correlation_id, generation))
 
     async def start(
         self,
@@ -86,7 +106,9 @@ class _Starter:
         request: TurnRequest,
         *,
         answer_token: str | None = None,
+        generation: int = 0,
     ) -> None:
+        self.generations.append(generation)
         if self.error is not None:
             if self.commits_before_failing:
                 self.started.append((correlation_id, asking_turn_id, request))
@@ -136,6 +158,35 @@ def test_claiming_the_same_row_again_starts_the_same_workflow_inputs() -> None:
 
     first, second = starter.started
     assert first == second
+
+
+def test_a_redelivered_ask_starts_the_generation_its_row_names() -> None:
+    """C1g. The lease counts redeliveries on the row; the claim carries the count and the worker
+    starts the workflow of that generation, so a rerun does not collide with a stranded one."""
+    redelivered = _redelivered(2)
+    starter = _Starter()
+
+    asyncio.run(dispatch_next_ask(_Queue([redelivered]), starter, target=AgentId("specialist")))
+
+    assert starter.generations == [2]
+
+
+def test_a_failed_start_asks_about_the_generation_it_was_starting() -> None:
+    starter = _Starter(error=RuntimeError("down"), exists_calls=[])
+    seen: list[tuple[str, int]] = []
+
+    async def exists(correlation_id: str, generation: int = 0) -> bool:
+        seen.append((correlation_id, generation))
+        return True  # the enqueue committed: the ask must stay open
+
+    starter.exists = exists  # type: ignore[method-assign]
+    queue = _Queue([_redelivered(3)])
+
+    with pytest.raises(RuntimeError, match="down"):
+        asyncio.run(dispatch_next_ask(queue, starter, target=AgentId("specialist")))
+
+    assert seen == [("c1", 3)]
+    assert queue.answered == []
 
 
 def test_a_start_that_fails_closes_the_ask_with_fixed_text_and_raises() -> None:
@@ -264,10 +315,13 @@ class _ReclaimingQueue(_Queue):
         *,
         lease: timedelta,
         now: datetime | None = None,
-        exists: Callable[[str], Awaitable[bool]],
+        exists: Callable[[str, int], Awaitable[bool]],
+        retire: Callable[[str, int], Awaitable[None]] | None = None,
     ) -> tuple[str, ...]:
         self.reclaim_calls.append((str(target), lease))
-        self.exists_seen.append(await exists("c-stale"))
+        self.exists_seen.append(await exists("c-stale", 2))
+        if retire is not None:
+            await retire("c-stale", 2)
         return ("c-stale",)
 
 
@@ -289,6 +343,7 @@ def test_each_pass_reclaims_stale_deliveries_before_claiming_when_a_lease_is_set
     assert queue.reclaim_calls == [("specialist", timedelta(minutes=5))]
     assert starter.exists_calls == ["c-stale"], "the starter's existence check is what is asked"
     assert queue.exists_seen == [False]
+    assert starter.retired == [("c-stale", 2)], "the starter's retire is what the lease calls"
     assert any("reclaimed c-stale" in line for line in lines)
     assert [corr for corr, _, _ in starter.started] == ["a"], "claiming still happens"
 

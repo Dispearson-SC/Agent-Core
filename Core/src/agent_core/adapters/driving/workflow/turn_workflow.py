@@ -320,6 +320,7 @@ _PEER_ASK_CANCELLED: Final[str] = (
 )
 _CANCEL_TIMED_OUT: Final[str] = "reply timeout: the asking round gave up waiting"
 _CANCEL_EXPIRED: Final[str] = "asking turn expired before a person decided"
+_CANCEL_RETIRED: Final[str] = "stranded by a deploy: the application version moved on"
 _MALFORMED_ASK: Final[str] = (
     "The peer ask was refused before it was sent: the call carried no usable target and "
     "question, so there was nothing to ask and nobody to ask it of."
@@ -1151,6 +1152,21 @@ async def _step_peer_ask_cancelled(correlation_id: str) -> bool:
     return await _require_peer_seat().mailbox.is_cancelled(correlation_id)
 
 
+async def _peer_workflow_ids(correlation_id: str) -> tuple[str, ...]:
+    """Every workflow id that ever ran this ask: `peer-<id>` and each `-r<n>` that exists.
+
+    The lease starts a new generation when a stranded one is retired (C1g), and a cancel must
+    reach whichever one is live, so it walks the generations DBOS knows. Generation 0 is always
+    named, whether or not it exists: cancelling an unknown id is the cheap, harmless case.
+    """
+    ids = [peer_workflow_id(correlation_id)]
+    generation = 1
+    while await DBOS.get_workflow_status_async(peer_workflow_id(correlation_id, generation)):
+        ids.append(peer_workflow_id(correlation_id, generation))
+        generation += 1
+    return tuple(ids)
+
+
 async def _cancel_callees(correlation_ids: tuple[str, ...], reason: str) -> tuple[str, ...]:
     """The cascade proper: close each ask's row, then cancel its callee workflow, then the asks
     that callee made in turn (A -> B -> C). NOT a step.
@@ -1181,17 +1197,18 @@ async def _cancel_callees(correlation_ids: tuple[str, ...], reason: str) -> tupl
         if not ended and not await seat.mailbox.is_cancelled(correlation_id):
             continue  # answered: nothing to cancel
         cancelled.append(correlation_id)
-        callee = peer_workflow_id(correlation_id)
-        try:
-            await DBOS.cancel_workflow_async(callee)
-        except Exception:
-            _LOG.warning(
-                "could not cancel the callee workflow for peer ask %r; its row is cancelled so "
-                "any answer it writes is refused",
-                correlation_id,
-                exc_info=True,
-            )
-        queue.extend(await seat.mailbox.cancel_open(callee, reason))
+        for callee in await _peer_workflow_ids(correlation_id):
+            try:
+                await DBOS.cancel_workflow_async(callee)
+            except Exception:
+                _LOG.warning(
+                    "could not cancel the callee workflow %r for peer ask %r; its row is "
+                    "cancelled so any answer it writes is refused",
+                    callee,
+                    correlation_id,
+                    exc_info=True,
+                )
+            queue.extend(await seat.mailbox.cancel_open(callee, reason))
     return tuple(cancelled)
 
 
@@ -1879,7 +1896,7 @@ class PeerTurnJob:
 PEER_WORKFLOW_PREFIX: Final[str] = "peer-"
 
 
-def peer_workflow_id(correlation_id: str) -> str:
+def peer_workflow_id(correlation_id: str, generation: int = 0) -> str:
     """The durable id of the workflow that answers one ask. Pure.
 
     DETERMINISTIC ON PURPOSE (C1): starting it twice - a worker that claimed the row, died
@@ -1887,8 +1904,14 @@ def peer_workflow_id(correlation_id: str) -> str:
     the existing one instead of running the callee's turn twice. It is also the callee's
     TURN ID (`_step_new_turn_id` reads the workflow id), so an approval for the callee's
     human is addressed to it.
+
+    `generation` (C1g, D32) is the row's `redeliveries`. The first attempt is `peer-<id>`; once
+    the lease has put the ask back because its workflow was stranded by a version bump, the next
+    attempt is `peer-<id>-r<n>`: the stranded one keeps its id (cancelled, with its history), and
+    the new build starts a workflow that does not collide with it.
     """
-    return f"{PEER_WORKFLOW_PREFIX}{correlation_id}"
+    suffix = f"-r{generation}" if generation > 0 else ""
+    return f"{PEER_WORKFLOW_PREFIX}{correlation_id}{suffix}"
 
 
 @DBOS.step()
@@ -2243,7 +2266,9 @@ async def enqueue_turn(
             return await turn_queue.enqueue_async(run_turn_workflow, request)
 
 
-async def enqueue_peer_turn(job: PeerTurnJob) -> WorkflowHandleAsync[TurnOutcome]:
+async def enqueue_peer_turn(
+    job: PeerTurnJob, *, generation: int = 0
+) -> WorkflowHandleAsync[TurnOutcome]:
     """Hand one peer ask's turn to the durable queue under its deterministic workflow id.
 
     Idempotent: DBOS returns the existing handle for an id it already has, so a worker that
@@ -2253,9 +2278,12 @@ async def enqueue_peer_turn(job: PeerTurnJob) -> WorkflowHandleAsync[TurnOutcome
     """
     with (
         SetEnqueueOptions(queue_partition_key=session_partition_key(job.request.session)),
-        SetWorkflowID(peer_workflow_id(job.correlation_id)),
+        SetWorkflowID(peer_workflow_id(job.correlation_id, generation)),
     ):
         return await turn_queue.enqueue_async(run_peer_turn_workflow, job)
+
+
+_OPEN_STATUSES: Final[frozenset[str]] = frozenset({"PENDING", "ENQUEUED", "DELAYED"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -2266,9 +2294,38 @@ class DurablePeerTurnStarter:
     the callee thinks or waits for its human, and the workflow, not the worker, answers.
     """
 
-    async def exists(self, correlation_id: str) -> bool:
-        """Whether `peer-<correlation_id>` is already known to DBOS (any state). C1d."""
-        return await DBOS.get_workflow_status_async(peer_workflow_id(correlation_id)) is not None
+    async def exists(self, correlation_id: str, generation: int = 0) -> bool:
+        """Whether this ask's workflow of this generation is known to DBOS AND is this build's
+        to drive. C1d, C1g.
+
+        A workflow still OPEN (`PENDING`, `ENQUEUED`, `DELAYED`) under another application version
+        is False: DBOS recovers a pending workflow only for the version the recovering process
+        claims, so this build will never run it. A finished one (`SUCCESS`, `ERROR`,
+        `CANCELLED`) stays True whatever its version: it ended, and re-running it is not the
+        lease's decision.
+        """
+        found = await DBOS.get_workflow_status_async(peer_workflow_id(correlation_id, generation))
+        if found is None:
+            return False
+        stranded = found.status in _OPEN_STATUSES and found.app_version != DBOS.application_version
+        return not stranded
+
+    async def retire(self, correlation_id: str, generation: int = 0) -> None:
+        """Cancel a stranded workflow of this generation and the asks it made. Idempotent.
+
+        Called by the lease before it requeues an ask whose workflow `exists` judged dead. The
+        stranded run holds the one queue slot its peer session has (DBOS' partition probe is not
+        scoped by version), so leaving it open would block the next generation for ever; its own
+        asks to third agents are cancelled with it. A workflow that is gone or already finished
+        is left alone.
+        """
+        workflow_id = peer_workflow_id(correlation_id, generation)
+        found = await DBOS.get_workflow_status_async(workflow_id)
+        if found is None or found.status not in _OPEN_STATUSES:
+            return
+        await DBOS.cancel_workflow_async(workflow_id)
+        nested = await _require_peer_seat().mailbox.cancel_open(workflow_id, _CANCEL_RETIRED)
+        await _cancel_callees(nested, _CANCEL_RETIRED)
 
     async def start(
         self,
@@ -2277,6 +2334,7 @@ class DurablePeerTurnStarter:
         request: TurnRequest,
         *,
         answer_token: str | None = None,
+        generation: int = 0,
     ) -> None:
         await enqueue_peer_turn(
             PeerTurnJob(
@@ -2284,7 +2342,8 @@ class DurablePeerTurnStarter:
                 correlation_id=correlation_id,
                 asking_turn_id=asking_turn_id,
                 answer_token=answer_token,
-            )
+            ),
+            generation=generation,
         )
 
 

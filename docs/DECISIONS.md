@@ -1123,3 +1123,33 @@ The ask B makes is filed under it, and the column was a UUID: the INSERT failed 
   callee's first `INSERT INTO turns` would be refused for the same reason. Fixing it means
   either TEXT turn ids everywhere (views, audit tables) or UUID workflow ids for peers
   (`uuid5(corr)`), both a decision for the owner of the schema.
+
+**C1g · a version bump no longer strands peer asks.** D31's lease requeued a delivered row only
+when no workflow `peer-<id>` existed, and `exists` was true for every workflow DBOS knew,
+including one a PREVIOUS build started and left PENDING. DBOS recovers a pending workflow only for
+the application version the recovering process claims, so that workflow would never run again and
+the row stayed `delivered` for ever: OPERATIONS.md's claim that the lease reclaims such rows was
+false. Chosen: automatic reclaim with a new deterministic workflow id (the explicit operator
+command was the alternative; it needs the same machinery, and leaving the asker to time out is
+what the current build does for every other stranded turn).
+
+- `exists(correlation_id, generation)` is now "a workflow of this generation exists AND this
+  build will drive it": an OPEN workflow (`PENDING`, `ENQUEUED`, `DELAYED`) under another
+  `app_version` is False. A finished one stays True whatever its version.
+- *Generation.* The row's `redeliveries` is the generation: the first attempt is `peer-<id>`,
+  the n-th redelivery is `peer-<id>-r<n>` (`peer_workflow_id(corr, n)`). The claim returns
+  `PeerAsk.redeliveries` and `PeerTurnStarter.start(..., generation=)` uses it. The callee's turn
+  id is its workflow id, so a rerun is a new turn with new approvals.
+- *Retire, then requeue.* `reclaim_stale(..., exists, retire)` calls `retire(corr, generation)`
+  before the requeue for every row judged dead. `DurablePeerTurnStarter.retire` cancels the
+  stranded workflow (kept, with its history, as `CANCELLED`) and the asks it made to third agents.
+  This is required, not tidy: DBOS' partition probe is not scoped by version, and the new
+  generation shares the old one's peer session (and so its partition), so an open stranded run
+  would block it for ever. The requeue is guarded by the generation it judged, so a stale verdict
+  cannot bump a row twice. A `retire` or `exists` that raises leaves the row for the next pass.
+- *Cancel reaches every generation.* `_cancel_callees` walks `peer-<id>`, `peer-<id>-r1`, ... as
+  far as DBOS knows them, so cancelling an ask cancels whichever generation is live.
+- *Hazard, stated.* The rerun starts the callee's turn from the beginning, in the same peer
+  session. A tool with side effects that the stranded run had already executed can run again;
+  asks the stranded run made are cancelled, the rerun asks again. Approvals the stranded run
+  published stay open in `human_requests` until they expire (nothing resumes on them).
