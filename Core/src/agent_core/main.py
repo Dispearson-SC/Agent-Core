@@ -733,9 +733,10 @@ def run_peer_worker_process(arguments: argparse.Namespace) -> None:
         which is a deployment decision and not one this file can make for them.
 
         THE PEER TURN IS DURABLE (C1, D29). The worker claims a row and starts the workflow
-        `peer-<correlation_id>` (`DurablePeerTurnStarter`), then moves on. That workflow runs
-        the callee's turn through the same durable path as any turn, records the answer and
-        wakes the asker when it finishes - including after the callee's own human approval -
+        `peer_workflow_id(<correlation_id>)` (`DurablePeerTurnStarter`), then moves on. That
+        workflow runs the callee's turn through the same durable path as any turn, records the
+        answer and wakes the asker when it finishes - including after the callee's own human
+        approval -
         so killing this process while B thinks no longer loses the ask, and a callee that
         suspends is no longer an ask nobody answers. The remaining window, a crash between
         the claim and the start, is closed by the redelivery lease (C3, D31): every pass puts
@@ -766,7 +767,7 @@ def run_peer_worker_process(arguments: argparse.Namespace) -> None:
     print(
         "[peer-worker] answering for: "
         + ", ".join(targets)
-        + " - each ask starts a durable workflow `peer-<correlation id>` that answers it. "
+        + " - each ask starts a durable workflow (id `peer_workflow_id`, a UUID) that answers it. "
         "This process launches the durable engine, so it also dequeues turns and takes part "
         "in recovery."
     )

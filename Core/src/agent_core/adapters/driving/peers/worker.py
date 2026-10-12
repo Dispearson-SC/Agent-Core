@@ -76,7 +76,7 @@ THE HOP TRAVELS WITH THE ASK
     number the caller passed is the number the gate sees.
 
 C1 (D29) CHANGED BOTH SECTIONS BELOW FOR THE PRODUCTION WORKER. `dispatch_next_ask` hands the
-    claimed ask to a durable workflow (`peer-<correlation_id>`) that runs the callee's turn,
+    claimed ask to a durable workflow (`peer_workflow_id`) that runs the callee's turn,
     records the answer and wakes the asker, whether or not the callee suspends along the way;
     a worker that dies after the claim no longer loses the turn. The text below still
     describes `answer_next_ask` with `DirectTurnRunner`, which the console and tests use.
@@ -299,7 +299,7 @@ class PeerTurnStarter(Protocol):
     accepted, NOT when it finishes. The implementation answers the ask (`mailbox.answer`) and
     wakes the asker (`signal_peer_answer`) itself when the turn completes - including after
     B's own human approval or B's own ask to a third agent. `turn_workflow.DurablePeerTurnStarter`
-    is the production binding (a DBOS workflow with id `peer-<correlation_id>`).
+    is the production binding (a DBOS workflow with id `peer_workflow_id(<correlation_id>)`).
 
     `runtime_checkable` so `run_peer_worker` can accept either seat and pick the path.
 
@@ -308,9 +308,10 @@ class PeerTurnStarter(Protocol):
     before it closes the ask as failed.
 
     GENERATIONS (C1g, D32). The lease can put an ask back on the queue, and each redelivery runs
-    under a new workflow id (`generation` is the row's `redeliveries`: 0 is `peer-<id>`, n is
-    `peer-<id>-r<n>`). `exists` is therefore asked of one generation, and answers False for a
-    workflow that is still open under ANOTHER application version: this build will never
+    under a new workflow id (`generation` is the row's `redeliveries`: each generation has its
+    own deterministic id, see `peer_workflow_id`). `exists` is therefore asked of one generation,
+    and answers False for a workflow that is still open under ANOTHER application version: this
+    build will never
     recover it, so for the lease it is as good as absent. `retire` cancels such a stranded
     workflow and the asks it made; it is idempotent and a no-op for a workflow that is gone.
     """
@@ -759,7 +760,7 @@ async def run_peer_worker(
     passing. Their defaults are the production behaviour: `asyncio.sleep`, and forever.
 
     `lease` (C3, durable starter only) turns on redelivery: at the start of every pass, per
-    target, deliveries older than the lease whose workflow `peer-<id>` does not exist are put
+    target, deliveries older than the lease whose callee workflow does not exist are put
     back on the queue (`StaleReclaimer.reclaim_stale`, asking `starter.exists`), so a claim whose
     worker died before the start is picked up again instead of waiting for the asker's timeout.
     """

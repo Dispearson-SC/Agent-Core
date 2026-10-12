@@ -282,7 +282,7 @@ class PeerAsk:
     # log line or traceback of the ask never prints it.
     answer_token: str | None = field(default=None, repr=False)
     # C1g. How many times the lease put this ask back on the queue. It is the GENERATION of the
-    # callee workflow: 0 runs `peer-<id>`, n runs `peer-<id>-r<n>`.
+    # callee workflow: generation n runs `peer_workflow_id(<id>, n)`.
     redeliveries: int = 0
 
 
@@ -459,7 +459,7 @@ class PgAgentMailbox:
         the claim and the workflow start. A row is RECLAIMABLE when it is delivered, unanswered
         and `delivered_at` is older than `lease`, AND `exists(correlation_id, generation)` says
         no workflow will answer it. The generation is the row's `redeliveries`: the workflow of
-        the current attempt is `peer-<id>` for 0 and `peer-<id>-r<n>` for n. A row whose workflow
+        the current attempt is `peer_workflow_id(<id>, n)`. A row whose workflow
         exists is never touched (it is running, waiting for its human, or finished: the workflow
         answers it). "Exists" is the starter's judgement and EXCLUDES a workflow that is still
         open under another application version: the new build never recovers it (D32).
@@ -557,8 +557,9 @@ class PgAgentMailbox:
     async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
         """Cancel every open ask of the asking turn; the ids, sorted. See the port.
 
-        `turn_id` is text (migration 0029): an ordinary turn's UUID and a callee's workflow id
-        `peer-<correlation id>` are both valid, so a callee's own asks can be cancelled too.
+        `turn_id` is text (migration 0029): an ordinary turn's UUID and any other id are both
+        valid (since D33 a callee's workflow id is a UUID too; the column stays TEXT, 0029 being
+        shipped), so a callee's own asks can be cancelled too.
         """
         return await asyncio.to_thread(self._cancel_open_sync, turn_id, reason)
 

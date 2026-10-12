@@ -6,8 +6,9 @@ Covers:  adapters/driven/peers/mailbox.py (`peer_messages.turn_id` as TEXT, migr
 
 WHAT IS BEING DEFENDED
 
-    1. A CALLEE CAN ASK A THIRD AGENT. B's turn id is its workflow id `peer-<correlation id>`, which
-       is no UUID. Its ask to C used to fail on INSERT (`peer_messages.turn_id` was a UUID column);
+    1. A CALLEE CAN ASK A THIRD AGENT. B's turn id is its workflow id, which was no UUID (C1f) and
+       is one now (C1i). Its ask to C used to fail on INSERT (`peer_messages.turn_id` was a UUID
+       column);
        now C's answer flows to B, B's reply flows to A, and each hop is exactly one row.
 
     2. GIVING UP ON B GIVES UP ON C. When A cancels, or its reply timeout fires, B's workflow is
@@ -50,7 +51,8 @@ def test_a_nested_ask_is_answered_through_both_hops(monkeypatch: pytest.MonkeyPa
 
     first, second = seen["ids"]
     found = w.rows(_DATABASE)
-    assert found[second][0] == f"peer-{first}", "B's ask is filed under B's workflow id"
+    callee_turn = turn_workflow.peer_workflow_id(first)
+    assert found[second][0] == callee_turn, "B's ask is filed under B's workflow id"
     assert found[first][2] == "b relays" and found[second][2] == "c answers"
     assert seen["outcome"].result.text == "a done"
     assert world.resume.payloads[w.B] == [wrap_peer_answer("c answers")]

@@ -305,9 +305,13 @@ async def _dispatch(world: _World) -> AskDisposition | None:
     return None if report is None else report.disposition
 
 
-def _callee_turn(world: _World) -> TurnId:
+def _only_correlation_id(world: _World) -> str:
     (corr,) = world.mailbox.rows
-    return TurnId(turn_workflow.peer_workflow_id(corr))
+    return corr
+
+
+def _callee_turn(world: _World) -> TurnId:
+    return TurnId(turn_workflow.peer_workflow_id(_only_correlation_id(world)))
 
 
 async def _asker_result(deadline: float = _DEADLINE) -> TurnOutcome:
@@ -382,7 +386,7 @@ def test_a_crash_after_the_claim_and_a_second_claim_of_the_row_yield_exactly_one
         async with _Dbos(drop=False):
             callee = _callee_turn(world)
             # a redelivery hands the SAME row to a worker again
-            world.mailbox.requeue(callee.removeprefix("peer-"))
+            world.mailbox.requeue(_only_correlation_id(world))
             assert await _dispatch(world) is AskDisposition.STARTED
             await asyncio.sleep(1.5)  # let the queue and recovery settle: nothing may re-run
 
@@ -390,7 +394,7 @@ def test_a_crash_after_the_claim_and_a_second_claim_of_the_row_yield_exactly_one
             outcome = await _asker_result()
             assert outcome.result is not None and outcome.result.text == "all done"
 
-            world.mailbox.requeue(callee.removeprefix("peer-"))
+            world.mailbox.requeue(_only_correlation_id(world))
             assert await _dispatch(world) is AskDisposition.STARTED  # after it is all over
             await asyncio.sleep(1.5)
 

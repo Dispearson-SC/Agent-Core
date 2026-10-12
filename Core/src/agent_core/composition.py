@@ -470,7 +470,12 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # `_step_resume_round` instead of a `_step_resume` per answer; `_step_resume` and
 # `_step_answer_peer` are gone), so a turn suspended on a person under .3 is stranded, not
 # replayed. C1f, C1g, C1h and C5 changed no step name or order.
-PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.4"
+# .4 -> .5 with D33 (C1i): a peer workflow's id is
+# `uuid5(namespace, "<correlation id>:<generation>")` instead of `peer-<correlation id>[-r<n>]`,
+# because it is also the callee's turn id and that is
+# stored in UUID columns. A peer workflow started under .4 is unknown to the new scheme, so it is
+# stranded on purpose (drain first, OPERATIONS.md); the step shape did not change.
+PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.5"
 
 # C5 (D32). Default of `Settings.max_turn_attempts`.
 DEFAULT_MAX_TURN_ATTEMPTS: Final[int] = 10
@@ -587,7 +592,7 @@ class Settings:
     dbos_conductor_key: str | None = None
 
     # C3 (D31). The peer redelivery lease: a peer ask the worker claimed (`delivered`) and
-    # nobody answered for this long, whose workflow `peer-<id>` does not exist, is put back on
+    # nobody answered for this long, whose callee workflow does not exist, is put back on
     # the queue. `AGENT_CORE_PEER_LEASE_SECONDS`, default five minutes: well past the time a
     # worker needs between its claim and the workflow enqueue, short enough that a lost claim
     # is retried before the asker's usual reply timeout (an hour).

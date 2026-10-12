@@ -4,15 +4,16 @@ Phase:   Agent-comms v2, wave 1
 Covers:  adapters/driving/workflow/turn_workflow.py (`DurablePeerTurnStarter.exists/retire`,
          generation-suffixed peer workflow ids), adapters/driven/peers/mailbox.py (`reclaim_stale`)
 
-THE DEFECT. `reclaim_stale` requeues a delivered, unanswered row only when no workflow
-`peer-<correlation id>` exists. DBOS knows the workflow a previous build started, so `exists` was
-true for it for ever, although DBOS recovers a PENDING workflow only for the application version
+THE DEFECT. `reclaim_stale` requeues a delivered, unanswered row only when no
+callee workflow of the ask exists. DBOS knows the workflow a previous build started, so `exists`
+was true for it for ever, although DBOS recovers a PENDING workflow only for the application version
 it claims: the new build never would. The row stayed `delivered` and nothing ran it.
 
 THE FIX BEING DEFENDED. A workflow that is still open under another application version counts as
 absent. The reclaim retires it (cancels it and the asks it made, which also frees the one queue
 slot its peer session holds), requeues the row with `redeliveries` + 1, and the next claim starts
-`peer-<correlation id>-r<redeliveries>`. A workflow of the CURRENT version is never touched.
+the next generation of its id (`peer_workflow_id(corr, n)`). A workflow of the CURRENT version is
+never touched.
 
 Real DBOS, real `PgAgentMailbox`; the engine is relaunched under a different version to simulate
 the deploy (`tests/fakes/peer_world.py`).
@@ -99,7 +100,7 @@ def test_an_ask_whose_workflow_is_stranded_by_a_version_bump_is_rerun_under_the_
     assert seen["reclaimed"] == (first,), "a workflow of another version counts as absent"
     assert seen["old_after"] == "CANCELLED", "the stranded run is retired, its slot freed"
     assert seen["nested_after"] == "cancelled", "and so is the ask it had made to C"
-    assert seen["rerun_id"] == f"peer-{first}-r1"
+    assert seen["rerun_id"] == turn_workflow.peer_workflow_id(first, 1)
     assert seen["rerun_text"] == "b answers"
     assert w.rows(_DATABASE)[first][2] == "b answers", "the asker's row now holds the answer"
     assert world.start.starts(w.B) == 2, "the callee ran once per generation"

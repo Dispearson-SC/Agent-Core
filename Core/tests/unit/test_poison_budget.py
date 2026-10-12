@@ -48,6 +48,11 @@ class _Died(BaseException):
     """The process was killed. A BaseException so no `except Exception` in the body sees it."""
 
 
+
+def _callee(correlation_id: str) -> str:
+    """The id of the workflow that answers this ask (a UUID since D33)."""
+    return turn_workflow.peer_workflow_id(correlation_id)
+
 def _run() -> TurnOutcome:
     return asyncio.run(fanout.body()(fanout.request()))
 
@@ -184,7 +189,7 @@ def test_a_poisoned_turn_cancels_the_peer_asks_it_still_has_open(
         _run()
 
     assert list(world.mailbox.cancelled) == ["corr-open"]
-    assert world.cancelled_workflows == ["peer-corr-open"]
+    assert world.cancelled_workflows == [_callee("corr-open")]
 
 
 # --- the peer workflow ---------------------------------------------------------------------------

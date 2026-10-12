@@ -621,7 +621,8 @@ rounds that ask only people: they are resumed once with every decision, and a pe
 decided by the three days expires the turn with nothing resumed.
 
 **The answering side is durable too.** The `peer-worker` claims a mailbox row and starts the
-DBOS workflow `peer-<correlation_id>` (`run_peer_turn_workflow`), then moves on. That workflow
+DBOS workflow `peer_workflow_id(<correlation_id>, <generation>)` (`run_peer_turn_workflow`; a
+UUID, `uuid5` of the ask and its generation, because it is also the callee's turn id, D33), then moves on. That workflow
 runs the callee's turn through the same durable path as any turn, as the target agent in a
 fresh `peer~<root>~<key>` session, and when the turn finishes - including after the callee's
 own human approval or its own ask to a third agent - it records the answer on the row and
@@ -635,7 +636,7 @@ human request is refused at the API before it reaches the workflow. See DECISION
 
 An ask the asker gives up on - it timed out in a round, or the asking turn expired or was
 cancelled - is cancelled: the mailbox row ends `cancelled` (no later answer is accepted) and the
-callee workflow `peer-<id>` is cancelled. A claim lost before its workflow started is redelivered
+callee workflow (every generation of it) is cancelled. A claim lost before its workflow started is redelivered
 after a lease. A callee may itself ask a third agent (A -> B -> C): the ask is filed under the
 callee's workflow id (`peer_messages.turn_id` is TEXT), and cancelling B cancels the asks B made,
 level by level. See DECISIONS D31 (C3, C4) and D32 (C1f).

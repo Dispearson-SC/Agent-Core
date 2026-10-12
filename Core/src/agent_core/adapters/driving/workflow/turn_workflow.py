@@ -145,6 +145,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import uuid
 from collections import deque
 from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass, field, replace
@@ -1104,7 +1105,7 @@ async def _step_peer_ask_cancelled(correlation_id: str) -> bool:
 
 
 async def _peer_workflow_ids(correlation_id: str) -> tuple[str, ...]:
-    """Every workflow id that ever ran this ask: `peer-<id>` and each `-r<n>` that exists.
+    """Every workflow id that ever ran this ask: generation 0 and each later one DBOS knows.
 
     The lease starts a new generation when a stranded one is retired (C1g), and a cancel must
     reach whichever one is live, so it walks the generations DBOS knows. Generation 0 is always
@@ -1124,8 +1125,9 @@ async def _cancel_callees(correlation_ids: tuple[str, ...], reason: str) -> tupl
 
     Shared by the replay-safe step below and by `cancel_turn` (called from outside a workflow).
     Order matters: the row first, so an answer racing the cancel is refused, then the engine, then
-    the callee's own open asks (its turn id IS its workflow id `peer-<id>`, and `cancel_open`
-    finds them by it, C1f). Breadth first, nearest callee first, each id once. A row that was
+    the callee's own open asks (its turn id IS its workflow id, `peer_workflow_id`, and
+    `cancel_open` finds them by it, C1f). Breadth first, nearest callee first, each id once. A
+    row that was
     answered meanwhile is history and its workflow is left alone. A workflow that is already
     gone, finished or never started is not an error (the row is what protects the asker);
     nothing here may fail the turn that is cancelling.
@@ -1902,7 +1904,9 @@ class PeerTurnJob:
     answer_token: str | None = field(default=None, repr=False)
 
 
-PEER_WORKFLOW_PREFIX: Final[str] = "peer-"
+PEER_WORKFLOW_NAMESPACE: Final[uuid.UUID] = uuid.UUID("5b0f6a3e-2c1d-5e47-9a68-7d3c4f1b8e20")
+"""The fixed namespace of peer workflow ids. NEVER change it: it is part of every id already
+issued, and a changed namespace names every in-flight peer workflow differently."""
 
 
 def peer_workflow_id(correlation_id: str, generation: int = 0) -> str:
@@ -1914,13 +1918,19 @@ def peer_workflow_id(correlation_id: str, generation: int = 0) -> str:
     TURN ID (`_step_new_turn_id` reads the workflow id), so an approval for the callee's
     human is addressed to it.
 
-    `generation` (C1g, D32) is the row's `redeliveries`. The first attempt is `peer-<id>`; once
-    the lease has put the ask back because its workflow was stranded by a version bump, the next
-    attempt is `peer-<id>-r<n>`: the stranded one keeps its id (cancelled, with its history), and
-    the new build starts a workflow that does not collide with it.
+    A UUID, ON PURPOSE (C1i, D33). The callee's turn id is persisted in `turns`, `human_requests`,
+    the `audit_*` tables and `turn_reasoning`, all UUID columns, so a readable `peer-<id>` id (the
+    C1 scheme) made its first `INSERT INTO turns` fail on real Postgres. The id is
+    `uuid5(namespace, "<id>:<generation>")`.
+    It is not reversible: nothing may recognise a peer workflow by its spelling, ask this function
+    for the id instead.
+
+    `generation` (C1g, D32) is the row's `redeliveries`. Once the lease has put the ask back
+    because its workflow was stranded by a version bump, the next attempt has the next generation:
+    the stranded one keeps its id (cancelled, with its history), and the new build starts a
+    workflow that does not collide with it.
     """
-    suffix = f"-r{generation}" if generation > 0 else ""
-    return f"{PEER_WORKFLOW_PREFIX}{correlation_id}{suffix}"
+    return str(uuid.uuid5(PEER_WORKFLOW_NAMESPACE, f"{correlation_id}:{generation}"))
 
 
 @DBOS.step()

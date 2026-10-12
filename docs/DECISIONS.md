@@ -1284,3 +1284,39 @@ under a NEW tool call id (Postgres folds it into the first row, A2A leaves it to
 `messageId` de-duplication), so the suite does not assert it. And a replayed asking step posts
 again (idempotently) if the engine dies between the write and the recording of the step; the
 restart test therefore waits for the step to be recorded before it kills.
+
+## D33 · Agent-comms v2: UUID workflow ids for peers, and the slice 8 advisories
+
+**C1i · a durable callee's turn id must be a UUID.** A durable callee's turn id is its DBOS
+workflow id, and the id was `peer-<correlation_id>[-r<n>]` (D29, D32). `turns.turn_id` (the primary
+key), `human_requests`, the `audit_*` tables and `turn_reasoning` are `UUID` columns, so the
+callee's first `INSERT INTO turns` failed on real Postgres. Every earlier peer test gave the callee
+an in-memory turn store and never saw it. Observed RED
+(`tests/integration/test_peer_durable_callee_postgres.py`, real Postgres, the real `StartTurn` and
+stores, a real `DurablePeerTurnStarter` workflow):
+`psycopg.errors.InvalidTextRepresentation: invalid input syntax for type uuid: "peer-21e9104d-..."`.
+
+Chosen (user decision 2026-10-12): the id becomes `uuid5(PEER_WORKFLOW_NAMESPACE,
+"<correlation id>:<generation>")`; no table migration. The alternative, TEXT turn ids everywhere,
+would have touched the transcript view, five tables and every adapter that reads them.
+
+- Still deterministic, so the properties C1 relies on hold: a second claim or a racing worker names
+  the same workflow. Each generation (C1g) has its own id.
+- Not reversible. Nothing may recognise a peer workflow by its spelling: the cancel cascade, the
+  lease (`exists`, `retire`), the redelivery and the docs compute the id with `peer_workflow_id`.
+  There was no `startswith("peer-")` anywhere in `src/`; the only readers were the walkers that
+  built the string themselves, and they now call the function.
+- `PEER_WORKFLOW_NAMESPACE` is a constant that must never change (it is part of every id issued).
+- *Migration 0029* (`peer_messages.turn_id` TEXT) is kept: it is a shipped migration id, its
+  `ALTER` and the rebuilt `transcript_entries` view are harmless, and it still lets the port accept
+  an asking turn id that is not a UUID (the conformance suite pins that). It is no longer REQUIRED
+  by the peer workflow ids.
+- *Replay shape.* No step name or order changed. But the workflow id of every in-flight peer
+  workflow did: one started under `.4` as `peer-<id>` is unknown to the new scheme, and the lease
+  would start a duplicate next to it. The pinned application version moved
+  `agent-core-turns.4` -> `.5` ONCE for the whole D33 batch (C1j changes no step either), which
+  strands the old workflows deliberately. Drain guidance is in OPERATIONS.md ("Deploying the UUID
+  peer workflow ids").
+- Not covered by the new test: a human request or an approval of the callee (its `turn_id` is the
+  same UUID in `human_requests`, so the same fix covers it, but the scripted callee asks nobody);
+  the audit trail of its tool call is asserted.

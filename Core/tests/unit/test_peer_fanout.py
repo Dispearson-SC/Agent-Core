@@ -539,6 +539,15 @@ def test_collecting_every_round_moved_the_pinned_application_version_to_four() -
     under .3 would replay into a different step sequence and is stranded, not recovered."""
     from agent_core import composition
 
-    assert composition.PINNED_DBOS_APPLICATION_VERSION == "agent-core-turns.4"
+    assert int(composition.PINNED_DBOS_APPLICATION_VERSION.rsplit(".", 1)[1]) >= 4
     for gone in ("_step_resume", "_step_answer_peer"):
         assert not hasattr(turn_workflow, gone), f"{gone} came back: bump the pinned version"
+
+
+def test_uuid_peer_workflow_ids_moved_the_pinned_application_version_to_five() -> None:
+    """D33 (C1i): a peer workflow is now named `uuid5(...)` instead of `peer-<id>`. One started by
+    a .4 build is unknown to the new id scheme (the lease would run the ask a second time next to
+    it), so .4 workflows are stranded on purpose: drain them first (OPERATIONS.md)."""
+    from agent_core import composition
+
+    assert composition.PINNED_DBOS_APPLICATION_VERSION == "agent-core-turns.5"

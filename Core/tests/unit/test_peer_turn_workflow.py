@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import uuid
 from typing import Any
 
 import pytest
@@ -211,15 +212,26 @@ def test_an_asker_that_is_gone_does_not_fail_a_recorded_answer(
 
 
 def test_the_peer_workflow_id_is_derived_from_the_correlation_id() -> None:
-    assert turn_workflow.peer_workflow_id("abc") == "peer-abc"
+    first = turn_workflow.peer_workflow_id("abc")
+    assert first == turn_workflow.peer_workflow_id("abc"), "deterministic: same ask, same id"
+    assert first != turn_workflow.peer_workflow_id("abd")
+
+
+def test_the_peer_workflow_id_is_a_uuid_because_it_is_the_callees_turn_id() -> None:
+    """C1i (D33): the id is persisted in UUID columns, so it must parse as one."""
+    for generation in (0, 1, 12):
+        parsed = uuid.UUID(turn_workflow.peer_workflow_id("abc", generation))
+        assert str(parsed) == turn_workflow.peer_workflow_id("abc", generation)
+        assert parsed.version == 5
 
 
 def test_a_redelivery_generation_gets_its_own_workflow_id() -> None:
-    """C1g: generation 0 keeps the historical id; a later one is suffixed so it cannot collide
-    with the stranded workflow the lease retired."""
-    assert turn_workflow.peer_workflow_id("abc", 0) == "peer-abc"
-    assert turn_workflow.peer_workflow_id("abc", 1) == "peer-abc-r1"
-    assert turn_workflow.peer_workflow_id("abc", 12) == "peer-abc-r12"
+    """C1g: every generation has its own id, so a new one cannot collide with the stranded
+    workflow the lease retired."""
+    ids = {turn_workflow.peer_workflow_id("abc", g) for g in (0, 1, 2, 12)}
+    assert len(ids) == 4
+    assert turn_workflow.peer_workflow_id("abc", 0) == turn_workflow.peer_workflow_id("abc")
+    assert turn_workflow.peer_workflow_id("abc", 1) != turn_workflow.peer_workflow_id("abd", 1)
 
 
 def test_the_workflow_presents_the_answer_token_when_it_records_the_reply(

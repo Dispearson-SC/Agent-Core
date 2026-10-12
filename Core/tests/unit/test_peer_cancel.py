@@ -21,6 +21,10 @@ from agent_core.domain.turn import TurnId
 from tests.fakes import fanout
 
 
+def _callee(correlation_id: str) -> str:
+    """The id of the workflow that answers this ask (a UUID since D33)."""
+    return turn_workflow.peer_workflow_id(correlation_id)
+
 def _run() -> Any:
     return asyncio.run(fanout.body()(fanout.request()))
 
@@ -49,7 +53,7 @@ def test_a_peer_timeout_cancels_only_the_ask_that_timed_out(
     _run()
 
     assert list(world.mailbox.cancelled) == ["corr-2"], "the answered ask is left alone"
-    assert world.cancelled_workflows == ["peer-corr-2"], "its callee workflow is cancelled"
+    assert world.cancelled_workflows == [_callee("corr-2")], "its callee workflow is cancelled"
     assert "reply timeout" in world.mailbox.cancelled["corr-2"]
 
 
@@ -68,7 +72,9 @@ def test_an_asker_that_expires_cancels_every_outstanding_peer_ask(
 
     assert outcome.result is not None and outcome.result.text == "expired"
     assert sorted(world.mailbox.cancelled) == ["corr-1", "corr-2"]
-    assert sorted(world.cancelled_workflows) == ["peer-corr-1", "peer-corr-2"]
+    assert sorted(world.cancelled_workflows) == sorted(
+        [_callee("corr-1"), _callee("corr-2")]
+    )
     assert all("expired" in reason for reason in world.mailbox.cancelled.values())
 
 
@@ -115,7 +121,7 @@ def test_cancel_turn_cancels_the_asking_workflow_then_its_open_asks(
     cancelled = asyncio.run(turn_workflow.cancel_turn(TurnId("asker-1"), "operator request"))
 
     assert cancelled == ("corr-a",), "an answered ask is history; another turn's ask is not ours"
-    assert world.cancelled_workflows == ["asker-1", "peer-corr-a"], "asker first, then callees"
+    assert world.cancelled_workflows == ["asker-1", _callee("corr-a")], "asker first, then callees"
     assert world.mailbox.cancelled == {"corr-a": "operator request"}
 
 
@@ -127,16 +133,16 @@ def test_cancelling_a_callee_cascades_to_the_asks_the_callee_made_itself(
     world = fanout.install(
         monkeypatch, (fanout.ask("tc-1"),), [fanout.nobody_answers(fanout.REPLY_TIMEOUT)]
     )
-    world.mailbox.turn_of["corr-b-to-c"] = "peer-corr-1"
-    world.mailbox.turn_of["corr-c-to-d"] = "peer-corr-b-to-c"
+    world.mailbox.turn_of["corr-b-to-c"] = _callee("corr-1")
+    world.mailbox.turn_of["corr-c-to-d"] = _callee("corr-b-to-c")
 
     _run()
 
     assert sorted(world.mailbox.cancelled) == ["corr-1", "corr-b-to-c", "corr-c-to-d"]
     assert world.cancelled_workflows == [
-        "peer-corr-1",
-        "peer-corr-b-to-c",
-        "peer-corr-c-to-d",
+        _callee("corr-1"),
+        _callee("corr-b-to-c"),
+        _callee("corr-c-to-d"),
     ], "every level down the chain is cancelled, nearest first"
 
 
@@ -146,7 +152,7 @@ def test_the_cascade_stops_at_an_ask_that_was_already_answered(
     world = fanout.install(
         monkeypatch, (fanout.ask("tc-1"),), [fanout.nobody_answers(fanout.REPLY_TIMEOUT)]
     )
-    world.mailbox.turn_of["corr-b-to-c"] = "peer-corr-1"
+    world.mailbox.turn_of["corr-b-to-c"] = _callee("corr-1")
     world.mailbox.answers["corr-b-to-c"] = "C already answered"
 
     _run()
