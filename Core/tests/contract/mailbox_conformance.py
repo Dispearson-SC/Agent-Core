@@ -56,6 +56,8 @@ ENDPOINT = "http://peer.test"
 POLICY = PeerPolicy(
     enabled=True,
     peers=(AgentRef(agent_id=TARGET, display_name="Assistant", endpoint=ENDPOINT),),
+    # Far above what any generic test claims at once; the cap has its own test below (C11).
+    max_concurrent_asks=1000,
 )
 SESSION = SessionRef(session_id=SessionId("s-conformance"), tenant_id=TenantId("t-1"))
 LEASE = timedelta(seconds=300)
@@ -68,9 +70,15 @@ class MailboxHarness(Protocol):
     supports_queue: bool
 
     async def ask(
-        self, question: str, *, turn_id: str = "turn-1", request_key: str = "tc-1"
+        self,
+        question: str,
+        *,
+        turn_id: str = "turn-1",
+        request_key: str = "tc-1",
+        max_concurrent: int | None = None,
     ) -> str:
-        """Enqueue one ask through the port and return its correlation id."""
+        """Enqueue one ask through the port and return its correlation id. `max_concurrent`
+        overrides the asking policy's `max_concurrent_asks` (C11)."""
         ...
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -401,6 +409,49 @@ class MailboxConformance:
         assert await queue.reclaim(_never_exists) == (corr,), "no verdict given: not a failure"
         again = await queue.claim()
         assert again is not None and (again.redeliveries, again.failures) == (4, 1)
+
+    async def test_at_most_max_concurrent_asks_of_one_turn_run_at_once(
+        self, harness: MailboxHarness
+    ) -> None:
+        """C11. The asking policy's `max_concurrent_asks` travels with the ask; the rest of the
+        turn's asks stay queued (not refused) until one answers or is cancelled. Another turn is
+        not held up by the first one's cap."""
+        queue = _queue(harness)
+        one = await queue.ask("one", request_key="tc-1", max_concurrent=2)
+        two = await queue.ask("two", request_key="tc-2", max_concurrent=2)
+        three = await queue.ask("three", request_key="tc-3", max_concurrent=2)
+        other = await queue.ask("other", turn_id="turn-2", request_key="tc-4", max_concurrent=2)
+
+        claimed = [await queue.claim() for _ in range(4)]
+
+        assert [c.correlation_id if c else None for c in claimed] == [one, two, other, None], (
+            "turn-1 is at its cap of two, so its third ask waits and turn-2's is served"
+        )
+        await queue.mailbox.answer(one, "done", answer_token=await _token(queue, one))
+        again = await queue.claim()
+        assert again is not None and again.correlation_id == three, "an answer frees a slot"
+        four = await queue.ask("four", request_key="tc-5", max_concurrent=2)
+        assert await queue.claim() is None, "two and three run: the cap holds"
+        await queue.mailbox.cancel(two, "x")
+        freed = await queue.claim()
+        assert freed is not None and freed.correlation_id == four, "a cancel frees a slot too"
+
+    async def test_a_requeued_ask_no_longer_holds_its_slot(
+        self, harness: MailboxHarness
+    ) -> None:
+        queue = _queue(harness)
+        stale = await queue.ask("stale", request_key="tc-1", max_concurrent=1)
+        await queue.ask("waiting", request_key="tc-2", max_concurrent=1)
+        assert (await queue.claim()) is not None  # stale runs
+        assert await queue.claim() is None, "waiting holds behind the cap of one"
+        await queue.age(stale, LEASE * 3)
+        assert await queue.reclaim(_never_exists) == (stale,)
+
+        first = await queue.claim()
+        second = await queue.claim()
+
+        assert first is not None and first.correlation_id == stale, "oldest first, slot free again"
+        assert second is None, "and the cap of one still holds"
 
 
 async def _never_exists(correlation_id: str, generation: int) -> bool:

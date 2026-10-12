@@ -45,6 +45,7 @@ class _Row:
     delivered_at: datetime | None = None
     redeliveries: int = 0
     failures: int = 0
+    max_concurrent: int | None = None
     answer_failed: bool = False
     cancel_reason: str | None = None
 
@@ -93,6 +94,7 @@ class InMemoryAgentMailbox:
             asker=asker,
             answer_token=new_answer_token(),
             seq=self._seq,
+            max_concurrent=policy.max_concurrent_asks,
         )
         if request_key is None:
             self._by_key[key] = correlation_id
@@ -159,7 +161,11 @@ class InMemoryAgentMailbox:
 
     async def claim_next(self, target: AgentId) -> PeerAsk | None:
         queued = sorted(
-            (r for r in self.rows.values() if r.target == target and r.state == "queued"),
+            (
+                r
+                for r in self.rows.values()
+                if r.target == target and r.state == "queued" and not self._at_its_cap(r)
+            ),
             key=lambda r: (r.seq, r.correlation_id),
         )
         if not queued:
@@ -179,6 +185,16 @@ class InMemoryAgentMailbox:
             redeliveries=row.redeliveries,
             failures=row.failures,
         )
+
+    def _at_its_cap(self, row: _Row) -> bool:
+        """C11. The asking turn already has `max_concurrent` asks running (delivered, unanswered),
+        across every target: this ask waits, queued. No cap (None) is never held."""
+        if row.max_concurrent is None:
+            return False
+        running = sum(
+            1 for r in self.rows.values() if r.turn_id == row.turn_id and r.state == "delivered"
+        )
+        return running >= row.max_concurrent
 
     async def reclaim_stale(
         self,

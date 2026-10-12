@@ -152,8 +152,8 @@ _FORGED_DELIMITER: Final[str] = "[delimiter removed]"
 _ENQUEUE_COLUMNS = """
     INSERT INTO peer_messages
         (correlation_id, target_agent_id, from_session_id, from_tenant_id,
-         turn_id, hop, question, from_agent_id, answer_token, request_key)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         turn_id, hop, question, from_agent_id, answer_token, request_key, max_concurrent)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 _ENQUEUE_KEYED_SQL = (
     _ENQUEUE_COLUMNS
@@ -172,25 +172,38 @@ _ENQUEUE_UNKEYED_SQL = (
 """
 )
 
-# One statement: select, lock and mark delivered commit together, so two workers can
-# never both see the same row as queued. SKIP LOCKED lets a second worker take the NEXT
-# ask instead of blocking behind the first - the queue is drained in parallel without
-# ever handing one ask out twice. The tie-break on correlation_id makes the order total,
-# so replay does not depend on which of two rows Postgres happened to write first.
-_CLAIM_SQL = """
+# THE CLAIM (C11, D40). Candidates are the oldest queued asks for the target, read without a lock;
+# each is then claimed by ONE guarded UPDATE (`state = 'queued'` in its WHERE), so two workers can
+# never both take the same ask: the loser blocks on the row lock, re-reads the row as delivered and
+# matches nothing. An ask whose asking turn already has `max_concurrent` asks RUNNING (delivered,
+# unanswered, across every target) is skipped and stays queued, so the cap is a queue and not a
+# refusal. The count is taken under a per-turn advisory lock, held to the end of the transaction, so
+# two workers claiming different asks of one turn at the same moment cannot both see "one slot
+# free". NULL `max_concurrent` (a row written before migration 0033) is never held. The tie-break on
+# correlation_id keeps the order total, so replay does not depend on which of two rows Postgres
+# happened to write first.
+_CLAIM_CANDIDATES_SQL = """
+    SELECT correlation_id, turn_id, max_concurrent
+    FROM peer_messages
+    WHERE target_agent_id = %s AND state = 'queued'
+    ORDER BY enqueued_at, correlation_id
+    LIMIT %s
+"""
+_TURN_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
+_RUNNING_SQL = """
+    SELECT count(*) FROM peer_messages
+    WHERE turn_id = %s AND state = 'delivered' AND answered_at IS NULL
+"""
+_CLAIM_ONE_SQL = """
     UPDATE peer_messages
     SET state = 'delivered', delivered_at = now()
-    WHERE correlation_id = (
-        SELECT correlation_id
-        FROM peer_messages
-        WHERE target_agent_id = %s AND state = 'queued'
-        ORDER BY enqueued_at, correlation_id
-        FOR UPDATE SKIP LOCKED
-        LIMIT 1
-    )
+    WHERE correlation_id = %s AND state = 'queued'
     RETURNING correlation_id, target_agent_id, from_session_id, from_tenant_id,
               turn_id, hop, question, from_agent_id, answer_token, redeliveries, callee_failures
 """
+# How many queued asks one claim looks through before it gives up: a bound, not a policy. An ask
+# only waits behind its own turn's cap, which `max_parallel_asks` keeps small.
+_CLAIM_SCAN: Final[int] = 100
 
 # `answered_at IS NULL` is the idempotency guard and it lives in the WHERE clause rather
 # than in a preceding SELECT, for the reason every other guard in this module does: two
@@ -431,7 +444,15 @@ class PgAgentMailbox:
                 target,
             )
         return await asyncio.to_thread(
-            self._enqueue_sync, target, question, from_session, turn_id, hop, asker, request_key
+            self._enqueue_sync,
+            target,
+            question,
+            from_session,
+            turn_id,
+            hop,
+            asker,
+            request_key,
+            policy.max_concurrent_asks,
         )
 
     def _enqueue_sync(
@@ -443,6 +464,7 @@ class PgAgentMailbox:
         hop: int,
         asker: AgentId | None,
         request_key: str | None,
+        max_concurrent: int,
     ) -> str:
         correlation_id = (
             secrets.token_urlsafe(_CORRELATION_ID_BYTES)
@@ -465,6 +487,7 @@ class PgAgentMailbox:
                     # the `DO UPDATE` branch, which leaves every column of the row alone.
                     new_answer_token(),
                     request_key,
+                    max_concurrent,
                 ),
             ).fetchone()
         if row is None:  # pragma: no cover - DO UPDATE always returns the surviving row
@@ -487,8 +510,18 @@ class PgAgentMailbox:
         return await asyncio.to_thread(self._claim_sync, target)
 
     def _claim_sync(self, target: AgentId) -> PeerAsk | None:
-        with psycopg.connect(self._conninfo, autocommit=True) as conn:
-            row: tuple[Any, ...] | None = conn.execute(_CLAIM_SQL, (target,)).fetchone()
+        row: tuple[Any, ...] | None = None
+        with psycopg.connect(self._conninfo) as conn, conn.transaction():
+            candidates = conn.execute(_CLAIM_CANDIDATES_SQL, (target, _CLAIM_SCAN)).fetchall()
+            for correlation_id, turn_id, max_concurrent in candidates:
+                if max_concurrent is not None:
+                    conn.execute(_TURN_LOCK_SQL, (str(turn_id),))
+                    running = conn.execute(_RUNNING_SQL, (str(turn_id),)).fetchone()
+                    if running is not None and int(running[0]) >= int(max_concurrent):
+                        continue  # the asking turn is at its cap: this ask waits, queued
+                row = conn.execute(_CLAIM_ONE_SQL, (correlation_id,)).fetchone()
+                if row is not None:
+                    break
         if row is None:
             return None
         # `turn_id` is TEXT (migration 0029); the domain type is the string every other table

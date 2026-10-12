@@ -658,6 +658,14 @@ siblings still out (the C4 cancel: row and callee workflow) as soon as one ask e
 the model `status="cancelled"` for them and resumes the turn once. A refusal never trips it, and a
 person's pending approval in the same round is still waited for.
 
+**How many asks run at once (C11, D40).** Two caps on the asking profile. `peers.max_parallel_asks`
+(default 8) is how many asks one model step may make: the tail of the step in call order is refused
+with a `status="refused"` result the model can read, and a refusal holds no slot. And
+`peers.max_concurrent_asks` (default 4) is how many asks of one asking turn may RUN at once: it is
+stored on each ask and enforced where an ask is claimed (the answering side), so the rest stay
+queued - not refused - until one answers, is cancelled or is requeued. The asker's
+`reply_timeout_seconds` keeps running while an ask waits its turn.
+
 **Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
 and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the
 two-sided gate), the caller's policy rules and each callee profile's `description`. A denied,

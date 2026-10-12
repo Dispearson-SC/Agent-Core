@@ -54,6 +54,11 @@ def new_answer_token() -> str:
 # answer (Pi's tool-output cap). The stored row keeps the answer verbatim.
 DEFAULT_MAX_ANSWER_CHARS: Final[int] = 50_000
 
+# C11 (D40). Defaults of `PeerPolicy.max_parallel_asks` and `max_concurrent_asks`: Pi's numbers. How
+# many peer asks one model step may make, and how many of one asking turn run at the same time.
+DEFAULT_MAX_PARALLEL_ASKS: Final[int] = 8
+DEFAULT_MAX_CONCURRENT_ASKS: Final[int] = 4
+
 # What a peer ask is answered with when the answering turn could not produce an answer. FIXED
 # text: the exception message stays out of what the asking model reads, and a person's
 # non-answer is not turned into a sentence an agent supposedly wrote.
@@ -168,6 +173,11 @@ class PeerPolicy:
     max_answer_chars: int = DEFAULT_MAX_ANSWER_CHARS
     # C10 (D39). What a failed ask does to its siblings in the same step. Part of the content hash.
     fan_out: FanOutPolicy = FanOutPolicy.ALL_SETTLED
+    # C11 (D40). Asks one model step may make; the rest are REFUSED with a result the model can
+    # read. And asks of one asking turn that may RUN at once; the rest wait queued until one
+    # answers. Both per asking profile, both part of the content hash.
+    max_parallel_asks: int = DEFAULT_MAX_PARALLEL_ASKS
+    max_concurrent_asks: int = DEFAULT_MAX_CONCURRENT_ASKS
 
     def may_ask(self, agent_id: AgentId) -> bool:
         """Whether this profile may address `agent_id`. Empty `peers` means nobody.

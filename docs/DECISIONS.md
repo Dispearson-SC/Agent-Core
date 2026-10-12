@@ -1601,3 +1601,33 @@ Decisions inside it:
   sequence, so it is stranded on purpose (OPERATIONS.md "Deploying the fan-out policy"). Nothing was
   deployed under `.3`-`.6`, so on this branch it is a formality; C11, C15 and C17 add no step and need
   no second bump.
+
+## D40 · Agent-comms v2: parallel and concurrent ask caps (C11)
+
+A model step could fan out any number of asks and every one of them ran at once, each a full turn
+with model calls. Two caps on the ASKING profile (`PeerPolicy`, positive whole numbers or the profile
+does not load, both part of the content hash), with Pi's numbers as defaults:
+
+- **`max_parallel_asks` (default 8): refuse the excess.** `_step_ask_peers` counts the asks that
+  would leave; the first N, in `tool_call_id` order, are asked, and each one beyond it resolves to
+  `<peer ... status="refused">` saying which limit it hit and that it can be asked in a later step.
+  An ask refused for another reason (policy, an unknown peer, a malformed call) holds no slot, so it
+  cannot push a good ask out. No step changed: the check lives inside the existing ask step.
+- **`max_concurrent_asks` (default 4): queue the rest, on the dispatch side.** The answering side is
+  where "running" is known and where an ask is turned into work, so the cap is enforced in
+  `claim_next`, not in the workflow (which would need a new wait and a new step). The asking policy's
+  value is stored on the row (`peer_messages.max_concurrent`, migration `0033`; NULL = no cap, for
+  rows of older builds) because the claiming worker holds neither the asker's profile nor its turn.
+  A queued ask is claimable only while its ASKING turn (`turn_id`, across every target) has fewer
+  than `max_concurrent` asks `delivered` and unanswered. The count runs under a per-turn advisory
+  lock held to the end of the claim transaction, and the claim itself is one guarded `UPDATE ... WHERE
+  state = 'queued'`, so two workers racing cannot both take the same ask nor both see the last free
+  slot. The old single-statement `FOR UPDATE SKIP LOCKED` claim could not express the cap; the
+  conformance suite (Postgres, in-memory, controlled) now asserts it. A nested callee has its own
+  turn id and so its own cap.
+- **What a waiting ask costs.** It stays `queued`, so the lease (which only looks at `delivered`)
+  leaves it alone, but the asker's `reply_timeout_seconds` keeps running: a cap low enough to keep an
+  ask waiting past it times the ask out. A `delivered` row whose worker died holds its slot until the
+  lease requeues it (C3). The A2A adapter has no claim side (the remote peer owns its queue), so it
+  does not enforce the concurrent cap.
+- **Replay shape: unchanged** (`agent-core-turns.7` stays). Migration `0033` is additive.

@@ -339,6 +339,12 @@ _CANCEL_TIMED_OUT: Final[str] = "reply timeout: the asking round gave up waiting
 _CANCEL_FAIL_FAST: Final[str] = "fail_fast: a sibling ask of the same step failed"
 _CANCEL_EXPIRED: Final[str] = "asking turn expired before a person decided"
 _CANCEL_RETIRED: Final[str] = "stranded by a deploy: the application version moved on"
+# The result for an ask beyond `peers.max_parallel_asks` (C11). OUR text, not wrapped.
+_TOO_MANY_ASKS: Final[str] = (
+    "The peer ask was refused before it was sent: this agent may make at most {limit} parallel "
+    "peer asks in one step and {target!r} was beyond that, so nothing was sent and no answer is "
+    "coming. Ask it again in a later step if it is still needed."
+)
 _MALFORMED_ASK: Final[str] = (
     "The peer ask was refused before it was sent: the call carried no usable target and "
     "question, so there was nothing to ask and nobody to ask it of."
@@ -1066,6 +1072,25 @@ async def _step_ask_peers(
                         target=target,
                         status=PeerStatus.REFUSED,
                         text=_refused(target, decision.reason),
+                    ),
+                )
+            )
+            continue
+
+        if len(handles) >= caller_policy.max_parallel_asks:
+            # C11. Only asks that would LEAVE count toward the cap (a refusal above holds no slot),
+            # and the excess is the tail of the step in call order, so which asks run never
+            # depends on arrival order (CLAUDE.md non-negotiable #7).
+            refusals.append(
+                (
+                    ask.tool_call_id,
+                    _own_peer_result(
+                        request,
+                        target=target,
+                        status=PeerStatus.REFUSED,
+                        text=_TOO_MANY_ASKS.format(
+                            limit=caller_policy.max_parallel_asks, target=target
+                        ),
                     ),
                 )
             )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import uuid
@@ -32,10 +33,20 @@ class PgHarness:
         self.mailbox = PgAgentMailbox(conninfo)
 
     async def ask(
-        self, question: str, *, turn_id: str = "turn-1", request_key: str = "tc-1"
+        self,
+        question: str,
+        *,
+        turn_id: str = "turn-1",
+        request_key: str = "tc-1",
+        max_concurrent: int | None = None,
     ) -> str:
+        policy = (
+            POLICY
+            if max_concurrent is None
+            else dataclasses.replace(POLICY, max_concurrent_asks=max_concurrent)
+        )
         return await self.mailbox.ask(
-            POLICY,
+            policy,
             TARGET,
             question,
             from_session=SESSION,
@@ -110,10 +121,20 @@ class A2AHarness:
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
 
     async def ask(
-        self, question: str, *, turn_id: str = "turn-1", request_key: str = "tc-1"
+        self,
+        question: str,
+        *,
+        turn_id: str = "turn-1",
+        request_key: str = "tc-1",
+        max_concurrent: int | None = None,
     ) -> str:
+        policy = (
+            POLICY
+            if max_concurrent is None
+            else dataclasses.replace(POLICY, max_concurrent_asks=max_concurrent)
+        )
         return await self.mailbox.ask(
-            POLICY,
+            policy,
             TARGET,
             question,
             from_session=SESSION,
@@ -142,10 +163,20 @@ class MemoryHarness:
         self.mailbox: Any = ControlledMailbox(self.inner) if controlled else self.inner
 
     async def ask(
-        self, question: str, *, turn_id: str = "turn-1", request_key: str = "tc-1"
+        self,
+        question: str,
+        *,
+        turn_id: str = "turn-1",
+        request_key: str = "tc-1",
+        max_concurrent: int | None = None,
     ) -> str:
+        policy = (
+            POLICY
+            if max_concurrent is None
+            else dataclasses.replace(POLICY, max_concurrent_asks=max_concurrent)
+        )
         return await self.mailbox.ask(
-            POLICY,
+            policy,
             TARGET,
             question,
             from_session=SESSION,

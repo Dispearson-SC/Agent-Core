@@ -117,7 +117,7 @@ def test_migrations_are_idempotent_on_rerun() -> None:
 def test_apply_all_migrations_creates_the_peer_turn_id_text_column_and_the_attempt_ledger() -> None:
     """D33: 0029 (`peer_messages.turn_id` TEXT, kept although C1i made callee turn ids UUIDs),
     0030 (`workflow_attempts`), 0031 (`request_key`, D36) and 0032 (the answer outcome and the
-    callee failure count, D38) are applied on a FRESH database by the production entry point, not
+    callee failure count, D38) and 0033 (the concurrency cap of the asking turn, D40) are applied on a FRESH database by the production entry point, not
     only by the per-module appliers their own tests call."""
     app_db = "agent_core_migrations_c1j_test"
     with psycopg.connect(_ADMIN_CONNINFO, autocommit=True) as admin:
@@ -140,11 +140,14 @@ def test_apply_all_migrations_creates_the_peer_turn_id_text_column_and_the_attem
     with psycopg.connect(_ADMIN_CONNINFO, autocommit=True) as admin:
         admin.execute(f'DROP DATABASE IF EXISTS "{app_db}" WITH (FORCE)')
 
-    assert {i[:4] for i in applied} >= {"0029", "0030", "0031", "0032"}, "0029-0032 are not applied"
+    assert {i[:4] for i in applied} >= {"0029", "0030", "0031", "0032", "0033"}, (
+        "0029-0033 are not applied"
+    )
     assert columns[("peer_messages", "turn_id")] == "text"
     assert columns[("transcript_entries", "turn_id")] == "text"
     assert columns[("peer_messages", "request_key")] == "text"
     assert columns[("peer_messages", "answer_failed")] == "boolean"
     assert columns[("peer_messages", "callee_failures")] == "integer"
+    assert columns[("peer_messages", "max_concurrent")] == "integer"
     assert columns[("workflow_attempts", "attempts")] == "integer"
     assert columns[("workflow_attempts", "parked")] == "boolean"

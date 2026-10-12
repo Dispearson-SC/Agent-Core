@@ -520,6 +520,14 @@ def _build_peer_policy(data: object) -> PeerPolicy:
             where="peers.max_answer_chars",
         ),
         fan_out=_fan_out(mapping.get("fan_out", defaults.fan_out)),
+        max_parallel_asks=_positive_int(
+            mapping.get("max_parallel_asks", defaults.max_parallel_asks),
+            where="peers.max_parallel_asks",
+        ),
+        max_concurrent_asks=_positive_int(
+            mapping.get("max_concurrent_asks", defaults.max_concurrent_asks),
+            where="peers.max_concurrent_asks",
+        ),
     )
 
 
