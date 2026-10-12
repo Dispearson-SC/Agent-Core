@@ -646,6 +646,12 @@ entries in a durable ledger (a restart out of a wait is not an attempt) and past
 `AGENT_CORE_MAX_TURN_ATTEMPTS` (default 10) it fails with a reason; a callee's asker is answered
 with the fixed failure text. See DECISIONS D32 (C5).
 
+**What the asking model reads (C8, D35).** Every ask resolves to one tag, whatever happened:
+`<peer id="billing" session="peer~<root>~<key>" status="ok|error|timeout|cancelled|refused"
+[truncated="true"]> ... </peer>`. A peer-written answer sits inside it between the untrusted
+delimiters, cut to the asking profile's `peers.max_answer_chars` (default 50000); our own sentences
+(timeout, cancelled, refused) are plain. The stored row keeps the answer verbatim. See DECISIONS D35.
+
 ### A2A: shape now, wire protocol in D2
 
 Agent2Agent reached **v1.0 under the Linux Foundation**, backed by Google, Microsoft and

@@ -50,6 +50,10 @@ def new_answer_token() -> str:
     return secrets.token_urlsafe(ANSWER_TOKEN_BYTES)
 
 
+# C8 (D35). Default of `PeerPolicy.max_answer_chars`: what the asking model may read of one peer
+# answer (Pi's tool-output cap). The stored row keeps the answer verbatim.
+DEFAULT_MAX_ANSWER_CHARS: Final[int] = 50_000
+
 # What a peer ask is answered with when the answering turn could not produce an answer. FIXED
 # text: the exception message stays out of what the asking model reads, and a person's
 # non-answer is not turned into a sentence an agent supposedly wrote.
@@ -145,6 +149,10 @@ class PeerPolicy:
     max_hops: int = 2
     visibility: PeerVisibility = PeerVisibility.NONE
     reply_timeout_seconds: int = 3600
+    # C8. The most characters of ONE peer answer the asking model is shown; the rest is cut and
+    # the result says `truncated="true"`. Per asking profile, because it protects the asker's
+    # context window.
+    max_answer_chars: int = DEFAULT_MAX_ANSWER_CHARS
 
     def may_ask(self, agent_id: AgentId) -> bool:
         """Whether this profile may address `agent_id`. Empty `peers` means nobody.

@@ -229,6 +229,24 @@ def test_the_peer_list_moves_the_content_hash() -> None:
     assert without.content_hash != with_peer.content_hash
 
 
+def test_max_answer_chars_defaults_and_loads_from_the_peers_block() -> None:
+    """C8: the cap on what the asking model reads of one peer answer."""
+    default = _profile(_mapping("asker", {"enabled": True}))
+    capped = _profile(_mapping("asker", {"enabled": True, "max_answer_chars": 2000}))
+
+    assert default.peers.max_answer_chars == 50_000
+    assert capped.peers.max_answer_chars == 2000
+    assert default.content_hash != capped.content_hash
+
+
+@pytest.mark.parametrize("bad", [0, -5, "lots", 1.5, True])
+def test_a_max_answer_chars_that_is_not_a_positive_whole_number_is_refused(bad: Any) -> None:
+    with pytest.raises(profile_module.ProfileValidationError, match="max_answer_chars"):
+        profile_module.AgentProfile.from_mapping(
+            _mapping("asker", {"enabled": True, "max_answer_chars": bad})
+        )
+
+
 # ---------------------------------------------------------------------------------------
 # t-f11-15 - the shipped relationship
 # ---------------------------------------------------------------------------------------

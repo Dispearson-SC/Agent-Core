@@ -29,6 +29,7 @@ import pytest
 from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
 from agent_core.adapters.driving.workflow import turn_workflow
 from agent_core.domain.turn import TurnId, TurnRequest
+from tests.fakes import peer_envelope
 from tests.fakes import peer_world as w
 
 _DATABASE = "agent_core_peer_nested_test"
@@ -55,8 +56,12 @@ def test_a_nested_ask_is_answered_through_both_hops(monkeypatch: pytest.MonkeyPa
     assert found[second][0] == callee_turn, "B's ask is filed under B's workflow id"
     assert found[first][2] == "b relays" and found[second][2] == "c answers"
     assert seen["outcome"].result.text == "a done"
-    assert world.resume.payloads[w.B] == [wrap_peer_answer("c answers")]
-    assert world.resume.payloads[w.A] == [wrap_peer_answer("b relays")]
+    assert [peer_envelope.contents(p) for p in world.resume.payloads[w.B]] == [
+        wrap_peer_answer("c answers")
+    ]
+    assert [peer_envelope.contents(p) for p in world.resume.payloads[w.A]] == [
+        wrap_peer_answer("b relays")
+    ]
 
 
 def test_cancelling_the_asker_cancels_the_third_agent_too(monkeypatch: pytest.MonkeyPatch) -> None:

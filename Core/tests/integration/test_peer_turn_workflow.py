@@ -49,7 +49,7 @@ from agent_core.domain.turn import (
     TurnRequest,
     TurnResult,
 )
-from tests.fakes import fanout
+from tests.fakes import fanout, peer_envelope
 
 _ADMIN_CONNINFO = os.environ.get(
     "AGENT_CORE_TEST_ADMIN_DATABASE_URL",
@@ -367,7 +367,7 @@ def test_a_callee_that_suspends_for_a_human_answers_the_asker_after_the_approval
     asker_resume = [calls for profile, calls in world.resume.calls if profile == fanout.ASKER]
     ((resolution,),) = asker_resume
     assert resolution.tool_call_id == _ASK_CALL
-    assert resolution.payload == wrap_peer_answer("the account is frozen")
+    assert peer_envelope.contents(resolution.payload) == wrap_peer_answer("the account is frozen")
     assert len(world.channel.sent) == 1, "only the asker's turn is delivered to a channel"
 
 

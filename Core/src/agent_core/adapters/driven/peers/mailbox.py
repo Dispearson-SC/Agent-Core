@@ -135,7 +135,9 @@ _LOG = logging.getLogger(__name__)
 # boundary. The runner's own constants say the comparison has to be case insensitive; a
 # peer that has read a hostile page will try exactly that.
 _DELIMITER_RE: Final[re.Pattern[str]] = re.compile(
-    f"{re.escape(UNTRUSTED_OPEN)}|{re.escape(UNTRUSTED_CLOSE)}", re.IGNORECASE
+    # The `<peer>` envelope tags too (C8): a peer must not close the tag its answer sits in.
+    f"{re.escape(UNTRUSTED_OPEN)}|{re.escape(UNTRUSTED_CLOSE)}|</?peer\\b",
+    re.IGNORECASE,
 )
 
 # What a forged delimiter is replaced with. Visible rather than blank, so a reader of the
@@ -295,6 +297,42 @@ def wrap_peer_answer(answer: str) -> str:
     a boundary stops being one.
     """
     return f"{UNTRUSTED_OPEN}\n{_DELIMITER_RE.sub(_FORGED_DELIMITER, answer)}\n{UNTRUSTED_CLOSE}"
+
+
+@dataclass(frozen=True, slots=True)
+class CappedAnswer:
+    """A wrapped answer after the asker's size cap (C8).
+
+    `wrapped` is what the model reads, `inner` the (possibly cut) peer text without the
+    delimiters, `truncated` whether anything was cut."""
+
+    wrapped: str
+    inner: str
+    truncated: bool
+
+
+def cap_wrapped_answer(wrapped: str, max_chars: int) -> CappedAnswer:
+    """Cut a WRAPPED answer to `max_chars` characters of the peer's text. Pure.
+
+    The wrapper is ours and is built only by `wrap_peer_answer`, so it is taken apart by its exact
+    shape (and its inside has already had every delimiter neutralised): this is not a guess about
+    whether a string "is already wrapped". The cut is re-wrapped, so the boundary is always whole.
+    A string that does not have the wrapper's shape (a test double that skipped it) is cut as it is.
+    The stored row is never touched: it keeps the peer's bytes verbatim.
+    """
+    head, tail = f"{UNTRUSTED_OPEN}\n", f"\n{UNTRUSTED_CLOSE}"
+    shaped = (
+        wrapped.startswith(head)
+        and wrapped.endswith(tail)
+        and len(wrapped) >= len(head + tail)
+    )
+    inner = wrapped[len(head) : len(wrapped) - len(tail)] if shaped else wrapped
+    if len(inner) <= max_chars:
+        return CappedAnswer(wrapped=wrapped, inner=inner, truncated=False)
+    inner = inner[:max_chars]
+    return CappedAnswer(
+        wrapped=f"{head}{inner}{tail}" if shaped else inner, inner=inner, truncated=True
+    )
 
 
 class PgAgentMailbox:

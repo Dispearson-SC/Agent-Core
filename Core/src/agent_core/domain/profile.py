@@ -515,7 +515,18 @@ def _build_peer_policy(data: object) -> PeerPolicy:
         reply_timeout_seconds=int(
             mapping.get("reply_timeout_seconds", defaults.reply_timeout_seconds)
         ),
+        max_answer_chars=_positive_int(
+            mapping.get("max_answer_chars", defaults.max_answer_chars),
+            where="peers.max_answer_chars",
+        ),
     )
+
+
+def _positive_int(value: object, *, where: str) -> int:
+    """A whole number of at least 1. A cap of 0 would blank every peer answer silently."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ProfileValidationError(f"{where} must be a positive whole number, got {value!r}")
+    return value
 
 
 def _build_public_alias(data: object) -> str:

@@ -156,18 +156,22 @@ from uuid import uuid4
 from dbos import DBOS, Queue, SetEnqueueOptions, SetWorkflowID, WorkflowHandleAsync
 
 from agent_core.adapters.driven.peers.hop_limit import HopRefusal, authorise_hop
+from agent_core.adapters.driven.peers.mailbox import cap_wrapped_answer
 from agent_core.adapters.driving.channels.registry import ChannelRegistry, OutboundMessage
+from agent_core.adapters.driving.peers.worker import new_peer_session
 from agent_core.application.compact_context import CompactContext
 from agent_core.application.resume_turn import ResolvedTool, ResumeTurn
 from agent_core.application.start_turn import StartTurn
 from agent_core.domain.compaction import ContextState
 from agent_core.domain.media import MediaRef
+from agent_core.domain.peer_result import PeerResult, PeerStatus
 from agent_core.domain.peers import (
     PEER_ASK_CLOSED_ANSWER,
     PEER_ASK_FAILED_ANSWER,
     AgentId,
     PeerAnswerRefusedError,
     PeerPolicy,
+    peer_session_key,
 )
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
@@ -710,6 +714,37 @@ def _for_a_peer(pending: tuple[PendingRequest, ...]) -> tuple[PendingRequest, ..
     )
 
 
+def _peer_session_id(request: TurnRequest, correlation_id: str) -> str | None:
+    """The id of the conversation a peer ask runs in (C8), or None if it has no well-formed one.
+
+    Pure: the same derivation the peer worker uses to file the callee's turn
+    (`new_peer_session` with `peer_session_key`), so the id the model sees is the id the
+    transcript and the audit trail carry.
+    """
+    try:
+        session = new_peer_session(
+            request.session.tenant_id, request.session, key=peer_session_key(correlation_id)
+        )
+    except ValueError:
+        return None  # an asking session id with a stray '~': nothing well-formed to name
+    return str(session.session_id)
+
+
+def _own_peer_result(
+    request: TurnRequest,
+    *,
+    target: str,
+    status: PeerStatus,
+    text: str,
+    correlation_id: str | None = None,
+) -> str:
+    """An outcome WE wrote (timeout, cancelled, refused), as the tagged envelope. Not wrapped:
+    nothing outside this process wrote the text. `correlation_id` is None for an ask that was
+    never sent, which therefore has no session."""
+    session = None if correlation_id is None else _peer_session_id(request, correlation_id)
+    return PeerResult(peer=target, status=status, text=text, session=session).render()
+
+
 def _refused(target: str, reason: HopRefusal | None) -> str:
     """The sentence the model reads as a refused ask's tool result.
 
@@ -957,7 +992,17 @@ async def _step_ask_peers(
             # The model's own arguments, and a model can write anything. Refused rather
             # than coerced: an empty question asked of "another agent" bills a peer turn
             # for a question nobody can answer.
-            refusals.append((ask.tool_call_id, _MALFORMED_ASK))
+            refusals.append(
+                (
+                    ask.tool_call_id,
+                    _own_peer_result(
+                        request,
+                        target=target if isinstance(target, str) else "",
+                        status=PeerStatus.REFUSED,
+                        text=_MALFORMED_ASK,
+                    ),
+                )
+            )
             continue
 
         callee_profile = seat.profiles.get(target)
@@ -966,7 +1011,17 @@ async def _step_ask_peers(
             # alternative - gate it against a default `PeerPolicy` - refuses with
             # `callee_peers_disabled`, which sends whoever reads the audit row to edit a
             # profile that does not exist.
-            refusals.append((ask.tool_call_id, _UNKNOWN_PEER.format(target=target)))
+            refusals.append(
+                (
+                    ask.tool_call_id,
+                    _own_peer_result(
+                        request,
+                        target=target,
+                        status=PeerStatus.REFUSED,
+                        text=_UNKNOWN_PEER.format(target=target),
+                    ),
+                )
+            )
             continue
 
         decision = authorise_hop(
@@ -977,7 +1032,17 @@ async def _step_ask_peers(
             hop=request.hop,
         )
         if not decision.allowed:
-            refusals.append((ask.tool_call_id, _refused(target, decision.reason)))
+            refusals.append(
+                (
+                    ask.tool_call_id,
+                    _own_peer_result(
+                        request,
+                        target=target,
+                        status=PeerStatus.REFUSED,
+                        text=_refused(target, decision.reason),
+                    ),
+                )
+            )
             continue
 
         next_hop = decision.next_hop
@@ -1052,23 +1117,27 @@ async def _step_peer_reply_timeout(request: TurnRequest) -> int:
 
 @DBOS.step()
 async def _step_read_peer_answer(
-    turn_id: TurnId, answer: PeerAnswer, tool_call_id: ToolCallId
+    turn_id: TurnId,
+    answer: PeerAnswer,
+    tool_call_id: ToolCallId,
+    request: TurnRequest,
+    target: str,
 ) -> tuple[ToolCallId, str]:
     """Redeem one peer's handle WITHOUT resuming the turn.
 
     Refuses an answer addressed to another turn, a handle this turn never asked under and a
     wake with no answer recorded behind it (each is a turn resumed on something nobody sent), and
     follows the wrapping rule (the port wraps; nothing here wraps again), but the
-    result is only a `(tool_call_id, wrapped answer)` pair that the body holds until every
+    result is only a `(tool_call_id, envelope)` pair that the body holds until every
     ask of the round has one. Pydantic AI resumes a run only when it is handed results for
-    ALL of its deferred calls.
+    ALL of its deferred calls. The envelope is the C8 `<peer>` tag around the capped answer.
     """
     if answer.turn_id != turn_id:
         raise UnusableResumeAnswerError(
             f"a peer answer for turn {answer.turn_id!r} was delivered to turn {turn_id!r}. "
             "Applying it would resume this turn on an answer given to another one."
         )
-    wrapped = await _read_wrapped_answer(answer.correlation_id)
+    wrapped = await _peer_envelope(answer.correlation_id, request, target)
     if wrapped is None:
         raise UnusableResumeAnswerError(
             f"the turn was woken for peer handle {answer.correlation_id!r} and the mailbox "
@@ -1087,16 +1156,40 @@ async def _read_wrapped_answer(correlation_id: str) -> str | None:
     return await _require_peer_seat().mailbox.read_answer(correlation_id)
 
 
+async def _peer_envelope(correlation_id: str, request: TurnRequest, target: str) -> str | None:
+    """A stored peer answer as the `<peer>` envelope, or None when none is stored (C8).
+
+    Reads through `_read_wrapped_answer` (the one reader), applies the ASKER's
+    `max_answer_chars`, and classifies the fixed failure sentences the workflow itself writes as
+    `error`. Both the normal redemption and the re-ask peek call this, so they cannot disagree.
+    """
+    wrapped = await _read_wrapped_answer(correlation_id)
+    if wrapped is None:
+        return None
+    cap = _asking_policy(_require_peer_seat(), request.profile_id).max_answer_chars
+    capped = cap_wrapped_answer(wrapped, cap)
+    failed = capped.inner in {PEER_ASK_FAILED_ANSWER, PEER_ASK_CLOSED_ANSWER}
+    return PeerResult(
+        peer=target,
+        status=PeerStatus.ERROR if failed else PeerStatus.OK,
+        text=capped.wrapped,
+        session=_peer_session_id(request, correlation_id),
+        truncated=capped.truncated,
+    ).render()
+
+
 @DBOS.step()
-async def _step_peek_peer_answer(correlation_id: str) -> str | None:
+async def _step_peek_peer_answer(
+    correlation_id: str, request: TurnRequest, target: str
+) -> str | None:
     """The wrapped answer already stored under a handle, or None. Read-only, no resume.
 
     For a re-ask whose handle was given up on earlier (`timed_out`): the mailbox is
     idempotent per (target, question), so the re-ask gets the same handle back, and the
     reply may have landed - and its wake-up been skipped - before the re-ask was made.
-    Same payload as a received answer: see `_read_wrapped_answer`.
+    Same payload as a received answer: see `_peer_envelope`.
     """
-    return await _read_wrapped_answer(correlation_id)
+    return await _peer_envelope(correlation_id, request, target)
 
 
 @DBOS.step()
@@ -1448,13 +1541,19 @@ async def _collect_round(
     # than waited for.
     for corr in [c for c in awaiting if c in timed_out]:
         timed_out.discard(corr)
-        stored = await _step_peek_peer_answer(corr)
+        stored = await _step_peek_peer_answer(corr, request, targets[awaiting[corr]])
         if stored is not None:
             peer_results[awaiting.pop(corr)] = stored
         elif await _step_peer_ask_cancelled(corr):
             # C4: the timeout cancelled this row and its callee, so a repeat names a dead ask.
             tool_call_id = awaiting.pop(corr)
-            peer_results[tool_call_id] = _PEER_ASK_CANCELLED.format(target=targets[tool_call_id])
+            peer_results[tool_call_id] = _own_peer_result(
+                request,
+                target=targets[tool_call_id],
+                status=PeerStatus.CANCELLED,
+                text=_PEER_ASK_CANCELLED.format(target=targets[tool_call_id]),
+                correlation_id=corr,
+            )
 
     seconds = 0
     peer_deadline = human_deadline = 0.0
@@ -1485,8 +1584,12 @@ async def _collect_round(
             timeouts = tuple(sorted(awaiting))
             for corr, tool_call_id in awaiting.items():
                 timed_out.add(corr)
-                peer_results[tool_call_id] = _PEER_TIMED_OUT.format(
-                    target=targets[tool_call_id], seconds=seconds
+                peer_results[tool_call_id] = _own_peer_result(
+                    request,
+                    target=targets[tool_call_id],
+                    status=PeerStatus.TIMEOUT,
+                    text=_PEER_TIMED_OUT.format(target=targets[tool_call_id], seconds=seconds),
+                    correlation_id=corr,
                 )
             awaiting.clear()
             # C4: only the asks that timed out (the answered ones already left `awaiting`).
@@ -1551,7 +1654,9 @@ async def _collect_round(
                 "model never issued, which Pydantic AI drops in silence."
             )
         del awaiting[answer.correlation_id]
-        _, wrapped = await _step_read_peer_answer(turn_id, answer, asked_id)
+        _, wrapped = await _step_read_peer_answer(
+            turn_id, answer, asked_id, request, targets[asked_id]
+        )
         peer_results[asked_id] = wrapped
 
     return _TurnEnd(

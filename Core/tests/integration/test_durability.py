@@ -113,6 +113,7 @@ from agent_core.domain.turn import (
 from agent_core.ports.agent_runner import ToolResolution
 from agent_core.ports.human_gateway import HumanGateway
 from agent_core.ports.skill_registry import SkillMeta
+from tests.fakes import peer_envelope
 from tests.fakes.ports import (
     FakeAgentRunner,
     FakeAuditSink,
@@ -884,7 +885,9 @@ def test_a_peer_ask_is_never_put_in_front_of_a_human(
         "resume, in tool_call_id order."
     )
     assert [r.approved for r in wiring.resume.resolutions] == [True, True, True]
-    assert wiring.resume.resolutions[2].payload == wrap_peer_answer("it is Tuesday")
+    assert peer_envelope.contents(wiring.resume.resolutions[2].payload) == wrap_peer_answer(
+        "it is Tuesday"
+    )
     recv_waits = [label for name, label in log.decisions if name == "recv_async"]
     assert len(recv_waits) == 2 and not recv_waits[0].endswith(
         f":{turn_workflow.THREE_DAYS}"

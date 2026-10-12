@@ -18,7 +18,6 @@ from typing import Any
 from pydantic_ai.messages import ToolReturnPart
 
 from agent_core.adapters.driven.agent_pydantic import runner as runner_module
-from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
 from agent_core.adapters.driven.tools.peers import build_toolset
 from agent_core.domain.policy import Effect, RuleSet
 from agent_core.domain.profile import AgentProfile
@@ -98,7 +97,7 @@ def test_two_ask_peer_calls_from_a_scripted_model_resume_once_in_id_order(
     # lays the returns out in the model's own call order, so compare by id)
     assert handed == [["c1", "c2"]]
     assert {r.tool_call_id: r.content for r in returns} == {
-        "c1": wrap_peer_answer("fast one"),
-        "c2": wrap_peer_answer("slow one"),
+        "c1": fanout.ok("corr-1", "fast one"),
+        "c2": fanout.ok("corr-2", "slow one"),
     }
     assert [q for _, q in world.mailbox.asks] == ["first?", "second?"]

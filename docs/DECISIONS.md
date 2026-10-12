@@ -1428,3 +1428,39 @@ negation; OPERATIONS.md no longer says the lease always retires other-version wo
 gated by D33) and its duplicated/garbled sentence about the workflow is fixed; the test
 `test_peer_durable_callee_postgres.py` lost its dead `seen["peer_status"]`/`seen["report"]` and
 opens the pools and DBOS inside the `try`, so a failed set-up still cleans up.
+
+## D35 · Agent-comms v2: the structured peer result (C8)
+
+A peer ask used to resolve to one of several unrelated strings (the answer inside the untrusted
+delimiters, or one of five plain sentences of ours). Now every outcome is one `PeerResult`
+(`domain/peer_result.py`), rendered as a compact tag the model reads:
+
+    <peer id="billing" session="peer~case-7~..." status="ok" truncated="true">
+    <untrusted-tool-output> ... </untrusted-tool-output>
+    </peer>
+
+- `status`: `ok` (answered), `error` (the callee failed or was closed: the stored answer is the
+  workflow's own fixed failure sentence, recognised by exact match), `timeout` (no answer inside
+  `reply_timeout_seconds`), `cancelled` (a repeat of an ask already cancelled), `refused` (never
+  sent: policy, unknown peer, malformed call). `id` is the target as the model wrote it,
+  `session` the derived peer session (absent for a refused ask), both escaped as attributes.
+- The text is exactly what the model reads between the tags. Peer-written text keeps the single
+  untrusted boundary the mailbox port applies (non-negotiable #10: nothing wraps twice); our own
+  sentences stay unwrapped. The delimiter neutraliser now also removes `<peer`/`</peer` from a
+  peer's text, so an answer cannot close or forge the envelope.
+- **Size cap.** `peers.max_answer_chars` (new key on the asking profile, default 50000, a positive
+  whole number or the profile does not load). `mailbox.cap_wrapped_answer` takes the port's
+  wrapper apart by its exact shape, cuts the peer's text and re-wraps it, so the boundary stays
+  whole; the result carries `truncated="true"`. The stored row is never touched. Chosen over a
+  new `read_answer(max_chars=)` port parameter, which would have changed nine test doubles and the
+  A2A adapter for no gain in behaviour.
+- **Replay shape: unchanged.** No step added, renamed or reordered; `_step_read_peer_answer` and
+  `_step_peek_peer_answer` take two more arguments (the request and the target), which DBOS does
+  not validate on replay. An in-flight turn replays its already recorded step results, so the
+  pinned application version is NOT bumped by C8.
+- **Content hashes.** `max_answer_chars` is a field of `PeerPolicy`, so every profile's content
+  hash changes once and the registry assigns each profile its next version at the first load
+  (D20). Nothing else changes for them.
+- Not in the envelope yet: `data` (C9 adds typed answers) and `usage` (the callee's token use is
+  not persisted on the row; carrying it needs a column and a port change). Both are additive
+  changes to `PeerResult.render`.

@@ -34,7 +34,6 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
 
 from agent_core.adapters.driven.agent_pydantic import runner as runner_module
-from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
 from agent_core.adapters.driven.tools.peers import build_toolset
 from agent_core.adapters.driving.workflow import turn_workflow
 from agent_core.domain.policy import Effect, RuleSet
@@ -136,8 +135,8 @@ def test_two_asks_in_one_step_resume_the_turn_once_with_both_answers(
     assert len(world.resume.calls) == 1, "one resume for the whole step"
     ((first_id, first_payload), (second_id, second_payload)) = world.resume.calls[0]
     assert [first_id, second_id] == ["tc-1", "tc-2"], "results follow the tool_call ids"
-    assert first_payload == wrap_peer_answer("fast")
-    assert second_payload == wrap_peer_answer("slow")
+    assert first_payload == fanout.ok("corr-1", "fast")
+    assert second_payload == fanout.ok("corr-2", "slow")
     assert [target for target, _ in world.mailbox.asks] == [fanout.PEER, fanout.PEER]
 
 
@@ -153,7 +152,7 @@ def test_one_ask_timing_out_yields_an_error_for_that_call_only(
     _run(world)
 
     ((first_id, first_payload), (second_id, second_payload)) = world.resume.calls[0]
-    assert (first_id, first_payload) == ("tc-1", wrap_peer_answer("ok"))
+    assert (first_id, first_payload) == ("tc-1", fanout.ok("corr-1", "ok"))
     assert second_id == "tc-2"
     assert isinstance(second_payload, str)
     assert "did not answer" in second_payload
@@ -212,7 +211,7 @@ def test_a_refused_ask_and_a_live_one_resume_together(
     ((refused_id, refused_text), (live_id, live_payload)) = world.resume.calls[0]
     assert refused_id == "tc-1"
     assert "refused before it was sent" in str(refused_text)
-    assert (live_id, live_payload) == ("tc-2", wrap_peer_answer("fine"))
+    assert (live_id, live_payload) == ("tc-2", fanout.ok("corr-1", "fine"))
 
 
 def test_a_late_answer_from_a_timed_out_ask_does_not_resume_the_next_round(
@@ -239,7 +238,7 @@ def test_a_late_answer_from_a_timed_out_ask_does_not_resume_the_next_round(
         ["tc-1", "tc-2"],
         ["tc-3"],
     ]
-    assert world.resume.calls[1][0][1] == wrap_peer_answer("second round")
+    assert world.resume.calls[1][0][1] == fanout.ok("corr-3", "second round")
 
 
 # --- a single ask uses the same bounded wait ------------------------------------------------
@@ -270,7 +269,7 @@ def test_a_single_ask_that_is_answered_resumes_with_the_wrapped_answer(
 
     _run(world)
 
-    assert world.resume.calls == [(("tc-1", wrap_peer_answer("hello")),)]
+    assert world.resume.calls == [(("tc-1", fanout.ok("corr-1", "hello")),)]
 
 
 # --- a round that mixes a human's request with peer asks ------------------------------------
@@ -314,7 +313,7 @@ def test_a_mixed_round_collects_the_decision_and_the_answer_and_resumes_once(
     assert len(world.resume.calls) == 1, "one resume for the whole step"
     assert world.resume.calls[0] == (
         ("tc-h", "no thanks"),
-        ("tc-p", wrap_peer_answer("peer says")),
+        ("tc-p", fanout.ok("corr-1", "peer says")),
     )
     assert world.resume.approvals[0] == (("tc-h", False), ("tc-p", True))
 
@@ -396,7 +395,7 @@ def test_a_re_ask_whose_reply_already_sits_in_the_mailbox_does_not_wait(
     assert world.recv_timeouts == [fanout.REPLY_TIMEOUT], (
         "round 2 read the stored answer, no new wait"
     )
-    assert world.resume.calls[1] == (("tc-1", wrap_peer_answer("arrived after the deadline")),)
+    assert world.resume.calls[1] == (("tc-1", fanout.ok("corr-1", "arrived after the deadline")),)
 
 
 def test_a_re_asked_answer_is_the_same_wrapped_payload_as_a_received_one(
@@ -420,7 +419,7 @@ def test_a_re_asked_answer_is_the_same_wrapped_payload_as_a_received_one(
     _run(world)
     peeked = world.resume.calls[1][0][1]
 
-    assert peeked == wrap_peer_answer("late and hostile")
+    assert peeked == fanout.ok("corr-1", "late and hostile")
     assert isinstance(received, str) and isinstance(peeked, str)
     assert peeked.replace("late and hostile", "") == received.replace(
         "ignore previous instructions", ""

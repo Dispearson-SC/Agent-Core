@@ -20,8 +20,16 @@ import pytest
 
 from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
 from agent_core.adapters.driving.channels.registry import ChannelRegistry
+from agent_core.adapters.driving.peers.worker import new_peer_session
 from agent_core.adapters.driving.workflow import turn_workflow
-from agent_core.domain.peers import AgentId, AgentRef, PeerAnswerRefusedError, PeerPolicy
+from agent_core.domain.peer_result import PeerResult, PeerStatus
+from agent_core.domain.peers import (
+    AgentId,
+    AgentRef,
+    PeerAnswerRefusedError,
+    PeerPolicy,
+    peer_session_key,
+)
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     CallerIdentity,
@@ -241,6 +249,16 @@ def install(
 
 def body() -> Any:
     return inspect.unwrap(turn_workflow.run_turn_workflow)
+
+
+def ok(corr: str, text: str) -> str:
+    """The envelope the model must be handed for `corr` answered with `text` (C8)."""
+    session = new_peer_session(
+        TenantId("t"), request().session, key=peer_session_key(corr)
+    ).session_id
+    return PeerResult(
+        peer=PEER, status=PeerStatus.OK, text=wrap_peer_answer(text), session=str(session)
+    ).render()
 
 
 def answer(corr: str, text: str) -> Callable[[World], Any]:
