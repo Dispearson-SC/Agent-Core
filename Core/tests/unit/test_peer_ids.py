@@ -15,7 +15,7 @@ import pytest
 
 from agent_core.adapters.driving.peers.worker import new_peer_session
 from agent_core.domain.peers import AgentId, peer_ask_id, peer_session_key
-from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId
+from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId, TurnOutcome
 from tests.fakes import fanout
 
 TURN = TurnId("turn-1")
@@ -79,4 +79,39 @@ def test_the_ask_step_files_the_ask_under_the_tool_call_id(
 
     asyncio.run(fanout.body()(fanout.request()))
 
-    assert world.mailbox.request_keys == ["tc-1"]
+    assert world.mailbox.request_keys == ["r1.s0.tc-1"]
+
+
+# --- C13: the request key names the round and the position, not only the tool call ---------------
+
+
+def test_the_same_tool_call_id_in_two_rounds_is_two_different_request_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider may reuse a tool call id in a later model step. The ask key carries the round
+    and the position in it, so a legitimate repeat is a fresh ask (D36) while a replay of the
+    same round and position keeps the same key."""
+    world = fanout.install(
+        monkeypatch,
+        (fanout.ask("tc-1"),),
+        [fanout.answer("corr-1", "first"), fanout.answer("corr-2", "second")],
+    )
+    world.resume.then = [TurnOutcome(turn_id=TurnId("turn-1"), pending=(fanout.ask("tc-1"),))]
+
+    asyncio.run(fanout.body()(fanout.request()))
+
+    assert world.mailbox.request_keys == ["r1.s0.tc-1", "r2.s0.tc-1"]
+
+
+def test_asks_of_one_round_are_keyed_by_their_position_in_tool_call_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = fanout.install(
+        monkeypatch,
+        (fanout.ask("tc-b"), fanout.ask("tc-a")),
+        [fanout.answer("corr-1", "a"), fanout.answer("corr-2", "b")],
+    )
+
+    asyncio.run(fanout.body()(fanout.request()))
+
+    assert world.mailbox.request_keys == ["r1.s0.tc-a", "r1.s1.tc-b"]

@@ -363,12 +363,15 @@ def test_a_word_for_word_re_ask_after_a_timeout_resolves_at_once_as_cancelled(
 ) -> None:
     """C4 supersedes D28 here. A timed-out ask is CANCELLED (row and callee workflow), so the
     mailbox's idempotent re-ask names a dead row; waiting a second full timeout for it would
-    be waiting for nothing. It resolves immediately (C13 will make repeats fresh asks)."""
+    be waiting for nothing. It resolves immediately. Since C13 no shipped adapter folds a repeat
+    (see `test_the_same_question_in_a_later_round_is_a_fresh_ask`); this is the workflow's
+    defence against an adapter that hands back a handle it already gave out."""
     world = fanout.install(
         monkeypatch,
         (fanout.ask("tc-1"),),
         [fanout.nobody_answers(fanout.REPLY_TIMEOUT)],  # round 1 times out; round 2 must not wait
     )
+    world.mailbox.fold_repeats = True
     world.resume.then = [TurnOutcome(turn_id=TurnId("turn-1"), pending=(fanout.ask("tc-1"),))]
 
     outcome = _run(world)
@@ -377,6 +380,29 @@ def test_a_word_for_word_re_ask_after_a_timeout_resolves_at_once_as_cancelled(
     assert world.recv_timeouts == [fanout.REPLY_TIMEOUT], "no second wait for the cancelled ask"
     ((tool_call_id, payload),) = world.resume.calls[1]
     assert tool_call_id == "tc-1" and "cancelled" in str(payload)
+
+
+def test_the_same_question_in_a_later_round_is_a_fresh_ask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C13. Round 1's ask times out (cancelled). The SAME question asked in round 2 is a new row
+    with a new answer; it neither inherits the cancelled end state nor waits on the first row."""
+    world = fanout.install(
+        monkeypatch,
+        (fanout.ask("tc-1"),),
+        [fanout.nobody_answers(fanout.REPLY_TIMEOUT), fanout.answer("corr-2", "second time")],
+    )
+    world.resume.then = [
+        TurnOutcome(turn_id=TurnId("turn-1"), pending=(fanout.ask("tc-1", question="q"),))
+    ]
+
+    outcome = _run(world)
+
+    assert outcome.result is not None
+    assert len(world.mailbox.asks) == 2, "the repeat created its own row"
+    assert world.mailbox.request_keys == ["r1.s0.tc-1", "r2.s0.tc-1"]
+    ((_, round_two),) = world.resume.calls[1]
+    assert round_two == fanout.ok("corr-2", "second time")
 
 
 def test_a_re_ask_whose_reply_already_sits_in_the_mailbox_does_not_wait(
@@ -388,6 +414,7 @@ def test_a_re_ask_whose_reply_already_sits_in_the_mailbox_does_not_wait(
         return None
 
     world = fanout.install(monkeypatch, (fanout.ask("tc-1"),), [late_reply_lands])
+    world.mailbox.fold_repeats = True
     world.resume.then = [TurnOutcome(turn_id=TurnId("turn-1"), pending=(fanout.ask("tc-1"),))]
 
     _run(world)
@@ -410,11 +437,13 @@ def test_a_re_asked_answer_is_the_same_wrapped_payload_as_a_received_one(
             fanout.nobody_answers(fanout.REPLY_TIMEOUT),
         ],
     )
+    world.mailbox.fold_repeats = True
     world.resume.then = [TurnOutcome(turn_id=TurnId("turn-1"), pending=(fanout.ask("tc-1"),))]
     _run(world)
     received = world.resume.calls[0][0][1]
 
     world = fanout.install(monkeypatch, (fanout.ask("tc-1"),), [lambda w: _timed_out_with_reply(w)])
+    world.mailbox.fold_repeats = True
     world.resume.then = [TurnOutcome(turn_id=TurnId("turn-1"), pending=(fanout.ask("tc-1"),))]
     _run(world)
     peeked = world.resume.calls[1][0][1]
@@ -449,6 +478,7 @@ def test_the_normal_and_the_peek_path_read_through_one_shared_reader(
         (fanout.ask("tc-1"), fanout.ask("tc-2")),
         [fanout.answer("corr-1", "first"), fanout.nobody_answers(fanout.REPLY_TIMEOUT)],
     )
+    world.mailbox.fold_repeats = True
     world.resume.then = [TurnOutcome(turn_id=TurnId("turn-1"), pending=(fanout.ask("tc-2"),))]
     world.mailbox.answers["corr-2"] = "landed after the deadline"
     _run(world)
@@ -549,4 +579,14 @@ def test_uuid_peer_workflow_ids_moved_the_pinned_application_version_to_five() -
     it), so .4 workflows are stranded on purpose: drain them first (OPERATIONS.md)."""
     from agent_core import composition
 
-    assert composition.PINNED_DBOS_APPLICATION_VERSION == "agent-core-turns.5"
+    assert int(composition.PINNED_DBOS_APPLICATION_VERSION.rsplit(".", 1)[1]) >= 5
+
+
+def test_the_round_and_position_ask_key_moved_the_pinned_application_version_to_six() -> None:
+    """D36 (C13): the request key of an ask, and with it the correlation id a re-executed ask
+    step derives, now names the round and position. An ask step interrupted under .5 would
+    derive another id under .6 and post a second row, so .5 turns are stranded on purpose:
+    drain first (OPERATIONS.md)."""
+    from agent_core import composition
+
+    assert composition.PINNED_DBOS_APPLICATION_VERSION == "agent-core-turns.6"

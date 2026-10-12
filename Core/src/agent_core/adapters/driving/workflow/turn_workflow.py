@@ -714,6 +714,14 @@ def _for_a_peer(pending: tuple[PendingRequest, ...]) -> tuple[PendingRequest, ..
     )
 
 
+def _ask_key(round_number: int, position: int, tool_call_id: ToolCallId) -> str:
+    """The request key of one ask: its round, its position in the round and the provider's call id.
+
+    Pure and a function of values the body already holds, so a replay derives the same key (C2).
+    """
+    return f"r{round_number}.s{position}.{tool_call_id}"
+
+
 def _peer_session_id(request: TurnRequest, correlation_id: str) -> str | None:
     """The id of the conversation a peer ask runs in (C8), or None if it has no well-formed one.
 
@@ -929,12 +937,21 @@ def _asking_policy(seat: PeerSeat, profile_id: str) -> PeerPolicy:
 
 @DBOS.step()
 async def _step_ask_peers(
-    turn_id: TurnId, request: TurnRequest, pending: tuple[PendingRequest, ...]
+    turn_id: TurnId,
+    request: TurnRequest,
+    pending: tuple[PendingRequest, ...],
+    round_number: int,
 ) -> PeerDispatch:
     """Turn every deferred `ask_peer` call into an `AgentMailbox.ask()`. t-f11-42.
 
     `pending` is ALREADY filtered by `_for_a_peer` and sorted by `_in_deterministic_order`
     in the body, where the decision is replayable. This step asks; it does not choose whom.
+
+    EVERY ASK IS KEYED BY ITS ROUND AND ITS POSITION (C13, D36): `r<round>.s<position>.<tool call
+    id>` (`_ask_key`). Replaying the same round of the same turn derives the same key and so names
+    the same row (no double post), while the same question asked again in a LATER round - or by a
+    provider that reuses a tool call id - is a fresh ask with its own row and its own answer. The
+    mailbox used to fold a word-for-word repeat into the first row, and with it the first answer.
 
     A STEP, AND THAT IS THE WHOLE REASON THE CALL SITE IS HERE AND NOT IN THE RUNNER
         `ask` mints the correlation id and persists it in one INSERT (mailbox.py, EXACTLY
@@ -985,7 +1002,7 @@ async def _step_ask_peers(
     handles: list[tuple[str, ToolCallId]] = []
     refusals: list[tuple[ToolCallId, str]] = []
 
-    for ask in pending:
+    for position, ask in enumerate(pending):
         target = ask.arguments.get(_ASK_TARGET)
         question = ask.arguments.get(_ASK_QUESTION)
         if not isinstance(target, str) or not target or not isinstance(question, str):
@@ -1072,7 +1089,7 @@ async def _step_ask_peers(
             asker=caller,
             # C2. The tool call that asked names the ask, so a replay of this step derives
             # the same correlation id and cannot post (or run) a second peer turn.
-            request_key=str(ask.tool_call_id),
+            request_key=_ask_key(round_number, position, ask.tool_call_id),
         )
         handles.append((correlation_id, ask.tool_call_id))
 
@@ -1880,7 +1897,7 @@ async def _drive_turn(request: TurnRequest) -> _TurnEnd:
         # executes. Filtered in the body for the reason the publish is - which requests
         # leave as questions is a decision that has to replay identically - and asked in a
         # step, which is where the correlation id is minted and persisted as one act.
-        dispatch = await _step_ask_peers(turn_id, request, _for_a_peer(ordered))
+        dispatch = await _step_ask_peers(turn_id, request, _for_a_peer(ordered), rounds)
         peer_calls.update(dispatch.handles)
 
         # EVERY round is collected (D28 for rounds with a peer ask, D32/C6 for the rest): wait

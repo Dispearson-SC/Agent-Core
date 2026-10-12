@@ -245,16 +245,16 @@ def test_a_replayed_keyed_ask_names_the_same_row_and_is_claimed_once() -> None:
 
 
 @pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
-def test_a_repeat_question_under_another_tool_call_still_reuses_the_first_row() -> None:
-    """The mailbox stays idempotent per (turn, target, question) (D28): a word-for-word re-ask
-    in a later round, under a NEW tool call id, gets the handle it already gave out."""
+def test_a_repeat_question_under_another_request_key_is_a_fresh_ask() -> None:
+    """C13 (D36): a word-for-word re-ask in a later round carries another request key and is its
+    own row; a replay of the same key, and an unkeyed re-ask, stay idempotent."""
     conninfo = _migrated_conninfo()
     session = _session()
     turn_id = TurnId(str(uuid.uuid4()))
     question = f"same question [{uuid.uuid4()}]"
     mailbox = PgAgentMailbox(conninfo)
 
-    def ask(key: str) -> str:
+    def ask(key: str | None) -> str:
         return asyncio.run(
             mailbox.ask(
                 _POLICY,
@@ -267,7 +267,11 @@ def test_a_repeat_question_under_another_tool_call_still_reuses_the_first_row() 
             )
         )
 
-    assert ask("tc-1") == ask("tc-2")
+    first, second = ask("r1.s0.tc-1"), ask("r2.s0.tc-1")
+    assert first != second, "the later round's repeat is a new ask"
+    assert ask("r1.s0.tc-1") == first and ask("r2.s0.tc-1") == second, "a replay names its own row"
+    assert ask(None) == ask(None), "an unkeyed ask is still idempotent per (turn, target, question)"
+    assert ask(None) not in {first, second}
 
 
 @pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")

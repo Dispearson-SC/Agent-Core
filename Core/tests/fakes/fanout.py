@@ -98,14 +98,20 @@ class Mailbox:
         self.turn_of: dict[str, str] = {}
         self.redelivered: dict[str, int] = {}  # correlation id -> redeliveries (the generation)
         self.answers: dict[str, str] = {}
-        self._ids: dict[tuple[str, str], str] = {}
+        # C13. The real mailboxes name an ask by its request key, so a repeat in a later round is
+        # a fresh ask. `fold_repeats` keeps the old per-(target, question) folding for the tests of
+        # the workflow's defence against an adapter that returns a handle it already gave out.
+        self.fold_repeats = False
+        self._ids: dict[tuple[str, ...], str] = {}
 
     async def ask(self, policy: Any, target: AgentId, question: str, **kwargs: Any) -> str:
         self.request_keys.append(kwargs.get("request_key"))
-        key = (str(target), question)
-        if key not in self._ids:  # idempotent per (target, question), like the real one
+        key: tuple[str, ...] = (str(target), question)
+        if not self.fold_repeats:
+            key += (str(kwargs.get("request_key")),)
+        if key not in self._ids:  # idempotent per request key, like the real one
             self._ids[key] = f"corr-{len(self._ids) + 1}"
-            self.asks.append(key)
+            self.asks.append((str(target), question))
             self.turn_of[self._ids[key]] = str(kwargs.get("turn_id"))
         return self._ids[key]
 

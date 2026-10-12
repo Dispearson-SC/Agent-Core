@@ -5,7 +5,7 @@ changes. Decisions behind them are in `docs/DECISIONS.md`.
 
 ## Bumping the DBOS application version
 
-`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.5`) is bumped when a
+`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.6`) is bumped when a
 change makes turns that are already in flight incompatible with the new code: a workflow step
 added, removed, renamed or reordered, or a changed workflow argument (D28 took `.1` to `.2`;
 D31 took `.2` to `.3`: the peer job gained `answer_token` and the round gained the cancel
@@ -13,7 +13,8 @@ cascade steps; D32 took `.3` to `.4`: every round, including one that asks only 
 collected and resumed once, so a turn suspended on a person under `.3` is stranded; D33 took `.4` to
 `.5`: a peer workflow is named by a UUID instead of `peer-<id>`, so a peer workflow still open
 under `.4` is stranded and the new build does not know its name, see "Deploying the UUID peer
-workflow ids". Peer asks in
+workflow ids"; D36 took `.5` to `.6`: the request key of a peer ask names its round and position, see
+"Deploying the ask keys". Peer asks in
 flight on `.2` are stranded too: `stranded-turns` lists them, and
 their mailbox rows stay `delivered` until the lease reclaims them: with
 `AGENT_CORE_RETIRE_OTHER_VERSIONS=true` (D33) the lease treats a workflow left open under another
@@ -92,6 +93,25 @@ a duplicate run of side-effecting tools.
 
 Migration `0029` (`peer_messages.turn_id` TEXT) stays: it is shipped, harmless, and still lets a
 non-UUID asking turn id be recorded. It is no longer REQUIRED by the peer workflow ids.
+
+## Deploying the ask keys (`.5` -> `.6`, D36)
+
+An ask is now filed under the key `r<round>.s<position>.<tool call id>` and a repeat of a question
+in a later round is a fresh ask (migration `0031` drops the per-question uniqueness of keyed asks).
+A turn suspended under `.5` is stranded like any stale-version workflow, so before deploying `.6`:
+
+1. Let turns finish or drain them: `python -m agent_core stranded-turns` against the OLD build must
+   report 0 (see "Deploying a version bump" above), and no `peer_messages` row may be `delivered`
+   and unanswered.
+2. Deploy `.6`; run `stranded-turns` again and cancel what it lists, as above.
+
+Why it cannot be left to recover: an ask step interrupted under `.5` (the row inserted, the step
+not yet recorded) would be re-executed under `.6` with the new key, derive another correlation id
+and post a SECOND row for the same question: the callee runs twice and its tools can run twice.
+Migration `0031` is applied by the new build at startup and is NOT safe to apply under a running
+`.5` build: it drops the constraint the `.5` ask statement names (`ON CONFLICT ON CONSTRAINT
+uq_peer_messages_turn_target_question`), so every ask a `.5` process makes after it fails. Stop the
+`.5` processes first (the drain above), then start `.6`.
 
 ## Peer redelivery lease
 

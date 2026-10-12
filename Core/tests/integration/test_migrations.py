@@ -139,8 +139,9 @@ def test_apply_all_migrations_creates_the_peer_turn_id_text_column_and_the_attem
     with psycopg.connect(_ADMIN_CONNINFO, autocommit=True) as admin:
         admin.execute(f'DROP DATABASE IF EXISTS "{app_db}" WITH (FORCE)')
 
-    assert {i[:4] for i in applied} >= {"0029", "0030"}, "0029/0030 are not applied"
+    assert {i[:4] for i in applied} >= {"0029", "0030", "0031"}, "0029-0031 are not applied"
     assert columns[("peer_messages", "turn_id")] == "text"
     assert columns[("transcript_entries", "turn_id")] == "text"
+    assert columns[("peer_messages", "request_key")] == "text"
     assert columns[("workflow_attempts", "attempts")] == "integer"
     assert columns[("workflow_attempts", "parked")] == "boolean"

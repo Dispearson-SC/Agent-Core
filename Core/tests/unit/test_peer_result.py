@@ -175,6 +175,7 @@ def test_a_cancelled_repeat_resolves_to_status_cancelled(monkeypatch: pytest.Mon
         (fanout.ask("tc-1"),),
         [fanout.nobody_answers(fanout.REPLY_TIMEOUT)],
     )
+    world.mailbox.fold_repeats = True  # an adapter that hands back the handle it already gave out
     world.resume.then = [TurnOutcome(turn_id=TurnId("turn-1"), pending=(fanout.ask("tc-1"),))]
 
     _run()

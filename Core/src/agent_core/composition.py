@@ -479,7 +479,11 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # because it is also the callee's turn id and that is
 # stored in UUID columns. A peer workflow started under .4 is unknown to the new scheme, so it is
 # stranded on purpose (drain first, OPERATIONS.md); the step shape did not change.
-PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.5"
+# .5 -> .6 with D36 (C13): the request key of an ask is `r<round>.s<position>.<tool call id>`
+# instead of the bare tool call id, so a re-executed ask step derives another correlation id than
+# the one an interrupted .5 run inserted and would post a second row. In-flight .5 turns are
+# stranded on purpose (drain first, OPERATIONS.md); no step name or order changed.
+PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.6"
 
 # C5 (D32). The default of `Settings.max_turn_attempts` is `DEFAULT_MAX_TURN_ATTEMPTS`, defined once
 # in `turn_workflow` (where the budget is enforced) and imported above; D33 removed the second copy.

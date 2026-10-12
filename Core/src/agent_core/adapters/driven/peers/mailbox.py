@@ -145,15 +145,32 @@ _DELIMITER_RE: Final[re.Pattern[str]] = re.compile(
 # ordinary answer.
 _FORGED_DELIMITER: Final[str] = "[delimiter removed]"
 
-_ENQUEUE_SQL = """
+# A KEYED ask (C13) is idempotent through its primary key: the correlation id is derived from the
+# request key, which names the round and position of the ask, so a replay hits the same row while
+# the same question in a later round is a new one. An UNKEYED ask has a random id, and stays
+# idempotent per (turn, target, question) through the partial unique index of migration 0031.
+_ENQUEUE_COLUMNS = """
     INSERT INTO peer_messages
         (correlation_id, target_agent_id, from_session_id, from_tenant_id,
-         turn_id, hop, question, from_agent_id, answer_token)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT ON CONSTRAINT uq_peer_messages_turn_target_question DO UPDATE
+         turn_id, hop, question, from_agent_id, answer_token, request_key)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+_ENQUEUE_KEYED_SQL = (
+    _ENQUEUE_COLUMNS
+    + """
+    ON CONFLICT (correlation_id) DO UPDATE
         SET target_agent_id = peer_messages.target_agent_id
     RETURNING correlation_id
 """
+)
+_ENQUEUE_UNKEYED_SQL = (
+    _ENQUEUE_COLUMNS
+    + """
+    ON CONFLICT (turn_id, target_agent_id, question) WHERE request_key IS NULL DO UPDATE
+        SET target_agent_id = peer_messages.target_agent_id
+    RETURNING correlation_id
+"""
+)
 
 # One statement: select, lock and mark delivered commit together, so two workers can
 # never both see the same row as queued. SKIP LOCKED lets a second worker take the NEXT
@@ -375,8 +392,11 @@ class PgAgentMailbox:
     ) -> str:
         """Enqueue durably and return the correlation id the answer will arrive with.
 
-        Idempotent per (turn_id, target, question), so a re-executed DBOS step returns the
-        handle it already minted instead of asking the peer a second time. The conflicting
+        Idempotent per request key (C13): a re-executed DBOS step carries the same key, derives
+        the same correlation id and returns the handle it already minted instead of asking the
+        peer a second time, while the same question under another key (a later round) is a fresh
+        ask. Without a key the id is random and the ask is idempotent per (turn_id, target,
+        question), as before. The conflicting
         insert leaves every column of the surviving row alone, `from_agent_id` included: a
         retry cannot rewrite who asked after the fact. See the module docstring for why
         `policy` is carried but not enforced here (docs/TASKS.md#t-f9-05 is the gate) and
@@ -423,7 +443,7 @@ class PgAgentMailbox:
         )
         with psycopg.connect(self._conninfo, autocommit=True) as conn:
             row = conn.execute(
-                _ENQUEUE_SQL,
+                _ENQUEUE_UNKEYED_SQL if request_key is None else _ENQUEUE_KEYED_SQL,
                 (
                     correlation_id,
                     target,
@@ -436,6 +456,7 @@ class PgAgentMailbox:
                     # Minted per call but only kept by the first insert: a replayed ask hits
                     # the `DO UPDATE` branch, which leaves every column of the row alone.
                     new_answer_token(),
+                    request_key,
                 ),
             ).fetchone()
         if row is None:  # pragma: no cover - DO UPDATE always returns the surviving row

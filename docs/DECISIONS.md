@@ -1464,3 +1464,37 @@ delimiters, or one of five plain sentences of ours). Now every outcome is one `P
 - Not in the envelope yet: `data` (C9 adds typed answers) and `usage` (the callee's token use is
   not persisted on the row; carrying it needs a column and a port change). Both are additive
   changes to `PeerResult.render`.
+
+## D36 · Agent-comms v2: repeat questions are fresh asks (C13)
+
+`peer_messages` was unique per `(turn_id, target_agent_id, question)`. The same question asked again
+in a LATER round of the same turn (legitimate: the situation changed, or an earlier ask timed out
+and was cancelled) was folded into the first row and returned the first answer, or the `cancelled`
+end state of the ask that timed out. Two identical calls in ONE model step collapsed to one handle
+too, which left one of the two tool calls without a result.
+
+- **The key.** `_step_ask_peers` now files every ask under `r<round>.s<position>.<tool call id>`
+  (`_ask_key`): the round of the turn's collect loop, the position in that round's tool-call-id
+  order, and the provider's call id. All three are values the body already holds, so a replay of
+  the same round derives the same key. The key is the `request_key` that already derived the
+  correlation id (C2) and the A2A `messageId`; no port signature changed.
+- **The constraint.** Migration `0031` adds `peer_messages.request_key` and drops
+  `uq_peer_messages_turn_target_question`. A keyed ask is idempotent through its primary key
+  (`ON CONFLICT (correlation_id)`), so a replay is still one row, one claim, one peer run. An UNKEYED
+  ask (random id, no `request_key`) keeps its old idempotence through a partial unique index over
+  the rows whose `request_key IS NULL`. The in-memory reference mailbox does the same; the A2A
+  adapter already sent a per-key `messageId`, so every adapter now treats a repeat as fresh and the
+  conformance suite asserts it (`test_the_same_question_under_a_new_request_key_is_a_fresh_ask`).
+- **What stays.** The round's defence for an adapter that hands back a handle it already gave out
+  (`timed_out` re-ask: read the stored answer or resolve as `cancelled`) is kept; no shipped
+  adapter triggers it any more and its tests use a mailbox that folds on purpose
+  (`fold_repeats`).
+- **Replay shape: `agent-core-turns.5` -> `.6`, ONCE for the C13 batch.** No step name or order
+  changed, but the correlation id (and so the peer workflow id) a re-executed ask step derives
+  changed: an ask step interrupted under `.5` (row inserted, step not recorded) would post a second
+  row under `.6` and run the callee twice. In-flight `.5` turns are stranded on purpose; the
+  runbook is OPERATIONS.md "Deploying the ask keys". Migration `0031` breaks the `.5` ask statement
+  (it names the dropped constraint), so it is applied only by a `.6` build, after the drain. C14 adds
+  nothing to the replay shape and did not need a second bump.
+- **Known quirk left.** Rows written before `0031` have `request_key IS NULL`, so they stay under the
+  old per-question uniqueness; a keyed ask never collides with them.

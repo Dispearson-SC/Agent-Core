@@ -103,8 +103,10 @@ class AgentMailbox(Protocol):
            this ask within the asking turn (the `ask_peer` tool call id); the correlation id
            is then derived from `(turn_id, request_key, target, question)` instead of drawn
            at random, so a DBOS replay of the asking step names the SAME row and can neither
-           double-post nor double-run. `None` keeps the previous behaviour (a random id,
-           idempotent per `(turn_id, target, question)`).
+           double-post nor double-run. Since C13 the workflow's key names the round and the
+           position (`r<round>.s<position>.<tool call id>`), so the SAME question under another
+           key (a later round) is a FRESH ask with its own answer. `None` keeps the previous
+           behaviour (a random id, idempotent per `(turn_id, target, question)`).
 
         THE ANSWER IS UNTRUSTED CONTENT. Another agent is a third party - it may have read
         something hostile. Wrap it in delimiters like any `mcp_*` result. "Our own agent"
@@ -153,9 +155,10 @@ class AgentMailbox(Protocol):
         ...
 
     async def is_cancelled(self, correlation_id: str) -> bool:
-        """Whether the ask ended `cancelled`. Lets a re-ask of the same question (the mailbox
-        is idempotent per `(turn, target, question)`, so it names the same row) tell a dead ask
-        from a live one without waiting for a reply that cannot come."""
+        """Whether the ask ended `cancelled`. Lets a caller that was handed a handle it
+        already gave up on (an adapter may return the same handle for a repeat; the shipped ones
+        do not since C13) tell a dead ask from a live one without waiting for a reply that
+        cannot come."""
         ...
 
     async def redeliveries(self, correlation_id: str) -> int:

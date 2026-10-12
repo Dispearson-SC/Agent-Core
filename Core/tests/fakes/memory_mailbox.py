@@ -1,7 +1,8 @@
 """An in-memory `AgentMailbox` with the answering side's queue verbs: the reference behaviour.
 
 It implements the same contract as `PgAgentMailbox` (and passes the same conformance suite,
-`tests/contract/mailbox_conformance.py`): idempotent enqueue per `(turn, target, question)`,
+`tests/contract/mailbox_conformance.py`): idempotent enqueue per request key (per
+`(turn, target, question)` when unkeyed),
 oldest-first exclusive claims, the per-ask answer token, first-answer-wins, unknown ids as silent
 no-ops, the `cancelled` end state and the redelivery lease with its generation. A test that needs
 a mailbox and not a database uses this one; wrap it in `ControlledMailbox` to inject faults.
@@ -71,13 +72,14 @@ class InMemoryAgentMailbox:
         request_key: str | None = None,
     ) -> str:
         key = (str(turn_id), str(target), question)
-        if key in self._by_key:  # the unique constraint: a replay names the first row
-            return self._by_key[key]
-        correlation_id = (
-            secrets.token_urlsafe(32)
-            if request_key is None
-            else peer_ask_id(str(turn_id), request_key, str(target), question)
-        )
+        if request_key is None:
+            if key in self._by_key:  # an unkeyed ask is idempotent per (turn, target, question)
+                return self._by_key[key]
+            correlation_id = secrets.token_urlsafe(32)
+        else:
+            correlation_id = peer_ask_id(str(turn_id), request_key, str(target), question)
+            if correlation_id in self.rows:  # a keyed ask is idempotent per request key (C13)
+                return correlation_id
         self._seq += 1
         self.rows[correlation_id] = _Row(
             correlation_id=correlation_id,
@@ -90,7 +92,8 @@ class InMemoryAgentMailbox:
             answer_token=new_answer_token(),
             seq=self._seq,
         )
-        self._by_key[key] = correlation_id
+        if request_key is None:
+            self._by_key[key] = correlation_id
         return correlation_id
 
     async def answer(

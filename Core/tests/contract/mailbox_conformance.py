@@ -16,9 +16,8 @@ in the message metadata) and whether the adapter also has the queue side (`claim
 
 What is checked, by contract clause:
   * ENQUEUE IS IDEMPOTENT: a replayed step (same turn, request key, target and question) names the
-    same ask; another question or another turn is another ask. Not asserted: a word-for-word
-    re-ask under a NEW request key. Postgres folds it into the first row (unique per turn,
-    target, question, D29); over A2A that is up to the peer's `messageId` de-duplication.
+    same ask; another question or another turn is another ask. A word-for-word re-ask under a NEW
+    request key (a later round) is a fresh ask on every adapter (C13, D36).
   * ANSWER TOKEN RULES (C1c): a wrong or missing token is refused and writes nothing; the right one
     is accepted; the FIRST answer wins and a retry is a silent no-op.
   * AN UNKNOWN ID IS A SILENT NO-OP for `answer`: strangers deliver and handles expire. Refusal is
@@ -126,6 +125,18 @@ class MailboxConformance:
 
         assert replay == first, "a retried step must not enqueue a second ask"
         assert len({first, other_question, other_turn}) == 3
+
+    async def test_the_same_question_under_a_new_request_key_is_a_fresh_ask(
+        self, harness: MailboxHarness
+    ) -> None:
+        """C13: a legitimate repeat in a later round (a new request key) is a NEW ask with its own
+        answer; only a replay of the SAME key names the first one."""
+        first = await harness.ask("is the customer travelling?", request_key="r1.s0.tc-1")
+        repeat = await harness.ask("is the customer travelling?", request_key="r2.s0.tc-1")
+        replay = await harness.ask("is the customer travelling?", request_key="r1.s0.tc-1")
+
+        assert repeat != first, "the repeat is its own ask"
+        assert replay == first, "a replay of the first round still names the first ask"
 
     async def test_an_unanswered_ask_reads_back_as_none(self, harness: MailboxHarness) -> None:
         correlation_id = await harness.ask("anything?")
