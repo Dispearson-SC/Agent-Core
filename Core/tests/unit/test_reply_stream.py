@@ -22,10 +22,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import (
+    ModelResponse,
+    PartDeltaEvent,
+    PartEndEvent,
+    PartStartEvent,
+    TextPart,
+    TextPartDelta,
+    ToolCallPart,
+)
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from agent_core.adapters.driven.agent_pydantic import runner as runner_module
+from agent_core.adapters.driven.agent_pydantic.reply_stream import ReplyStreamHandler
 from agent_core.adapters.driving.http.event_routes import event_json, snapshot_json
 from agent_core.application.event_feed import EventFeed, FeedKind
 from agent_core.composition import Settings
@@ -401,3 +410,105 @@ def test_streaming_replies_is_off_unless_the_deployment_switches_it_on() -> None
     assert on.stream_replies is True
     with pytest.raises(ValueError, match="AGENT_CORE_STREAM_REPLIES"):
         Settings.from_env({"AGENT_CORE_STREAM_REPLIES": "yes please"}, env_file=_NO_FILE)
+
+
+# --- C1q: the response counter and the publish hand-off ---
+
+
+def _handler(events: _Events, **options: Any) -> ReplyStreamHandler:
+    return ReplyStreamHandler(
+        events, turn_id=TurnId("turn-1"), session=SESSION, agent="p", **options
+    )
+
+
+async def _stream(*events: Any) -> AsyncIterator[Any]:
+    for event in events:
+        yield event
+
+
+def test_the_response_counter_counts_model_responses_not_text_parts() -> None:
+    """C1q: one model response holding two text parts around a tool call is ONE response; the next
+    model request (its first part has index 0 again) is the next one."""
+    events = _Events()
+    handler = _handler(events)
+
+    async def scenario() -> None:
+        first = [
+            PartStartEvent(index=0, part=TextPart("One. ")),
+            PartEndEvent(index=0, part=TextPart("One. ")),
+            PartStartEvent(index=1, part=ToolCallPart("lookup", {}, "c1")),
+            PartStartEvent(index=2, part=TextPart("Two. ")),
+            PartEndEvent(index=2, part=TextPart("Two. ")),
+        ]
+        await handler(None, _stream(*first))
+        second = [
+            PartStartEvent(index=0, part=TextPart("Three.")),
+            PartEndEvent(index=0, part=TextPart("Three.")),
+        ]
+        await handler(None, _stream(*second))
+
+    asyncio.run(scenario())
+
+    assert [e.detail.split(":", 1)[1] for e in events.deltas] == ["0:0", "0:1", "1:0"]
+    assert [e.text for e in events.deltas] == ["One. ", "Two. ", "Three."]
+
+
+def test_publishing_never_makes_the_model_stream_wait() -> None:
+    """C1q: the model's stream hands out its second sentence and only then lets the (slow) event
+    store accept the first. If publishing ran inline in the stream, the stream would wait for the
+    store and the store for the stream: the gate times out and the chunks are lost."""
+    gate = asyncio.Event()
+    published: list[str] = []
+
+    class Slow:
+        async def publish(self, event: ProgressEvent) -> None:
+            await asyncio.wait_for(gate.wait(), timeout=2)
+            published.append(event.text or "")
+
+    async def stream(messages: list[Any], info: AgentInfo) -> AsyncIterator[str]:
+        yield "First sentence. "
+        yield "Second sentence. "
+        gate.set()
+        yield "Third."
+
+    runner = _runner(FunctionModel(stream_function=stream), Slow())  # type: ignore[arg-type]
+
+    outcome = asyncio.run(runner.run(TurnId("turn-1"), _request(), PROFILE, None))
+
+    assert outcome.result is not None
+    assert published == ["First sentence. ", "Second sentence. ", "Third."], "flushed on finish"
+
+
+def test_a_stalled_event_store_costs_a_bounded_queue_not_unbounded_memory() -> None:
+    """C1q: while the store accepts nothing the handler holds at most `max_pending` chunks; text
+    that arrives past that is coalesced into the newest pending chunk, and everything pending is
+    flushed on finish."""
+    release = asyncio.Event()
+    events = _Events()
+    real_publish = events.publish
+
+    async def stalled(event: ProgressEvent) -> None:
+        await release.wait()
+        await real_publish(event)
+
+    events.publish = stalled  # type: ignore[method-assign]
+    handler = _handler(events, max_pending=4)
+
+    async def scenario() -> int:
+        sentences = [f"Sentence {n}. " for n in range(50)]
+        feed = [PartStartEvent(index=0, part=TextPart(""))]
+        feed += [PartDeltaEvent(index=0, delta=TextPartDelta(content_delta=t)) for t in sentences]
+        feed += [PartEndEvent(index=0, part=TextPart("".join(sentences)))]
+        task = asyncio.create_task(handler(None, _stream(*feed)))
+        await asyncio.sleep(0.05)
+        deepest = handler.pending
+        release.set()
+        await asyncio.wait_for(task, 2)
+        return deepest
+
+    deepest = asyncio.run(scenario())
+
+    assert deepest <= 4
+    assert "".join(e.text or "" for e in events.deltas) == "".join(
+        f"Sentence {n}. " for n in range(50)
+    ), "nothing was lost: overflow is coalesced"
