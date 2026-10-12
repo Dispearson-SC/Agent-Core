@@ -1088,5 +1088,38 @@ CANCELLED, both halves:
 - *Limits.* A cancel that races the worker between its claim and `start` marks the row
   cancelled, but the workflow may still start and run; its answer is refused. The A2A adapter
   cancels locally only (the wire `tasks/cancel` is D2). Asks a cancelled callee made to third
-  agents are not cascaded: `peer_messages.turn_id` is a UUID column and a callee's turn id
-  (`peer-<id>`) is not one, so such an ask cannot even be enqueued today (see the report).
+  agents were not cascaded: `peer_messages.turn_id` was a UUID column and a callee's turn id
+  (`peer-<id>`) is not one, so a nested ask (A -> B -> C) failed on INSERT with
+  `InvalidTextRepresentation`, and `cancel_open` of such an id returned nothing. D32 (C1f) fixes
+  both.
+
+## D32 · Agent-comms v2, wave 1 reliability: nested asks, stranded rows, tidy-ups, budgets
+
+Follow-ups of the review of ec60ee0 (C1f-C1h) and the reliability tasks C5-C7. One DBOS
+application version bump covers the whole batch (see OPERATIONS.md).
+
+**C1f · nested asks (A -> B -> C).** B's turn id is its workflow id `peer-<correlation id>`.
+The ask B makes is filed under it, and the column was a UUID: the INSERT failed (observed RED:
+`psycopg.errors.InvalidTextRepresentation: invalid input syntax for type uuid: "peer-..."`).
+
+- Migration `0029` makes `peer_messages.turn_id` TEXT, holding the id verbatim. The unique
+  constraint `(turn_id, target_agent_id, question)` and the open-asks index follow the column
+  (`ALTER ... TYPE` rebuilds them). The `transcript_entries` view reads this column and Postgres
+  refuses to retype a column a view depends on, so the migration drops the view and re-creates it
+  from the shared `TRANSCRIPT_ENTRIES_VIEW_SQL`, whose `turn_id` is TEXT in every branch of the
+  UNION (the consumer already stringified it).
+- `cancel_open` no longer pre-checks for a UUID and its SQL no longer casts.
+- *Cascade.* `_cancel_callees` (the body of the recorded cancel step and of `cancel_turn`) now,
+  after cancelling a callee's row and workflow, also cancels the asks that callee made
+  (`cancel_open("peer-<id>")`), breadth first and each id once, so a reply timeout, an asker
+  that expires or `cancel_turn` reach every level. Known gap: a crash between `cancel_open`
+  returning the nested ids and the engine cancel of those nested workflows leaves their rows
+  cancelled (so nothing they write is accepted) but the workflows run on to the end of their
+  turn; a retried step cannot see them again.
+- **Finding, not fixed here.** Every other `turn_id` column (`turns`, `human_requests`, the
+  `audit_*` tables, `turn_reasoning`) is still UUID, and a callee's `StartTurn` persists its
+  turn under the workflow id `peer-<id>`. The durable peer workflow (C1/D29) is covered by
+  integration tests whose store is an in-memory double; against the real Postgres store the
+  callee's first `INSERT INTO turns` would be refused for the same reason. Fixing it means
+  either TEXT turn ids everywhere (views, audit tables) or UUID workflow ids for peers
+  (`uuid5(corr)`), both a decision for the owner of the schema.

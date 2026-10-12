@@ -72,33 +72,11 @@ from agent_core.adapters.driven.persistence_pg.peers_migration import (
     apply_peer_messages_migration,
 )
 
-# Id 0016 is pre-allocated to this anchor in docs/TASKS.md. Forward-only: it creates
-# views and indexes and never drops or rewrites a table. `CREATE OR REPLACE VIEW` and
-# `CREATE INDEX IF NOT EXISTS` make the SQL idempotent on its own, on top of the
-# `schema_migrations` tracking below.
-#
-# The indexes are additive and touch no audit table with DROP or ALTER - see the RULE in
-# migrations.py. They exist because the ordering key of every page query is a timestamp
-# per source, and a projection that sorts by a column nobody indexed degrades quietly as
-# conversations grow, which presents as "the viewer got slow" and traces back to nothing.
-TRANSCRIPT_PROJECTION_MIGRATION = Migration(
-    id="0016_transcript_projection",
-    sql="""
-    CREATE INDEX IF NOT EXISTS ix_turns_session_created
-        ON turns (session_id, created_at, turn_id);
-    CREATE INDEX IF NOT EXISTS ix_turns_tenant_session
-        ON turns (tenant_id, session_id);
-    CREATE INDEX IF NOT EXISTS ix_messages_session_created
-        ON messages (session_id, created_at, id);
-    CREATE INDEX IF NOT EXISTS ix_audit_tool_calls_turn_at
-        ON audit_tool_calls (turn_id, at);
-    CREATE INDEX IF NOT EXISTS ix_audit_human_decisions_turn_at
-        ON audit_human_decisions (turn_id, at);
-    CREATE INDEX IF NOT EXISTS ix_audit_turn_costs_turn
-        ON audit_turn_costs (turn_id);
-    CREATE INDEX IF NOT EXISTS ix_checkpoints_session_created
-        ON checkpoints (session_id, created_at);
-
+# The `transcript_entries` view as one constant: 0016 creates it and 0029 (C1f) re-creates it,
+# because `peer_messages.turn_id` became TEXT and a view cannot follow a column's type change.
+# Every branch yields `turn_id` as TEXT: a callee's turn id is the workflow id `peer-<id>`, which
+# is no UUID, and a UNION needs one type. Readers already treat the value as a string.
+TRANSCRIPT_ENTRIES_VIEW_SQL = """
     CREATE OR REPLACE VIEW transcript_entries AS
     WITH session_tenant AS (
         SELECT DISTINCT ON (session_id) session_id, tenant_id
@@ -109,7 +87,7 @@ TRANSCRIPT_PROJECTION_MIGRATION = Migration(
         st.tenant_id                                        AS tenant_id,
         m.session_id                                        AS session_id,
         'message:' || lpad(m.id::text, 20, '0')             AS entry_id,
-        owning.turn_id                                      AS turn_id,
+        owning.turn_id::text                                 AS turn_id,
         CASE WHEN m.role = 'user' THEN 'user_message'
              ELSE 'agent_message' END                       AS kind,
         m.created_at                                        AS at,
@@ -131,7 +109,7 @@ TRANSCRIPT_PROJECTION_MIGRATION = Migration(
         t.tenant_id,
         t.session_id,
         'tool_call:' || lpad(a.id::text, 20, '0'),
-        a.turn_id,
+        a.turn_id::text,
         CASE WHEN a.effect = 'deny' THEN 'policy_denial' ELSE 'tool_call' END,
         a.at,
         jsonb_build_object(
@@ -147,7 +125,7 @@ TRANSCRIPT_PROJECTION_MIGRATION = Migration(
         t.tenant_id,
         t.session_id,
         'human_decision:' || lpad(d.id::text, 20, '0'),
-        d.turn_id,
+        d.turn_id::text,
         'human_decision',
         d.at,
         jsonb_build_object(
@@ -163,7 +141,7 @@ TRANSCRIPT_PROJECTION_MIGRATION = Migration(
         t.tenant_id,
         t.session_id,
         'pending_request:' || hr.correlation_id,
-        hr.turn_id,
+        hr.turn_id::text,
         'pending_request',
         hr.created_at,
         jsonb_build_object(
@@ -179,7 +157,7 @@ TRANSCRIPT_PROJECTION_MIGRATION = Migration(
         p.from_tenant_id,
         p.from_session_id,
         'peer_exchange:' || p.correlation_id,
-        p.turn_id,
+        p.turn_id::text,
         'peer_exchange',
         p.enqueued_at,
         jsonb_build_object(
@@ -194,7 +172,7 @@ TRANSCRIPT_PROJECTION_MIGRATION = Migration(
         st.tenant_id,
         c.session_id,
         'compaction:' || c.checkpoint_id::text,
-        NULL::uuid,
+        NULL::text,
         'compaction',
         c.created_at,
         jsonb_build_object(
@@ -204,7 +182,37 @@ TRANSCRIPT_PROJECTION_MIGRATION = Migration(
         ),
         NULL::numeric
     FROM checkpoints c
-    JOIN session_tenant st ON st.session_id = c.session_id;
+    JOIN session_tenant st ON st.session_id = c.session_id
+"""
+
+# Id 0016 is pre-allocated to this anchor in docs/TASKS.md. Forward-only: it creates
+# views and indexes and never drops or rewrites a table. `CREATE OR REPLACE VIEW` and
+# `CREATE INDEX IF NOT EXISTS` make the SQL idempotent on its own, on top of the
+# `schema_migrations` tracking below.
+#
+# The indexes are additive and touch no audit table with DROP or ALTER - see the RULE in
+# migrations.py. They exist because the ordering key of every page query is a timestamp
+# per source, and a projection that sorts by a column nobody indexed degrades quietly as
+# conversations grow, which presents as "the viewer got slow" and traces back to nothing.
+TRANSCRIPT_PROJECTION_MIGRATION = Migration(
+    id="0016_transcript_projection",
+    sql=f"""
+    CREATE INDEX IF NOT EXISTS ix_turns_session_created
+        ON turns (session_id, created_at, turn_id);
+    CREATE INDEX IF NOT EXISTS ix_turns_tenant_session
+        ON turns (tenant_id, session_id);
+    CREATE INDEX IF NOT EXISTS ix_messages_session_created
+        ON messages (session_id, created_at, id);
+    CREATE INDEX IF NOT EXISTS ix_audit_tool_calls_turn_at
+        ON audit_tool_calls (turn_id, at);
+    CREATE INDEX IF NOT EXISTS ix_audit_human_decisions_turn_at
+        ON audit_human_decisions (turn_id, at);
+    CREATE INDEX IF NOT EXISTS ix_audit_turn_costs_turn
+        ON audit_turn_costs (turn_id);
+    CREATE INDEX IF NOT EXISTS ix_checkpoints_session_created
+        ON checkpoints (session_id, created_at);
+
+    {TRANSCRIPT_ENTRIES_VIEW_SQL};
 
     CREATE OR REPLACE VIEW transcript_conversations AS
     SELECT

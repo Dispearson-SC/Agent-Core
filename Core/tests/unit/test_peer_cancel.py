@@ -63,7 +63,7 @@ def test_an_asker_that_expires_cancels_every_outstanding_peer_ask(
         (fanout.ask("tc-1"), fanout.ask("tc-2"), _approval("tc-h")),
         [fanout.nobody_answers(turn_workflow.THREE_DAYS)],
     )
-    # the peer deadline passes first? no: advance straight to the human's, which is later
+    # The clock jumps straight to the person's three-day deadline, which is later than the peers'.
     outcome = _run()
 
     assert outcome.result is not None and outcome.result.text == "expired"
@@ -117,3 +117,38 @@ def test_cancel_turn_cancels_the_asking_workflow_then_its_open_asks(
     assert cancelled == ("corr-a",), "an answered ask is history; another turn's ask is not ours"
     assert world.cancelled_workflows == ["asker-1", "peer-corr-a"], "asker first, then callees"
     assert world.mailbox.cancelled == {"corr-a": "operator request"}
+
+
+def test_cancelling_a_callee_cascades_to_the_asks_the_callee_made_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1f. A -> B -> C: when A gives up on B, B's own open ask to C must not keep running.
+    B's turn id is its workflow id `peer-corr-1`, and the asks it made are filed under it."""
+    world = fanout.install(
+        monkeypatch, (fanout.ask("tc-1"),), [fanout.nobody_answers(fanout.REPLY_TIMEOUT)]
+    )
+    world.mailbox.turn_of["corr-b-to-c"] = "peer-corr-1"
+    world.mailbox.turn_of["corr-c-to-d"] = "peer-corr-b-to-c"
+
+    _run()
+
+    assert sorted(world.mailbox.cancelled) == ["corr-1", "corr-b-to-c", "corr-c-to-d"]
+    assert world.cancelled_workflows == [
+        "peer-corr-1",
+        "peer-corr-b-to-c",
+        "peer-corr-c-to-d",
+    ], "every level down the chain is cancelled, nearest first"
+
+
+def test_the_cascade_stops_at_an_ask_that_was_already_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = fanout.install(
+        monkeypatch, (fanout.ask("tc-1"),), [fanout.nobody_answers(fanout.REPLY_TIMEOUT)]
+    )
+    world.mailbox.turn_of["corr-b-to-c"] = "peer-corr-1"
+    world.mailbox.answers["corr-b-to-c"] = "C already answered"
+
+    _run()
+
+    assert list(world.mailbox.cancelled) == ["corr-1"], "an answered ask is history"

@@ -142,6 +142,7 @@ NOT EVERY SUSPENSION IS A QUESTION FOR A HUMAN
 from __future__ import annotations
 
 import logging
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -1151,23 +1152,38 @@ async def _step_peer_ask_cancelled(correlation_id: str) -> bool:
 
 
 async def _cancel_callees(correlation_ids: tuple[str, ...], reason: str) -> tuple[str, ...]:
-    """The cascade proper: close each ask's row, then cancel its callee workflow. NOT a step.
+    """The cascade proper: close each ask's row, then cancel its callee workflow, then the asks
+    that callee made in turn (A -> B -> C). NOT a step.
 
     Shared by the replay-safe step below and by `cancel_turn` (called from outside a workflow).
-    Order matters: the row first, so an answer racing the cancel is refused, then the engine.
-    A row that was answered meanwhile is history and its workflow is left alone. A workflow that
-    is already gone, finished or never started is not an error (the row is what protects the
-    asker); nothing here may fail the turn that is cancelling.
+    Order matters: the row first, so an answer racing the cancel is refused, then the engine, then
+    the callee's own open asks (its turn id IS its workflow id `peer-<id>`, and `cancel_open`
+    finds them by it, C1f). Breadth first, nearest callee first, each id once. A row that was
+    answered meanwhile is history and its workflow is left alone. A workflow that is already
+    gone, finished or never started is not an error (the row is what protects the asker);
+    nothing here may fail the turn that is cancelling.
+
+    The one gap: a crash between `cancel_open` returning a callee's asks and the engine cancel of
+    those nested callees leaves their rows cancelled (so nothing they write is accepted) but
+    their workflows running to the end of their own turn. A retried step cannot see them again,
+    because `cancel_open` returns only asks it ended itself.
     """
     seat = _require_peer_seat()
     cancelled: list[str] = []
-    for correlation_id in sorted(correlation_ids):
+    queue = deque(sorted(correlation_ids))
+    seen: set[str] = set()
+    while queue:
+        correlation_id = queue.popleft()
+        if correlation_id in seen:
+            continue
+        seen.add(correlation_id)
         ended = await seat.mailbox.cancel(correlation_id, reason)
         if not ended and not await seat.mailbox.is_cancelled(correlation_id):
             continue  # answered: nothing to cancel
         cancelled.append(correlation_id)
+        callee = peer_workflow_id(correlation_id)
         try:
-            await DBOS.cancel_workflow_async(peer_workflow_id(correlation_id))
+            await DBOS.cancel_workflow_async(callee)
         except Exception:
             _LOG.warning(
                 "could not cancel the callee workflow for peer ask %r; its row is cancelled so "
@@ -1175,6 +1191,7 @@ async def _cancel_callees(correlation_ids: tuple[str, ...], reason: str) -> tupl
                 correlation_id,
                 exc_info=True,
             )
+        queue.extend(await seat.mailbox.cancel_open(callee, reason))
     return tuple(cancelled)
 
 

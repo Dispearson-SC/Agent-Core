@@ -105,7 +105,6 @@ import asyncio
 import logging
 import re
 import secrets
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -209,7 +208,7 @@ _CANCEL_SQL = """
 _CANCEL_OPEN_SQL = """
     UPDATE peer_messages
     SET state = 'cancelled', cancel_reason = %s, cancelled_at = now()
-    WHERE turn_id = %s::uuid AND state IN ('queued', 'delivered') AND answered_at IS NULL
+    WHERE turn_id = %s AND state IN ('queued', 'delivered') AND answered_at IS NULL
     RETURNING correlation_id
 """
 
@@ -418,8 +417,8 @@ class PgAgentMailbox:
             row: tuple[Any, ...] | None = conn.execute(_CLAIM_SQL, (target,)).fetchone()
         if row is None:
             return None
-        # `turn_id` comes back as uuid.UUID from a UUID column; the domain type is the
-        # string form every other table and every use case keys on.
+        # `turn_id` is TEXT (migration 0029); the domain type is the string every other table
+        # and every use case keys on.
         #
         # `from_agent_id` is read as None-or-a-value and NEVER coerced through `str()`:
         # `str(None)` is the string "None", an AgentId no profile has, and an allowlist
@@ -534,13 +533,9 @@ class PgAgentMailbox:
     async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
         """Cancel every open ask of the asking turn; the ids, sorted. See the port.
 
-        `turn_id` is a UUID column: a workflow id that is not one (a callee's `peer-<id>`)
-        cannot have asks in it, so it answers "none" instead of failing the cast.
+        `turn_id` is text (migration 0029): an ordinary turn's UUID and a callee's workflow id
+        `peer-<correlation id>` are both valid, so a callee's own asks can be cancelled too.
         """
-        try:
-            uuid.UUID(turn_id)
-        except ValueError:
-            return ()
         return await asyncio.to_thread(self._cancel_open_sync, turn_id, reason)
 
     def _cancel_open_sync(self, turn_id: str, reason: str) -> tuple[str, ...]:

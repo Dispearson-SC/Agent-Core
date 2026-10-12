@@ -634,7 +634,9 @@ human request is refused at the API before it reaches the workflow. See DECISION
 An ask the asker gives up on - it timed out in a round, or the asking turn expired or was
 cancelled - is cancelled: the mailbox row ends `cancelled` (no later answer is accepted) and the
 callee workflow `peer-<id>` is cancelled. A claim lost before its workflow started is redelivered
-after a lease. See DECISIONS D31 (C3, C4).
+after a lease. A callee may itself ask a third agent (A -> B -> C): the ask is filed under the
+callee's workflow id (`peer_messages.turn_id` is TEXT), and cancelling B cancels the asks B made,
+level by level. See DECISIONS D31 (C3, C4) and D32 (C1f).
 
 ### A2A: shape now, wire protocol in D2
 

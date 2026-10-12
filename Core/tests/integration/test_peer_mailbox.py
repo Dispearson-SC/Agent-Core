@@ -639,4 +639,27 @@ def test_cancel_open_ends_every_open_ask_of_one_turn_and_only_that_turn() -> Non
     open_ones = sorted({first, second} - {answered})
     assert cancelled == tuple(open_ones), "the answered one is history, the other turn untouched"
     assert _state(conninfo, other)[0] in ("queued", "delivered")
-    assert asyncio.run(mailbox.cancel_open("peer-not-a-uuid", "x")) == (), "no UUID, no asks"
+    assert asyncio.run(mailbox.cancel_open("peer-no-such-turn", "x")) == (), "no asks, no ids"
+
+
+# --- C1f: a callee's turn id is `peer-<correlation id>`, not a UUID ------------------------------
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_a_callee_turn_can_itself_ask_a_third_agent_and_its_asks_are_cancellable() -> None:
+    """A -> B -> C. B's turn id is the workflow id `peer-<correlation id>`, which is no UUID; the
+    ask B makes lands in `peer_messages.turn_id` and `cancel_open` must find it again."""
+    conninfo = _migrated_conninfo()
+    mailbox = PgAgentMailbox(conninfo)
+    callee_turn = TurnId(f"peer-{uuid.uuid4()}")
+
+    nested, _ = _ask(conninfo, request_key="tc-nested", turn_id=callee_turn)
+    claimed = asyncio.run(mailbox.claim_next(_ASSISTANT))
+    assert claimed is not None and claimed.correlation_id == nested
+    assert claimed.turn_id == callee_turn, "the asking turn id survives the round trip verbatim"
+
+    other, _ = _ask(conninfo, request_key="tc-nested-2", turn_id=callee_turn)
+    cancelled = asyncio.run(mailbox.cancel_open(str(callee_turn), "asking turn cancelled"))
+
+    assert cancelled == tuple(sorted({nested, other})), "both asks of the callee's turn"
+    assert _state(conninfo, other)[0] == "cancelled"

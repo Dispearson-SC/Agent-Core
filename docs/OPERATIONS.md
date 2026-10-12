@@ -80,7 +80,8 @@ workflow does not exist (D31, C3).
 ## Cancelling a turn that is waiting on peers
 
 `turn_workflow.cancel_turn(turn_id, reason)` cancels the asking workflow, marks every open ask it
-made `cancelled` and cancels the callee workflows `peer-<correlation_id>`. A bare
+made `cancelled` and cancels the callee workflows `peer-<correlation_id>`, then the asks and
+workflows those callees made in turn (A -> B -> C, D32). A bare
 `dbos workflow cancel <turn id>` cancels only that workflow: its callees keep running and their
 answers land on rows nobody reads. To see what a cancel did:
 `SELECT correlation_id, cancel_reason, cancelled_at FROM peer_messages WHERE state = 'cancelled';`
