@@ -16,8 +16,8 @@ chunk) and the run carries on: the chunks are a courtesy copy of text the turn i
 OFF THE MODEL'S PATH (C1q). A chunk is not published inside the model stream: it is queued and a
 background task publishes it, so a slow event store never delays the next token. The queue holds at
 most `max_pending` chunks; text that arrives while it is full is merged into the newest pending
-chunk of the same response (up to the delta bound, past which it is dropped with one log line), so memory
-stays bounded and the text stays whole. The end of every stream flushes what is pending (bounded by
+chunk of the same response (up to the delta bound, past which it is dropped with one log line), so
+memory stays bounded and the text stays whole. The end of every stream flushes what is pending (bounded by
 `flush_timeout`), so a finished response is on the feed before the step moves on.
 
 IDENTITY OF A CHUNK. `detail` is `<run>:<response>:<index>`. `run` is a random id per handler (one
@@ -25,7 +25,8 @@ execution of the model step, so a step that is retried after a crash starts a ne
 REPLACES the abandoned run's in a snapshot instead of being appended to it); `response` counts the
 model responses of the run (a response starts at its part index 0, however many text parts it has;
 a reply after a tool call is a new response, and the reply is the last one); `index` orders the
-chunks of a response. The event id derives from all three, so publishing the same chunk twice (a retry inside one run) writes one row.
+chunks of a response. The event id derives from all three, so publishing the same chunk twice (a
+retry inside one run) writes one row.
 
 ONLY A PERSON'S TURN. The runner attaches this for a turn nobody else owns. A peer's text is another
 agent's input; it is never put on the feed.
