@@ -10,7 +10,7 @@ import psycopg
 import pytest
 
 from agent_core.adapters.driven.persistence_pg import migrations
-from tests.contract.harnesses import A2AHarness, PgHarness, database_name_for
+from tests.contract.harnesses import A2AHarness, MemoryHarness, PgHarness, database_name_for
 from tests.contract.mailbox_conformance import MailboxConformance, MailboxHarness
 from tests.fakes import peer_world
 
@@ -45,3 +45,17 @@ class TestA2AMailbox(MailboxConformance):
     @pytest.fixture
     def harness(self) -> MailboxHarness:
         return A2AHarness()
+
+
+class TestInMemoryMailbox(MailboxConformance):
+    @pytest.fixture
+    def harness(self) -> MailboxHarness:
+        return MemoryHarness()
+
+
+class TestControlledMailboxIsTransparent(MailboxConformance):
+    """The fault-injection wrapper with no fault planned changes nothing."""
+
+    @pytest.fixture
+    def harness(self) -> MailboxHarness:
+        return MemoryHarness(controlled=True)

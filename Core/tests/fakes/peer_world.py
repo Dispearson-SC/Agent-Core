@@ -47,6 +47,7 @@ from agent_core.domain.turn import (
     TurnResult,
     UserInput,
 )
+from tests.fakes.controlled_mailbox import ControlledMailbox  # noqa: E402
 
 ADMIN_CONNINFO = os.environ.get(
     "AGENT_CORE_TEST_ADMIN_DATABASE_URL",
@@ -196,6 +197,10 @@ class Resume:
     def __init__(self) -> None:
         self.payloads: dict[str, list[object]] = {}
         self.calls: list[tuple[str, tuple[tuple[str, bool], ...]]] = []  # (profile, decisions)
+        # How often `execute` was entered, and which entries 'die' inside it (never return). A
+        # call that dies is not in `calls`: that list is what COMPLETED.
+        self.entered = 0
+        self.die_on_entry: set[int] = set()
 
     async def execute(
         self,
@@ -206,6 +211,9 @@ class Resume:
         *,
         caller: CallerIdentity,
     ) -> TurnOutcome:
+        self.entered += 1
+        if self.entered in self.die_on_entry:
+            await asyncio.Event().wait()
         self.payloads.setdefault(profile_id, []).extend(r.payload for r in resolutions)
         decisions = tuple((str(r.tool_call_id), r.approved) for r in resolutions)
         self.calls.append((profile_id, decisions))
@@ -231,19 +239,27 @@ class Channel:
 @dataclass
 class World:
     database: str
-    mailbox: PgAgentMailbox
+    mailbox: Any  # the Postgres adapter, or `ControlledMailbox` around it (`bind(controlled=True)`)
     start: Start
     resume: Resume = field(default_factory=Resume)
     gateway: Gateway = field(default_factory=Gateway)
 
 
 def bind(
-    monkeypatch: pytest.MonkeyPatch, database: str, *, c_waits_for_a_human: bool = False
+    monkeypatch: pytest.MonkeyPatch,
+    database: str,
+    *,
+    c_waits_for_a_human: bool = False,
+    controlled: bool = False,
 ) -> World:
-    """Bind the doubles and the Postgres mailbox as the workflow's dependencies."""
+    """Bind the doubles and the Postgres mailbox as the workflow's dependencies.
+
+    `controlled=True` wraps the mailbox in `ControlledMailbox`, for both the workflow and the
+    worker, so a test can record its calls and inject faults (`world.mailbox.fail(...)`)."""
+    pg = PgAgentMailbox(conninfo(database))
     world = World(
         database=database,
-        mailbox=PgAgentMailbox(conninfo(database)),
+        mailbox=ControlledMailbox(pg) if controlled else pg,
         start=Start(c_waits_for_a_human=c_waits_for_a_human),
     )
     monkeypatch.setattr(
@@ -254,7 +270,7 @@ def bind(
             channels=ChannelRegistry((("http", Channel()),)),
             human_gateway=cast("Any", world.gateway),
             resume_turn=cast("Any", world.resume),
-            peers=turn_workflow.PeerSeat(mailbox=world.mailbox, profiles=profiles()),
+            peers=turn_workflow.PeerSeat(mailbox=cast("Any", world.mailbox), profiles=profiles()),
         ),
     )
     return world
@@ -291,6 +307,24 @@ async def status(workflow_id: str) -> str | None:
 
     found = await DBOS.get_workflow_status_async(workflow_id)
     return None if found is None else found.status
+
+
+async def recorded_steps(workflow_id: str) -> list[str]:
+    """The names of the steps DBOS has RECORDED for a workflow, in order."""
+    from dbos import DBOS
+
+    found = await DBOS.list_workflow_steps_async(workflow_id, load_output=False)
+    return [step["function_name"] for step in found]
+
+
+async def until_step_recorded(workflow_id: str, step: str) -> None:
+    """Wait until `step` is in the workflow's operation log, so a kill after it is a kill AFTER
+    that step committed (a replay reads it back instead of running it again)."""
+    deadline = asyncio.get_running_loop().time() + DEADLINE
+    while step not in await recorded_steps(workflow_id):
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(f"timed out waiting for {step} to be recorded for {workflow_id}")
+        await asyncio.sleep(POLL)
 
 
 async def result_of(workflow_id: str) -> TurnOutcome:

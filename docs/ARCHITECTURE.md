@@ -864,3 +864,17 @@ Pydantic AI's `FunctionModel`; no network, no API key. Plug it into the real
 
 Example: `tests/unit/test_scripted_peer_roundtrip.py` (two parallel `ask_peer` calls, one
 resume). The helper's own tests are `tests/unit/test_scripted_model.py`.
+
+## Testing: the mailbox kit and restart scenarios
+
+The peer mailbox has the same kind of kit (DECISIONS D32, C7):
+
+- `tests/fakes/memory_mailbox.py` - a full in-memory mailbox (port plus claim and lease).
+- `tests/fakes/controlled_mailbox.py` - wraps any mailbox: records calls and plans `fail`,
+  `hang` (a `Gate`) and `delay` on the Nth call of a verb, before or after the verb took effect.
+- `tests/contract/mailbox_conformance.py` - one suite of what every adapter must do, run against
+  the memory mailbox, `PgAgentMailbox` and `A2AAgentMailbox`. A new adapter passes it by adding a
+  harness and a three-line subclass.
+- `tests/integration/test_peer_restarts.py` - kill and relaunch a real DBOS between the post
+  and the claim, the claim and the workflow start, the answer and the wake, and during the
+  resume; each delivers exactly once.

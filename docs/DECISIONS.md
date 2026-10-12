@@ -1245,3 +1245,42 @@ expired still produced an answer instead of an expiry). Now `_drive_turn` sends 
 `agent-core-turns.3` -> `.4` (ONE bump for the whole batch; C1f, C1g, C1h and C5 changed no step
 name or order). A turn suspended on a person under `.3` is stranded, not recovered: drain it or
 cancel it (OPERATIONS.md). Peer asks stranded the same way are rerun under `.4` by the lease (C1g).
+
+**C7 · crash/restart test kit.** Pi's `ControlledStorage` (a storage you can hold, fail and
+crash) and OpenCode's `restart.ts` tests were the models. Four pieces, all under `Core/tests/`:
+
+- `tests/fakes/memory_mailbox.py`: `InMemoryAgentMailbox`, a full in-memory implementation of the
+  port AND the answering side's queue (claim, lease with generation, cancel), with an injectable
+  clock. It is the reference behaviour; a test that needs a mailbox and not a database uses it.
+- `tests/fakes/controlled_mailbox.py`: `ControlledMailbox(inner)` records every call
+  (`calls`, `count(verb)`) and plans faults per verb: `fail(verb, error, on_call=, times=,
+  after=)`, `hang(verb, ...) -> Gate` and `delay(verb, seconds, ...)`. `after=True` lets the
+  verb take effect on the inner mailbox first and then fails or hangs, the shape of a lost
+  acknowledgement and of a process killed right after a commit. `ProcessDied` is a
+  `BaseException` so no `except Exception` under test can swallow it.
+- `tests/contract/mailbox_conformance.py`: ONE conformance suite for the port and the queue side,
+  run by `tests/contract/test_mailbox_conformance.py` against the in-memory mailbox, the same
+  mailbox behind `ControlledMailbox` with no fault (proving the wrapper is transparent),
+  `PgAgentMailbox` (disposable database) and `A2AAgentMailbox` (an in-process peer on
+  `httpx.MockTransport`; the queue-side tests are skipped for it, its transport is the wire).
+  It pins: enqueue idempotency, answer-token rules and first-answer-wins, unknown ids as silent
+  no-ops, the untrusted wrapping, cancel semantics (including a callee's non-UUID turn id), claim
+  exclusivity and order, and the lease (only a stale, unanswered, delivered row nobody is
+  running; `retire` before the requeue; the generation; an `exists` that raises leaves the row).
+  `tests/contract/test_attempt_ledger.py` does the same for the C5 ledger.
+- `tests/fakes/peer_world.py` + `tests/integration/test_peer_restarts.py`: real DBOS and the
+  Postgres mailbox behind `ControlledMailbox`. A death is a gate that is never released plus
+  `DBOS.destroy()` under it (the workflows stay `PENDING`); the next phase relaunches the engine
+  on the same databases and DBOS recovers them. `dying_process` keeps the teardown from writing
+  a "failed" answer a killed process could not have written. Scenarios, each asserting that the
+  ask was posted once, the callee started once, the answer recorded once and the asker's resume
+  completed once: a kill between the post and the claim; between the claim and the workflow start
+  (recovered by the lease); between the answer and the wake (B's recovery sends the wake, A is
+  woken once); during the asker's resume (the interrupted step runs again, and only that one
+  finishes).
+
+What the suite found, kept honest: the two adapters differ on one point, a word-for-word re-ask
+under a NEW tool call id (Postgres folds it into the first row, A2A leaves it to the peer's
+`messageId` de-duplication), so the suite does not assert it. And a replayed asking step posts
+again (idempotently) if the engine dies between the write and the recording of the step; the
+restart test therefore waits for the step to be recorded before it kills.

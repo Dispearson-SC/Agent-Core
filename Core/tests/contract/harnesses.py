@@ -16,6 +16,8 @@ from agent_core.adapters.driven.peers.mailbox_a2a import A2AAgentMailbox
 from agent_core.domain.peers import AgentId
 from agent_core.domain.turn import TurnId
 from tests.contract.mailbox_conformance import LEASE, POLICY, SESSION, TARGET
+from tests.fakes.controlled_mailbox import ControlledMailbox
+from tests.fakes.memory_mailbox import InMemoryAgentMailbox
 
 ASKER = AgentId("asking-agent")
 
@@ -120,6 +122,49 @@ class A2AHarness:
     def callee_token(self, correlation_id: str) -> str | None:
         message = self._messages.get(correlation_id)
         return None if message is None else str(message["metadata"]["answer_token"])
+
+
+class MemoryHarness:
+    """`InMemoryAgentMailbox`, optionally behind a `ControlledMailbox` with no fault planned.
+
+    The wrapped variant proves the test kit is transparent: whatever a restart test does through
+    it is what the bare mailbox would have done.
+    """
+
+    supports_queue = True
+
+    def __init__(self, *, controlled: bool = False) -> None:
+        self.inner = InMemoryAgentMailbox()
+        self.mailbox: Any = ControlledMailbox(self.inner) if controlled else self.inner
+
+    async def ask(
+        self, question: str, *, turn_id: str = "turn-1", request_key: str = "tc-1"
+    ) -> str:
+        return await self.mailbox.ask(
+            POLICY,
+            TARGET,
+            question,
+            from_session=SESSION,
+            turn_id=TurnId(turn_id),
+            hop=0,
+            asker=ASKER,
+            request_key=request_key,
+        )
+
+    def callee_token(self, correlation_id: str) -> str | None:
+        return self.inner.token_of(correlation_id)
+
+    async def claim(self, target: AgentId = TARGET) -> Any:
+        return await self.mailbox.claim_next(target)
+
+    async def age(self, correlation_id: str, by: timedelta) -> None:
+        self.inner.age(correlation_id, by)
+
+    async def reclaim(self, exists: Any, retire: Any = None) -> tuple[str, ...]:
+        return await self.mailbox.reclaim_stale(TARGET, lease=LEASE, exists=exists, retire=retire)
+
+    def redeliveries(self, correlation_id: str) -> int:
+        return int(self.inner.rows[correlation_id].redeliveries)
 
 
 def database_name_for(suffix: str) -> str:
