@@ -164,6 +164,7 @@ from agent_core.application.compact_context import CompactContext
 from agent_core.application.resume_turn import ResolvedTool, ResumeTurn
 from agent_core.application.start_turn import StartTurn
 from agent_core.domain.compaction import ContextState
+from agent_core.domain.events import EventKind, EventOwner, ProgressEvent, progress_event_id
 from agent_core.domain.media import MediaRef
 from agent_core.domain.peer_result import PeerResult, PeerStatus
 from agent_core.domain.peers import (
@@ -195,6 +196,7 @@ from agent_core.domain.turn import (
     UserInput,
 )
 from agent_core.ports.agent_mailbox import AgentMailbox
+from agent_core.ports.event_publisher import EventPublisher
 from agent_core.ports.human_gateway import HumanGateway
 
 __all__ = [
@@ -710,6 +712,11 @@ class TurnWorkflowDependencies:
     # a missing table. `max_attempts` is `Settings.max_turn_attempts`.
     attempts: AttemptLedger | None = None
     max_attempts: int = DEFAULT_MAX_TURN_ATTEMPTS
+
+    # C21 (D52). Where `started`, `finished` and `failed` go. `None` publishes nothing and costs
+    # nothing: the steps are in the log either way (so the replay shape does not depend on
+    # configuration), they just have nobody to tell.
+    events: EventPublisher | None = None
 
 
 _dependencies: TurnWorkflowDependencies | None = None
@@ -2308,7 +2315,85 @@ class _TurnEnd:
     closed: bool = False
 
 
+@DBOS.step()
+async def _step_progress(
+    kind: EventKind,
+    turn_id: TurnId,
+    request: TurnRequest,
+    started_at: datetime | None = None,
+    detail: str | None = None,
+) -> datetime:
+    """Tell the event feed a turn started, finished or failed (C21, D52). Returns the time of the
+    event, which the caller hands back for the elapsed time of the closing one.
+
+    A STEP, for the reason every side effect is: recorded, so a replay neither publishes again nor
+    reads another clock (the elapsed time of `finished` is computed from the RECORDED start). The
+    event id is deterministic as well, so even a step that ran twice across a crash leaves one row.
+    FAILS OPEN: no publisher bound, or one that raises, costs the event and never the turn.
+    """
+    at = datetime.now(UTC)
+    publisher = _require_dependencies().events
+    if publisher is None:
+        return at
+    owner = request.owner
+    try:
+        await publisher.publish(
+            ProgressEvent(
+                event_id=progress_event_id(str(turn_id), kind),
+                kind=kind,
+                tenant_id=str(request.session.tenant_id),
+                session_id=str(request.session.session_id),
+                turn_id=str(turn_id),
+                agent=request.profile_id,
+                at=at,
+                owner=(
+                    None
+                    if owner is None
+                    else EventOwner(
+                        root_turn_id=owner.root_turn_id,
+                        asker_turn_id=owner.asker_turn_id,
+                        asker=owner.asker,
+                        call=owner.call,
+                    )
+                ),
+                elapsed_ms=(
+                    None
+                    if started_at is None
+                    else max(0, int((at - started_at).total_seconds() * 1000))
+                ),
+                detail=detail,
+            )
+        )
+    except Exception:
+        _LOG.warning(
+            "could not publish the %s event of turn %r", kind.value, turn_id, exc_info=True
+        )
+    return at
+
+
 async def _drive_turn(request: TurnRequest) -> _TurnEnd:
+    """The turn itself, durably, with its progress events (C21): `started` first, then the turn,
+    then `finished` (also when it gave up: `detail="closed"`) or `failed` and the error re-raised.
+
+    The turn is `_run_turn` below; this wrapper only brackets it, so the replay shape of the turn
+    itself is unchanged and the two events are two recorded steps around it.
+    """
+    turn_id = await _step_new_turn_id()
+    started_at = await _step_progress(EventKind.STARTED, turn_id, request)
+    try:
+        end = await _run_turn(turn_id, request)
+    except Exception as error:
+        await _step_progress(
+            EventKind.FAILED, turn_id, request, started_at, detail=type(error).__name__
+        )
+        raise
+    await _step_progress(
+        EventKind.FINISHED, turn_id, request, started_at, detail="closed" if end.closed else None
+    )
+    return end
+
+
+async def _run_turn(turn_id: TurnId, request: TurnRequest) -> _TurnEnd:
     """The turn itself, durably: start it, then collect or wait for whatever it suspends on,
     resume, and repeat until it finishes or gives up.
 
@@ -2319,7 +2404,6 @@ async def _drive_turn(request: TurnRequest) -> _TurnEnd:
     it runs inside whichever workflow calls it, and its decisions are functions of step results
     (R1-R5 in `run_turn_workflow`).
     """
-    turn_id = await _step_new_turn_id()
     outcome = await _step_start(turn_id, request)
 
     rounds = 0

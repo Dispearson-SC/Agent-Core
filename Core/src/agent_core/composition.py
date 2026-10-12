@@ -172,6 +172,8 @@ from psycopg_pool import ConnectionPool
 from agent_core.adapters.driven.agent_pydantic.runner import PydanticAgentRunner
 from agent_core.adapters.driven.context.engine import LadderContextEngine
 from agent_core.adapters.driven.context.summariser import ModelSummariser
+from agent_core.adapters.driven.events_pg.audit_events import EventingAuditSink
+from agent_core.adapters.driven.events_pg.publisher import PgEventPublisher
 from agent_core.adapters.driven.human.gateway import ChannelHumanGateway
 from agent_core.adapters.driven.knowledge_pg.admin import PgKnowledgeAdmin
 from agent_core.adapters.driven.llm_litellm.gateway import LiteLLMGateway
@@ -254,6 +256,8 @@ from agent_core.domain.turn import (
 )
 from agent_core.domain.typed_answer import AnswerSchemaError
 from agent_core.ports.agent_mailbox import AgentMailbox
+from agent_core.ports.audit_sink import AuditSink
+from agent_core.ports.event_publisher import EventPublisher
 from agent_core.ports.knowledge_admin import KnowledgeAdmin
 from agent_core.ports.transcript_reader import TranscriptReader
 
@@ -503,7 +507,11 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # peer workflow's input, and the peer workflow records `_step_background_follow_up` for a background
 # ask. A turn or peer workflow suspended under .8 is stranded on purpose (drain first,
 # OPERATIONS.md). Nothing was deployed under .3-.8.
-PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.9"
+# .9 -> .10 with D52 (C21-C23, ONCE for the events batch): every turn (root and peer) records
+# `_step_progress(started)` right after its turn id and `_step_progress(finished|failed)` after the
+# turn, so a turn suspended under .9 replays into a different sequence. Stranded on purpose (drain
+# first, OPERATIONS.md). Nothing was deployed under .3-.9.
+PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.10"
 
 # C5 (D32). The default of `Settings.max_turn_attempts` is `DEFAULT_MAX_TURN_ATTEMPTS`, defined once
 # in `turn_workflow` (where the budget is enforced) and imported above; D33 removed the second copy.
@@ -1086,7 +1094,9 @@ class Container:
     model: LiteLLMGateway
     policy: PgToolPolicy
     store: PgConversationStore
-    audit: PgAuditSink
+    audit: AuditSink
+    # C21 (D52). Where progress events go: the application database, never the audit pool.
+    events: EventPublisher
     # One runner for the process. `AgentRunner.run` takes the `turn_id` as its first
     # parameter (docs/TASKS.md#t-f1-05), so whoever runs a turn passes the id it generated
     # inside its DBOS step and nothing here is per-turn. A container-level binding would
@@ -1777,6 +1787,7 @@ def bind_turn_workflow(container: Container) -> None:
             # limit is `Settings.max_turn_attempts`.
             attempts=attempt_ledger_for(container.domain_pool),
             max_attempts=container.settings.max_turn_attempts,
+            events=container.events,
         )
     )
 
@@ -1812,10 +1823,16 @@ def build_container(
     # The argument policy is the shipped built-ins plus what each REGISTERED tools package
     # declares (`AUDIT_ALLOW` / `AUDIT_PRESENCE_ONLY`), so a vertical never edits the sink.
     audit_allow, audit_presence = collect_audit_policy(TOOL_PACKAGES)
-    audit = PgAuditSink(
-        PoolConnections(audit_pool),
-        argument_allowlist=audit_allow,
-        argument_presence_only=audit_presence,
+    # C21 (D52). `tool_called` events ride on the audit trail: the decorator writes the audit row
+    # first and then tells the feed, and a feed that fails never fails the audited call.
+    events = PgEventPublisher(resolved.app_conninfo)
+    audit = EventingAuditSink(
+        PgAuditSink(
+            PoolConnections(audit_pool),
+            argument_allowlist=audit_allow,
+            argument_presence_only=audit_presence,
+        ),
+        events,
     )
     # t-f11-18. The READ side of the same trail, through the SAME pool - never
     # `PoolConnections(domain_pool)`. The sink is on its own pool so an audit write
@@ -1914,6 +1931,7 @@ def build_container(
         model=model,
         policy=policy,
         audit=audit,
+        events=events,
         audit_reader=audit_reader,
         transcripts=transcripts,
         knowledge_admin=knowledge_admin,

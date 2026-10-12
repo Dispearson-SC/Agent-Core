@@ -347,6 +347,11 @@ def install(
     monkeypatch.setattr(turn_workflow, "_step_new_turn_id", new_turn_id)
     monkeypatch.setattr(turn_workflow, "_step_start", start_step or start)
     monkeypatch.setattr(turn_workflow, "_step_publish", noop)
+    # C21. The progress step runs its real body (no DBOS context needed); with no publisher bound it
+    # publishes nothing, and a test that wants the events binds a recorder on the dependencies.
+    monkeypatch.setattr(
+        turn_workflow, "_step_progress", inspect.unwrap(turn_workflow._step_progress)
+    )
     monkeypatch.setattr(turn_workflow, "_step_deliver", noop)
     monkeypatch.setattr(turn_workflow, "_step_compact", noop)
     monkeypatch.setattr(turn_workflow, "_step_expire", expire)

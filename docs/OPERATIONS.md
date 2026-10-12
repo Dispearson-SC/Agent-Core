@@ -5,7 +5,7 @@ changes. Decisions behind them are in `docs/DECISIONS.md`.
 
 ## Bumping the DBOS application version
 
-`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.9`) is bumped when a
+`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.10`) is bumped when a
 change makes turns that are already in flight incompatible with the new code: a workflow step
 added, removed, renamed or reordered, or a changed workflow argument (D28 took `.1` to `.2`;
 D31 took `.2` to `.3`: the peer job gained `answer_token` and the round gained the cancel
@@ -165,6 +165,25 @@ enqueue failed: the callee workflow is in `ERROR`), the answer is on the row
 same holds for a callee given up as poison: its failure answer is recorded, and a follow-up that
 could not be enqueued is logged at `ERROR` ("could not enqueue the follow-up for poisoned background
 ask <handle>").
+
+## Deploying progress events (`.9` -> `.10`, D52)
+
+Every turn now records `_step_progress` steps (`started` after the turn id, `finished` or `failed`
+after the turn), so a turn or callee suspended under `.9` replays into a different step sequence and
+is stranded like any stale-version workflow: drain before deploying `.10` (`stranded-turns` against
+the OLD build must report 0), deploy, run `stranded-turns` again and cancel what it lists. Migration
+`0037` (`turn_events`) is additive and safe under a running `.9` build. Nothing was deployed under
+`.3`-`.9` on this branch, so the bumps collapse into one before the first release.
+
+### Progress events: looking and cleaning
+
+The events of one tree: `SELECT seq, at, turn_id, agent, kind, tool, elapsed_ms, detail FROM
+turn_events WHERE tenant_id = '<tenant>' AND root_turn_id = '<root turn>' ORDER BY seq;`
+
+Nothing deletes events. Keep what a feed or an investigation needs and trim the rest on your own
+schedule: `DELETE FROM turn_events WHERE at < now() - interval '30 days';` (a feed that reconnects
+after its events were trimmed gets a snapshot of whatever remains, C22). A failing event store is
+logged as `could not publish the <kind> event of turn ...` at WARNING and never fails a turn.
 
 ## Peer redelivery lease
 

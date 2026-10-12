@@ -2034,3 +2034,42 @@ Four tools, the Pi example-23 set, granted with `peers.allow_background`: `peer_
 - **Replay shape: unchanged.** No step was added, renamed or reordered (`_step_ask_peers` records
   a result of the same shape); the pin stays `.9`.
 
+## D52 · Agent-comms v2: progress events (C21)
+
+Turns publish what they are doing, so a UI, a voice front-end or an operator can follow a tree of
+agents without polling tables.
+
+- **Four facts, one port.** `EventPublisher.publish(ProgressEvent)` (driven port,
+  `ports/event_publisher.py`). Kinds: `started`, `tool_called`, `finished`, `failed`. An event
+  carries tenant, session, turn, agent (profile), time, the OWNER chain of the turn
+  (`EventOwner`: root turn, asking turn, asking profile, ask handle; none for a turn a person
+  started), the tool NAME and the policy verdict on `tool_called`, `elapsed_ms` on
+  `finished`/`failed` and a short `detail` (`closed` when a turn gave up, the exception CLASS on
+  `failed`). No model text, no tool arguments, no exception message: an event is safe to show.
+- **Published from every turn, not only peers.** The brackets sit in `_drive_turn`, which both
+  `run_turn_workflow` and `run_peer_turn_workflow` run, so a root turn and every callee of its tree
+  emit the same facts and the feed of a root (C22) shows all of them. Subagents (W5) reuse the
+  same helper.
+- **Steps, not side effects in the body.** `_step_progress(started)` right after the turn id,
+  `_step_progress(finished|failed)` after the turn. A step is recorded, so a replay publishes
+  nothing again and the elapsed time of the closing event is computed from the RECORDED start; the
+  event id is `uuid5(turn_id, kind)` and the store keeps one row per id, so even a step re-run
+  across a crash leaves one event. The steps are always in the log (a missing publisher just
+  skips the I/O), so the replay shape does not depend on configuration. **Replay shape: `.9` ->
+  `.10`, ONCE for C21-C23** (OPERATIONS "Deploying progress events").
+- **Fail open.** A publisher that is absent or raises costs the event, logged at WARNING, never
+  the turn (tested). Events are observability, the audit trail stays the record.
+- **`tool_called` rides the audit trail.** `EventingAuditSink` decorates `AuditSink`: the audit row
+  is written first, then the event. The runner's policy hook already reports every call to the
+  sink before it runs, so no runner or port changed. The hook holds neither the chain nor the
+  profile, so the Postgres adapter files such an event under the chain of the turn's `started`
+  event (one indexed lookup). A model step is recorded and not re-run on replay, so a call is
+  published once per execution of the step (at least once across a crash, like its audit row).
+- **Postgres: a table plus `NOTIFY` of the sequence.** Migration `0037` `turn_events`
+  (`seq BIGSERIAL` the total order, `event_id` UNIQUE, indexed by `(tenant_id, root_turn_id,
+  seq)`). One statement inserts with `ON CONFLICT DO NOTHING` and calls `pg_notify('turn_events',
+  seq)` only for a row really written; the payload is the number alone (far below NOTIFY's 8000
+  bytes), a listener reads the row. The table also serves replay and snapshots for C22.
+- **Not done:** retention (rows are never deleted; OPERATIONS gives the statement), publishing from
+  the poison path (a given-up turn publishes no `failed`), events for compaction or delivery.
+

@@ -737,6 +737,14 @@ that carries a background answer back) may not start another background ask or m
 background -> follow-up -> background chain cannot run on (D51); the cap, a handle lookup and the
 `peer_list` "older" figure are read from the store, never from the newest-50 listing.
 
+**Progress events (C21, D52).** Every turn, root or callee, records `started` and `finished` /
+`failed` steps around itself (`_step_progress`, in `_drive_turn`) and every tool call becomes a
+`tool_called` event through `EventingAuditSink` (audit row first). They go through the driven port
+`EventPublisher` to `PgEventPublisher`: one row in `turn_events` (migration 0037, idempotent by
+`event_id`, `seq` the order) and a `NOTIFY turn_events, '<seq>'`. Each event carries the owner chain
+(root turn, asker turn, asker profile, ask handle) and timing, never model text or arguments. A
+publisher that fails costs the event, not the turn.
+
 **Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
 and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the
 two-sided gate), the caller's policy rules and each callee profile's `description`. A denied,
