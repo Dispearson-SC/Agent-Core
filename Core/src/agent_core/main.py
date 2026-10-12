@@ -692,8 +692,7 @@ def run_console(arguments: argparse.Namespace) -> None:
         )
         asyncio.run(console.run())
     finally:
-        container.audit_pool.close()
-        container.domain_pool.close()
+        container.close_pools()
 
 
 def run_peer_worker_process(arguments: argparse.Namespace) -> None:
@@ -809,8 +808,7 @@ def run_peer_worker_process(arguments: argparse.Namespace) -> None:
         # closes the pools, which is the whole reason this is caught rather than unwound.
         print("[peer-worker] stopped.")
     finally:
-        container.audit_pool.close()
-        container.domain_pool.close()
+        container.close_pools()
 
 
 def _argument_parser() -> argparse.ArgumentParser:
@@ -989,8 +987,7 @@ def serve() -> None:
             port=int(os.environ.get(_PORT_ENV, "8000")),
         )
     finally:
-        container.audit_pool.close()
-        container.domain_pool.close()
+        container.close_pools()
 
 
 if __name__ == "__main__":  # pragma: no cover - `python -m agent_core.main [console]`

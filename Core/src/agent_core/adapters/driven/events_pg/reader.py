@@ -8,19 +8,22 @@ Ports:   ports/event_reader.py
 caller that holds another tenant's root id reads nothing. `after` is the broker's own read and is
 never reachable from a request.
 
-The wake-up opens one dedicated autocommit connection per `wait`, LISTENs and returns on the first
-notification or the timeout. It is only a hint (the broker re-reads by sequence), so a connection
-error is swallowed after a short pause and the poll interval covers it.
+Reads and the publisher's writes go through `EventConnections` (a small pool opened on first use).
+The wake-up holds ONE dedicated autocommit connection for the life of the process, LISTENing, and
+reconnects after an error. It is only a hint (the broker re-reads by sequence), so a connection
+error costs latency (the poll interval covers it), never events.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Any
 
 import psycopg
 
+from agent_core.adapters.driven.events_pg.connections import EventConnections
 from agent_core.adapters.driven.events_pg.publisher import NOTIFY_CHANNEL
 from agent_core.domain.events import (
     EventKind,
@@ -33,6 +36,8 @@ from agent_core.domain.events import (
 __all__ = ["PgEventReader", "PgEventWakeup"]
 
 _LOG = logging.getLogger(__name__)
+
+_RECONNECT_SECONDS = 1.0
 
 _COLUMNS = """
     SELECT seq, event_id, tenant_id, session_id, turn_id, root_turn_id, kind, agent,
@@ -81,10 +86,14 @@ def _stored(row: tuple[Any, ...]) -> StoredEvent:
 
 
 class PgEventReader:
-    __slots__ = ("_conninfo",)
+    """Reads through `EventConnections` (a conninfo builds a pool of its own)."""
 
-    def __init__(self, conninfo: str) -> None:
-        self._conninfo = conninfo
+    __slots__ = ("_connections",)
+
+    def __init__(self, connections: EventConnections | str) -> None:
+        self._connections = (
+            EventConnections(connections) if isinstance(connections, str) else connections
+        )
 
     async def after(self, seq: int, *, limit: int = 500) -> tuple[StoredEvent, ...]:
         return await asyncio.to_thread(self._fetch, _AFTER_SQL, (seq, limit))
@@ -93,7 +102,7 @@ class PgEventReader:
         return await asyncio.to_thread(self._tree, tenant_id, root_turn_id, limit)
 
     def _tree(self, tenant_id: str, root_turn_id: str, limit: int) -> EventWindow:
-        with psycopg.connect(self._conninfo) as conn:
+        with self._connections() as conn:
             rows = conn.execute(_TREE_SQL, (tenant_id, root_turn_id, limit)).fetchall()
         events = tuple(_stored(row) for row in reversed(rows))
         total = 0 if not rows else int(rows[0][-1])
@@ -103,30 +112,58 @@ class PgEventReader:
         return await asyncio.to_thread(self._latest)
 
     def _fetch(self, sql: str, params: tuple[Any, ...]) -> tuple[StoredEvent, ...]:
-        with psycopg.connect(self._conninfo) as conn:
+        with self._connections() as conn:
             rows = conn.execute(sql, params).fetchall()
         return tuple(_stored(row) for row in rows)
 
     def _latest(self) -> int:
-        with psycopg.connect(self._conninfo) as conn:
+        with self._connections() as conn:
             row = conn.execute(_LATEST_SQL).fetchone()
         return 0 if row is None else int(row[0])
 
 
 class PgEventWakeup:
-    __slots__ = ("_conninfo",)
+    """One long-lived LISTEN connection, held by a background task that sets an event on every
+    notification. `wait` returns when the event is set (a notification arrived since the last
+    wait, even between two waits) or after `timeout`. The listener starts on the first `wait`,
+    reconnects after a failure (and wakes the broker, which re-reads by sequence either way), and
+    stops with `close()`."""
+
+    __slots__ = ("_conninfo", "_heard", "_listener")
 
     def __init__(self, conninfo: str) -> None:
         self._conninfo = conninfo
+        self._heard = asyncio.Event()
+        self._listener: asyncio.Task[None] | None = None
 
     async def wait(self, timeout: float) -> None:
+        if self._listener is None or self._listener.done():
+            self._listener = asyncio.create_task(self._listen())
         try:
-            async with await psycopg.AsyncConnection.connect(
-                self._conninfo, autocommit=True
-            ) as conn:
-                await conn.execute(f"LISTEN {NOTIFY_CHANNEL}")
-                async for _ in conn.notifies(timeout=timeout, stop_after=1):
-                    return
-        except Exception:
-            _LOG.warning("could not listen for progress events; polling instead", exc_info=True)
-            await asyncio.sleep(min(timeout, 1.0))
+            await asyncio.wait_for(self._heard.wait(), timeout)
+        except TimeoutError:
+            pass
+        self._heard.clear()
+
+    async def close(self) -> None:
+        listener, self._listener = self._listener, None
+        if listener is not None:
+            listener.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await listener
+
+    async def _listen(self) -> None:
+        while True:
+            try:
+                async with await psycopg.AsyncConnection.connect(
+                    self._conninfo, autocommit=True
+                ) as conn:
+                    await conn.execute(f"LISTEN {NOTIFY_CHANNEL}")
+                    self._heard.set()  # whatever came while we were not listening: re-read
+                    async for _ in conn.notifies():
+                        self._heard.set()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOG.warning("could not listen for progress events; polling instead", exc_info=True)
+                await asyncio.sleep(_RECONNECT_SECONDS)

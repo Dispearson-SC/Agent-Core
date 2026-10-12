@@ -18,8 +18,7 @@ from __future__ import annotations
 
 import asyncio
 
-import psycopg
-
+from agent_core.adapters.driven.events_pg.connections import EventConnections
 from agent_core.domain.events import EventKind, ProgressEvent
 
 __all__ = ["NOTIFY_CHANNEL", "PgEventPublisher"]
@@ -44,10 +43,15 @@ _INSERT_SQL = """
 
 
 class PgEventPublisher:
-    __slots__ = ("_conninfo",)
+    """`conninfo` builds a pool of its own; pass the `EventConnections` that the reader uses to
+    share one (the composition root does)."""
 
-    def __init__(self, conninfo: str) -> None:
-        self._conninfo = conninfo
+    __slots__ = ("_connections",)
+
+    def __init__(self, connections: EventConnections | str) -> None:
+        self._connections = (
+            EventConnections(connections) if isinstance(connections, str) else connections
+        )
 
     async def publish(self, event: ProgressEvent) -> None:
         await asyncio.to_thread(self._publish_sync, event)
@@ -59,7 +63,7 @@ class PgEventPublisher:
         asker = event.owner.asker if event.owner is not None else None
         call = event.owner.call if event.owner is not None else None
         session = event.session_id
-        with psycopg.connect(self._conninfo) as conn:
+        with self._connections() as conn:
             if event.kind is EventKind.TOOL_CALLED and not root:
                 known = conn.execute(_CHAIN_SQL, (event.turn_id,)).fetchone()
                 if known is not None:

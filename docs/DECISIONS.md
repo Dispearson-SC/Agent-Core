@@ -2160,3 +2160,12 @@ The review of C21-C23 approved them with advisories; this closes them.
   window a turn whose `started` was cut is still shown (running until a `finished` or `failed`
   says otherwise), so a partial view is never reported settled; `tools_called` is then a lower
   bound. `open_asks` counts only the asks that were read.
+- **No connection per call.** The publisher (one write per tool call), the feed's reader and the
+  graph reader check connections out of `EventConnections`, one small pool (`min 1`, `max 4`,
+  5 s checkout) of their own, opened on first use so building the container still connects to
+  nothing. It is not the domain pool or the audit pool: an event is a courtesy copy and must
+  neither queue behind a turn's connections nor take one. The wake-up holds ONE long-lived LISTEN
+  connection in a background task that sets an event on every notification, so a notification
+  published between two waits is no longer lost and a wait costs no connect; it reconnects after
+  an error. `Container.close_pools()` closes the three pools and the feed's broker closes the
+  listener when it stops.

@@ -12,8 +12,7 @@ from __future__ import annotations
 
 import asyncio
 
-import psycopg
-
+from agent_core.adapters.driven.events_pg.connections import EventConnections
 from agent_core.adapters.driven.peers.mailbox import background_state
 from agent_core.domain.task_graph import AskRecord, AskWindow
 
@@ -32,16 +31,21 @@ _SQL = """
 
 
 class PgTaskGraphReader:
-    __slots__ = ("_conninfo",)
+    """Reads through `EventConnections` (a conninfo builds a pool of its own): the feed asks for the
+    open asks of a tree every few seconds per subscriber, which must not connect each time."""
 
-    def __init__(self, conninfo: str) -> None:
-        self._conninfo = conninfo
+    __slots__ = ("_connections",)
+
+    def __init__(self, connections: EventConnections | str) -> None:
+        self._connections = (
+            EventConnections(connections) if isinstance(connections, str) else connections
+        )
 
     async def asks_under(self, tenant_id: str, root_turn_id: str, *, limit: int = 500) -> AskWindow:
         return await asyncio.to_thread(self._read, tenant_id, root_turn_id, limit)
 
     def _read(self, tenant_id: str, root_turn_id: str, limit: int) -> AskWindow:
-        with psycopg.connect(self._conninfo) as conn:
+        with self._connections() as conn:
             rows = conn.execute(_SQL, (tenant_id, root_turn_id, root_turn_id, limit)).fetchall()
         records: list[AskRecord] = []
         for row in rows:

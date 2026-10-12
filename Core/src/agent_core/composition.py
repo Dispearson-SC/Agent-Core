@@ -173,6 +173,7 @@ from agent_core.adapters.driven.agent_pydantic.runner import PydanticAgentRunner
 from agent_core.adapters.driven.context.engine import LadderContextEngine
 from agent_core.adapters.driven.context.summariser import ModelSummariser
 from agent_core.adapters.driven.events_pg.audit_events import EventingAuditSink
+from agent_core.adapters.driven.events_pg.connections import EventConnections
 from agent_core.adapters.driven.events_pg.publisher import PgEventPublisher
 from agent_core.adapters.driven.events_pg.reader import PgEventReader, PgEventWakeup
 from agent_core.adapters.driven.human.gateway import ChannelHumanGateway
@@ -1211,6 +1212,16 @@ class Container:
     # docs/TASKS.md#t-f11-43's driving adapter, not this file's. Until it exists the ask
     # leaves, lands durably in `peer_messages`, and waits there for a worker.
     mailbox: AgentMailbox
+    # C1p (D55). The event adapters' own pool, opened on first use; the process that runs the
+    # container closes it (`main` does, next to the other two pools).
+    events_connections: EventConnections | None = None
+
+    def close_pools(self) -> None:
+        """Close every pool this container owns (the order `main` has always used)."""
+        self.audit_pool.close()
+        self.domain_pool.close()
+        if self.events_connections is not None:
+            self.events_connections.close()
 
 
 def build_pools(
@@ -1833,7 +1844,10 @@ def build_container(
     audit_allow, audit_presence = collect_audit_policy(TOOL_PACKAGES)
     # C21 (D52). `tool_called` events ride on the audit trail: the decorator writes the audit row
     # first and then tells the feed, and a feed that fails never fails the audited call.
-    events = PgEventPublisher(resolved.app_conninfo)
+    # ONE small pool of its own for everything that reads or writes events (C1p, D55): opened on
+    # first use, closed by the process that runs the container (`Container.events_connections`).
+    events_connections = EventConnections(resolved.app_conninfo)
+    events = PgEventPublisher(events_connections)
     audit = EventingAuditSink(
         PgAuditSink(
             PoolConnections(audit_pool),
@@ -1932,7 +1946,7 @@ def build_container(
     resolve_evidence = _pg_evidence_correlate(resolved.app_conninfo, profiles)
     signal_evidence = _pg_evidence_signal(resolved.app_conninfo)
 
-    task_graph = PgTaskGraphReader(resolved.app_conninfo)
+    task_graph = PgTaskGraphReader(events_connections)
     container = Container(
         settings=resolved,
         domain_pool=domain_pool,
@@ -1942,7 +1956,7 @@ def build_container(
         audit=audit,
         events=events,
         event_feed=EventFeed(
-            PgEventReader(resolved.app_conninfo),
+            PgEventReader(events_connections),
             PgEventWakeup(resolved.app_conninfo),
             asks=task_graph,
         ),
@@ -1951,6 +1965,7 @@ def build_container(
         transcripts=transcripts,
         knowledge_admin=knowledge_admin,
         mailbox=mailbox,
+        events_connections=events_connections,
         runner=runner,
         tools=tools,
         context=context,

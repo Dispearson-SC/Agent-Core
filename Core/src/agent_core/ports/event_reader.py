@@ -21,6 +21,8 @@ and a test wants to answer them separately.
     * `wait(timeout)`: returns when something MAY have been published, or when `timeout` seconds
       pass. It is a hint, never a source of truth: the broker re-reads by sequence either way, so a
       lost wake-up costs latency (at most the poll interval), not events.
+    * `close()`: the wake-up may hold one long-lived listening connection; the feed closes it when
+      its broker stops.
 """
 
 from __future__ import annotations
@@ -50,5 +52,10 @@ class EventReader(Protocol):
 
 class EventWakeup(Protocol):
     async def wait(self, timeout: float) -> None:
-        """Return when an event may have been published, or after `timeout` seconds."""
+        """Return when an event may have been published, or after `timeout` seconds. A
+        notification that arrived since the previous wait counts: it is not lost between waits."""
+        ...
+
+    async def close(self) -> None:
+        """Release whatever the wake-up holds (a listening connection). Safe to call twice."""
         ...

@@ -159,17 +159,22 @@ class EventFeed:
                 sub.offer(stored)
 
     async def run(self) -> None:
-        """Pump forever (cancel to stop). A read that fails is logged and retried: the feed is an
-        observer and must outlive a database blip."""
-        while True:
-            try:
-                await self.pump()
-                await self._wakeup.wait(self._poll)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                _LOG.warning("the event feed could not read new events; retrying", exc_info=True)
-                await asyncio.sleep(self._poll)
+        """Pump forever (cancel to stop; the wake-up is closed then). A read that fails is logged
+        and retried: the feed is an observer and must outlive a database blip."""
+        try:
+            while True:
+                try:
+                    await self.pump()
+                    await self._wakeup.wait(self._poll)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    _LOG.warning(
+                        "the event feed could not read new events; retrying", exc_info=True
+                    )
+                    await asyncio.sleep(self._poll)
+        finally:
+            await asyncio.shield(self._wakeup.close())
 
     # --- one subscriber ------------------------------------------------------------------------
 

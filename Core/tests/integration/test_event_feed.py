@@ -17,6 +17,7 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
+import psycopg
 import pytest
 
 from agent_core.adapters.driven.events_pg.publisher import PgEventPublisher
@@ -123,3 +124,40 @@ def test_a_tree_over_the_limit_returns_its_newest_events_and_counts_the_older_on
     assert [s.event.kind for s in cut.events][-1] is EventKind.FINISHED, "the newest state is kept"
     assert [s.seq for s in cut.events] == sorted(s.seq for s in cut.events), "still in seq order"
     assert whole.omitted == 0 and len(whole.events) == 6
+
+
+def test_the_wakeup_listens_on_one_connection_and_does_not_lose_a_notification_between_waits() -> (
+    None
+):
+    """C1p: it used to open a connection per `wait`, so anything published between two waits was
+    not heard, and every wait paid a connect. One long-lived listener hears it."""
+
+    async def scenario() -> tuple[int, float]:
+        await w.fresh_databases(_DATABASE)
+        publisher = PgEventPublisher(w.conninfo(_DATABASE))
+        wakeup = PgEventWakeup(w.conninfo(_DATABASE))
+        connects = 0
+        real = psycopg.AsyncConnection.connect
+
+        async def counting(*args: Any, **kwargs: Any) -> Any:
+            nonlocal connects
+            connects += 1
+            return await real(*args, **kwargs)
+
+        psycopg.AsyncConnection.connect = counting  # type: ignore[method-assign,assignment]
+        try:
+            await wakeup.wait(0.3)  # nothing yet: times out, and the listener stays up
+            await publisher.publish(_event(ROOT, EventKind.STARTED))  # between two waits
+            started = asyncio.get_running_loop().time()
+            await wakeup.wait(5.0)
+            heard_after = asyncio.get_running_loop().time() - started
+            await wakeup.wait(0.1)
+        finally:
+            psycopg.AsyncConnection.connect = real  # type: ignore[method-assign]
+            await wakeup.close()
+        return connects, heard_after
+
+    connects, heard_after = asyncio.run(scenario())
+
+    assert connects == 1, f"the listener reconnected {connects} times"
+    assert heard_after < 2.0, "a notification published between two waits was lost"

@@ -190,7 +190,9 @@ logged as `could not publish the <kind> event of turn ...` at WARNING and never 
 `GET /turns/<turn id>/events` (same `X-Subject-Id` / `X-Tenant-Id` headers as `GET /turns/<id>`):
 `curl -N -H 'X-Subject-Id: ops' -H 'X-Tenant-Id: <tenant>' http://<host>/turns/<id>/events`. Each
 connection costs one open request and a 64-event queue; it never holds a database connection (the
-broker holds one `LISTEN` connection per `wait`, and reads in a thread). Behind a reverse proxy
+broker holds ONE long-lived `LISTEN` connection per process and reads in a thread; the event
+publisher, the feed's reader and the graph reader share a separate pool of at most 4 connections,
+opened on first use). Behind a reverse proxy
 disable response buffering for the path (the app sends `X-Accel-Buffering: no`) and keep the idle
 timeout above 15 s (the keepalive interval). A feed that cannot read the database logs `the event feed
 could not read new events; retrying` at WARNING and recovers by itself; clients reconnect to a snapshot.

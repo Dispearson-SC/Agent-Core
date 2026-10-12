@@ -92,6 +92,9 @@ class Store:
     async def latest_seq(self) -> int:
         return len(self.rows)
 
+    async def close(self) -> None:
+        return None
+
     async def wait(self, timeout: float) -> None:
         try:
             await asyncio.wait_for(self._woke.wait(), timeout)
