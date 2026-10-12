@@ -83,6 +83,14 @@ def _app_conninfo(app_db: str) -> str:
     return re.sub(r"/[^/?]+(\?.*)?$", rf"/{app_db}\1", _ADMIN_CONNINFO)
 
 
+def _drain_queue(conninfo: str) -> None:
+    """The ONE place that empties `peer_messages`. This module's database persists between runs,
+    and `claim_next` / `reclaim_stale` act on the OLDEST rows, whoever left them, so every test
+    starts from an empty table (`_migrated_conninfo` calls this)."""
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        conn.execute("DELETE FROM peer_messages")
+
+
 def _migrated_conninfo() -> str:
     """A migrated app database for this module. Idempotent, so every test may call it."""
     app_db = "agent_core_peer_mailbox_test"
@@ -93,10 +101,7 @@ def _migrated_conninfo() -> str:
     app_conninfo = _app_conninfo(app_db)
     asyncio.run(migrations.run_migrations(app_conninfo))
     asyncio.run(peers_migration.apply_peer_messages_migration(app_conninfo))
-    # Every test starts from an empty table: this module's database persists between runs, and
-    # `claim_next` / `reclaim_stale` act on the OLDEST rows, whoever left them.
-    with psycopg.connect(app_conninfo, autocommit=True) as conn:
-        conn.execute("DELETE FROM peer_messages")
+    _drain_queue(app_conninfo)
     return app_conninfo
 
 
@@ -358,13 +363,6 @@ def _ask_and_claim(conninfo: str, *, request_key: str) -> PeerAsk:
     return claimed
 
 
-def _drain_queue(conninfo: str) -> None:
-    """An empty table: rows of earlier tests (delivered ones included) must not be claimed or
-    reclaimed by this one. The database is this module's own."""
-    with psycopg.connect(conninfo, autocommit=True) as conn:
-        conn.execute("DELETE FROM peer_messages")
-
-
 @pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
 def test_an_answer_with_the_right_correlation_id_but_no_or_a_wrong_token_is_refused() -> None:
     """The correlation id is derived (uuid5) from inputs others may know, so it is an address
@@ -373,7 +371,6 @@ def test_an_answer_with_the_right_correlation_id_but_no_or_a_wrong_token_is_refu
     from agent_core.domain.peers import PeerAnswerRefusedError
 
     conninfo = _migrated_conninfo()
-    _drain_queue(conninfo)
     claimed = _ask_and_claim(conninfo, request_key="tc-forge")
     mailbox = PgAgentMailbox(conninfo)
 
@@ -398,7 +395,6 @@ def test_a_replayed_ask_keeps_the_token_the_row_was_first_given() -> None:
     """`ask` runs in a step and is re-executed after a crash: the second run must not mint a
     second secret (the callee already holds the first)."""
     conninfo = _migrated_conninfo()
-    _drain_queue(conninfo)
     mailbox = PgAgentMailbox(conninfo)
     turn_id = TurnId(str(uuid.uuid4()))
     session = _session()
@@ -452,7 +448,6 @@ def _never_running(calls: list[str]) -> Callable[[str, int], Awaitable[bool]]:
 @pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
 def test_a_delivered_unanswered_row_past_the_lease_with_no_workflow_is_reclaimed_once() -> None:
     conninfo = _migrated_conninfo()
-    _drain_queue(conninfo)
     stale = _ask_and_claim(conninfo, request_key="tc-stale")
     fresh = _ask_and_claim(conninfo, request_key="tc-fresh")
     _age(conninfo, stale.correlation_id, _LEASE + timedelta(seconds=1))
@@ -481,7 +476,6 @@ def test_a_delivered_unanswered_row_past_the_lease_with_no_workflow_is_reclaimed
 @pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
 def test_a_stale_row_whose_workflow_exists_is_not_reclaimed() -> None:
     conninfo = _migrated_conninfo()
-    _drain_queue(conninfo)
     claimed = _ask_and_claim(conninfo, request_key="tc-running")
     _age(conninfo, claimed.correlation_id, _LEASE * 3)
     mailbox = PgAgentMailbox(conninfo)
@@ -498,7 +492,6 @@ def test_a_stale_row_whose_workflow_exists_is_not_reclaimed() -> None:
 @pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
 def test_an_answered_row_and_a_failing_existence_check_are_never_reclaimed() -> None:
     conninfo = _migrated_conninfo()
-    _drain_queue(conninfo)
     answered = _ask_and_claim(conninfo, request_key="tc-answered")
     unknown = _ask_and_claim(conninfo, request_key="tc-unknown")
     mailbox = PgAgentMailbox(conninfo)
@@ -522,7 +515,6 @@ def test_an_answered_row_and_a_failing_existence_check_are_never_reclaimed() -> 
 def test_the_lease_is_judged_at_the_given_time() -> None:
     """`now` is a parameter so the clock under test is explicit (the default is the DB's)."""
     conninfo = _migrated_conninfo()
-    _drain_queue(conninfo)
     claimed = _ask_and_claim(conninfo, request_key="tc-clock")
     mailbox = PgAgentMailbox(conninfo)
     checked: list[str] = []

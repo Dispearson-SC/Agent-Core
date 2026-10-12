@@ -88,6 +88,7 @@ from agent_core.domain.peers import (
     AgentRef,
     PeerAnswerRefusedError,
     PeerPolicy,
+    new_answer_token,
     peer_ask_id,
 )
 from agent_core.domain.turn import SessionRef, TurnId
@@ -179,7 +180,7 @@ class A2AAgentMailbox:
         once. Omitted, no `messageId` is sent (the previous behaviour).
         """
         endpoint = _endpoint_for(policy, target)
-        answer_token = secrets.token_urlsafe(32)
+        answer_token = new_answer_token()
         if asker is None:
             _LOG.warning(
                 "an A2A peer ask is being sent to %r with no asking agent id, so the "
@@ -236,8 +237,10 @@ class A2AAgentMailbox:
         """Record a delivered answer against its correlation id. Idempotent.
 
         C1c. The delivery must present the `answer_token` sent to the peer with the message
-        (`metadata.answer_token`); otherwise `PeerAnswerRefusedError`. A task this adapter
-        never sent has no token on file and is not accepted either.
+        (`metadata.answer_token`); otherwise `PeerAnswerRefusedError`. C1h: that refusal is for a
+        task this adapter KNOWS (it sent it) and a delivery that does not hold its token. A task
+        it never sent is a stranger's delivery, a silent no-op exactly as the port says and
+        `PgAgentMailbox` does: nothing to refuse, nothing written.
 
         `setdefault` makes the first delivery win, exactly like `PgAgentMailbox.answer`'s
         `answered_at IS NULL` guard: a retried delivery for one correlation id must not
@@ -248,10 +251,10 @@ class A2AAgentMailbox:
         if correlation_id in self._cancelled:
             raise PeerAnswerRefusedError(correlation_id, "the ask was cancelled")
         expected = self._tokens.get(correlation_id)
-        if (
-            expected is None
-            or answer_token is None
-            or not secrets.compare_digest(expected.encode(), answer_token.encode())
+        if expected is None:
+            return
+        if answer_token is None or not secrets.compare_digest(
+            expected.encode(), answer_token.encode()
         ):
             raise PeerAnswerRefusedError(correlation_id, "the answer token did not match")
         self._answers[correlation_id] = answer

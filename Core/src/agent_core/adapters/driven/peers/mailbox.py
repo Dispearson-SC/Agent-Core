@@ -118,6 +118,7 @@ from agent_core.domain.peers import (
     AgentRef,
     PeerAnswerRefusedError,
     PeerPolicy,
+    new_answer_token,
     peer_ask_id,
 )
 from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId
@@ -127,8 +128,6 @@ from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId
 # same bearer-token reasoning as `human/gateway.py`, and `secrets` for the same reason:
 # never `random`, never a uuid4 rendered to look unguessable.
 _CORRELATION_ID_BYTES: Final[int] = 32
-# The per-ask answer secret (C1c): the same strength, for the same bearer-token reason.
-_ANSWER_TOKEN_BYTES: Final[int] = 32
 
 _LOG = logging.getLogger(__name__)
 
@@ -397,7 +396,7 @@ class PgAgentMailbox:
                     asker,
                     # Minted per call but only kept by the first insert: a replayed ask hits
                     # the `DO UPDATE` branch, which leaves every column of the row alone.
-                    secrets.token_urlsafe(_ANSWER_TOKEN_BYTES),
+                    new_answer_token(),
                 ),
             ).fetchone()
         if row is None:  # pragma: no cover - DO UPDATE always returns the surviving row

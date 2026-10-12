@@ -26,6 +26,7 @@ A2A ALIGNMENT - SHAPE NOW, PROTOCOL LATER
 from __future__ import annotations
 
 import json
+import secrets
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, NewType
@@ -36,6 +37,17 @@ AgentId = NewType("AgentId", str)
 # The namespace of every id DERIVED for a peer ask (C2). A constant of the source: changing it
 # changes every id, so it is never edited. Generated once with uuid4().
 _PEER_ID_NAMESPACE: Final[UUID] = UUID("5b1c1f0e-6f6d-4d53-9a52-0d2c3f6f9a11")
+
+
+# The per-ask answer secret (C1c): 32 random bytes, so the token carries 256 bits. One constant for
+# every adapter, so the strength of the secret cannot drift between the Postgres queue and the A2A
+# wire. It is a bearer token: `secrets`, never `random`, never a uuid4 rendered to look unguessable.
+ANSWER_TOKEN_BYTES: Final[int] = 32
+
+
+def new_answer_token() -> str:
+    """A fresh, unguessable per-ask answer secret (URL-safe text of `ANSWER_TOKEN_BYTES` bytes)."""
+    return secrets.token_urlsafe(ANSWER_TOKEN_BYTES)
 
 
 # What a peer ask is answered with when the answering turn could not produce an answer. FIXED

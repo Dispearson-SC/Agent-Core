@@ -135,7 +135,12 @@ from typing import Final, Protocol, runtime_checkable
 from uuid import uuid4
 
 from agent_core.adapters.driven.peers.mailbox import PeerAsk
-from agent_core.domain.peers import PEER_ASK_FAILED_ANSWER, AgentId, peer_session_key
+from agent_core.domain.peers import (
+    PEER_ASK_FAILED_ANSWER,
+    AgentId,
+    PeerAnswerRefusedError,
+    peer_session_key,
+)
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     CallerIdentity,
@@ -202,6 +207,9 @@ class AskDisposition(StrEnum):
     ANSWERED  - B finished and its answer is on the row A is waiting on.
     SUSPENDED - B is waiting on a human or another agent. Nothing was recorded; see WHAT
                 HAPPENS TO A CLAIM WHOSE TURN SUSPENDS in the module docstring.
+    REFUSED   - B finished, but the row refused its answer: the asker cancelled the ask while B
+                ran (C4), or the token did not match (C1c). Nothing was written and nobody was
+                woken; the worker carries on (`answer_next_ask`, C1h).
 
     There is deliberately no FAILED member. An exception from the turn is not a disposition
     this file gets to convert into a quiet outcome - it propagates, because an ask that was
@@ -212,6 +220,7 @@ class AskDisposition(StrEnum):
     STARTED = "started"
     ANSWERED = "answered"
     SUSPENDED = "suspended"
+    REFUSED = "refused"
 
 
 @dataclass(frozen=True, slots=True)
@@ -638,7 +647,23 @@ async def answer_next_ask(
     # VERBATIM. The wrapping is `read_answer`'s - see WHAT THIS FILE DOES NOT DECIDE.
     # `result.media` is not carried: the queue row holds text, and an answer that silently
     # lost half of itself would be worse than one that never claimed to carry media.
-    await queue.answer(ask.correlation_id, result.text, answer_token=ask.answer_token)
+    try:
+        await queue.answer(ask.correlation_id, result.text, answer_token=ask.answer_token)
+    except PeerAnswerRefusedError as refused:
+        # C1h. The asker gave up while B ran (a cancelled row refuses every answer, C4), or the
+        # token did not match. An expected end, not a reason to take the worker loop down: the
+        # row decided, so there is nothing to write and nobody to wake.
+        logger.warning(
+            "peer ask %s refused the answer from %s: %s",
+            ask.correlation_id,
+            ask.target,
+            refused.reason,
+        )
+        return PeerTurnReport(
+            correlation_id=ask.correlation_id,
+            target=ask.target,
+            disposition=AskDisposition.REFUSED,
+        )
 
     # RECORD, THEN WAKE - in that order, and the order is the whole of it. Waking first is
     # a race with one loser and no error: the workflow resumes, redeems its correlation id

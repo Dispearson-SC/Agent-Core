@@ -25,11 +25,25 @@ from agent_core.adapters.driving.peers.worker import (
     PEER_SUBJECT_ID,
     AskDisposition,
     PeerTurnStarter,
+    answer_next_ask,
     dispatch_next_ask,
     run_peer_worker,
 )
-from agent_core.domain.peers import PEER_ASK_FAILED_ANSWER, AgentId, peer_session_key
-from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId, TurnRequest
+from agent_core.domain.peers import (
+    PEER_ASK_FAILED_ANSWER,
+    AgentId,
+    PeerAnswerRefusedError,
+    peer_session_key,
+)
+from agent_core.domain.turn import (
+    SessionId,
+    SessionRef,
+    TenantId,
+    TurnId,
+    TurnOutcome,
+    TurnRequest,
+    TurnResult,
+)
 
 ORIGIN = SessionRef(session_id=SessionId("case-77"), tenant_id=TenantId("S030"))
 
@@ -380,3 +394,41 @@ def test_a_lease_needs_a_queue_that_can_reclaim() -> None:
 
 async def _no_sleep(seconds: float) -> None:
     return None
+
+
+# --- C1h: the non-durable answer path meets a cancelled ask -------------------------------------
+
+
+@dataclass
+class _CancelledQueue(_Queue):
+    """A queue whose row was cancelled (the asker gave up) while the callee was running."""
+
+    async def answer(
+        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+    ) -> None:
+        raise PeerAnswerRefusedError(correlation_id, "the ask was cancelled")
+
+
+class _Finishes:
+    async def execute(self, turn_id: TurnId, request: TurnRequest, *, hop: int) -> TurnOutcome:
+        return TurnOutcome(turn_id=turn_id, result=TurnResult(text="too late"))
+
+
+def test_the_non_durable_path_survives_an_answer_for_a_cancelled_ask() -> None:
+    """`answer_next_ask` records the callee's reply with `queue.answer`; a cancelled row refuses
+    it. That is an expected end, not a worker crash: nothing is written, nobody is woken, and the
+    report says the ask was cancelled so the loop's log line shows it."""
+    woken: list[tuple[TurnId, str]] = []
+
+    async def wake(turn_id: TurnId, correlation_id: str) -> None:
+        woken.append((turn_id, correlation_id))
+
+    report = asyncio.run(
+        answer_next_ask(
+            _CancelledQueue([_ask()]), _Finishes(), target=AgentId("specialist"), wake=wake
+        )
+    )
+
+    assert report is not None and report.disposition is AskDisposition.REFUSED
+    assert report.correlation_id == "c1"
+    assert woken == [], "the asker moved on: a late reply wakes nobody"

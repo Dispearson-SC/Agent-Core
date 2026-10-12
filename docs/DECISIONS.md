@@ -1153,3 +1153,24 @@ what the current build does for every other stranded turn).
   session. A tool with side effects that the stranded run had already executed can run again;
   asks the stranded run made are cancelled, the rerun asks again. Approvals the stranded run
   published stay open in `human_requests` until they expire (nothing resumes on them).
+
+**C1h · tidy-ups from the review.**
+
+- *Non-durable answer path.* `answer_next_ask` (the console and tests) recorded the callee's
+  reply with `queue.answer`, which a cancelled row refuses (D31, C4); the refusal escaped and took
+  the worker loop down. It is now caught: logged, nothing written, nobody woken, and the report
+  carries the new `AskDisposition.REFUSED` (also for a token mismatch).
+- *A2A adapter follows the port for unknown ids.* `A2AAgentMailbox.answer` raised
+  `PeerAnswerRefusedError` for a correlation id it never sent, while the port (and
+  `PgAgentMailbox`) say an unknown id is a silent no-op. Refusal is now only for a KNOWN ask
+  presented with the wrong token (or a cancelled one). Pinned by the shared conformance suite
+  (`tests/contract/mailbox_conformance.py`, run against both adapters), which also found that the
+  adapters differ on one point the suite deliberately does not assert: a word-for-word re-ask
+  under a new tool call id is folded into the first row by Postgres (unique per turn, target,
+  question, D29) and is up to the peer's `messageId` de-duplication over A2A.
+- *One constant for the secret's strength.* `domain.peers.ANSWER_TOKEN_BYTES` (32) and
+  `new_answer_token()` replace the private constant in the Postgres adapter and the literal in the
+  A2A one.
+- Test tidy: one helper (`_drain_queue`) empties `peer_messages` for the mailbox tests, and a
+  comment in `test_peer_cancel.py` is a statement. D31's dangling "(see the report)" now states the
+  finding inline (a nested ask failed on INSERT because `peer_messages.turn_id` was a UUID).
