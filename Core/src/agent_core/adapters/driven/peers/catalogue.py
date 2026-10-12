@@ -48,6 +48,7 @@ def build_peer_catalogue(
             callee=ref.agent_id,
             callee_policy=callee.peers,
             hop=0,
+            callee_mode=callee.mode,
         )
         if not decision.allowed or not permits(str(ref.agent_id)):
             continue

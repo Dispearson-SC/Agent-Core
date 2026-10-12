@@ -1353,6 +1353,7 @@ async def _step_ask_peers(
             callee=AgentId(target),
             callee_policy=callee_profile.peers,
             hop=request.hop,
+            callee_mode=callee_profile.mode,
         )
         if not decision.allowed:
             refusals.append(

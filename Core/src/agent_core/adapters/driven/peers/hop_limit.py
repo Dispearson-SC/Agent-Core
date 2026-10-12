@@ -59,6 +59,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from agent_core.domain.agent_mode import AgentMode
 from agent_core.domain.peers import AgentId, PeerPolicy
 
 
@@ -75,6 +76,7 @@ class HopRefusal(StrEnum):
     HOP_LIMIT_REACHED = "hop_limit_reached"
     CALLER_DOES_NOT_ALLOW_CALLEE = "caller_does_not_allow_callee"
     CALLEE_DOES_NOT_ALLOW_CALLER = "callee_does_not_allow_caller"
+    CALLEE_MODE_NOT_ASKABLE = "callee_mode_not_askable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,13 +104,14 @@ def authorise_hop(
     callee: AgentId,
     callee_policy: PeerPolicy,
     hop: int,
+    callee_mode: AgentMode = AgentMode.ALL,
 ) -> HopDecision:
     """May `caller` ask `callee`, given that `hop` hops have already been made?
 
     `hop` is the count carried by the ask being relayed - 0 for a question a human's turn
     started. The checks run in a fixed order so one cause is reported for one refusal and
-    the audit row does not depend on evaluation luck: feature switches, then the limit,
-    then the two allowlists. Every branch fails closed.
+    the audit row does not depend on evaluation luck: feature switches, then the callee's mode,
+    then the limit, then the two allowlists. Every branch fails closed.
 
     Keyword-only on purpose. `(caller, caller_policy, callee, callee_policy)` is four
     arguments of two alternating types, and a positional call site that transposes a pair
@@ -119,6 +122,10 @@ def authorise_hop(
         return _refuse(HopRefusal.CALLER_PEERS_DISABLED)
     if not callee_policy.enabled:
         return _refuse(HopRefusal.CALLEE_PEERS_DISABLED)
+    # C27. The callee's mode is its own statement of who may reach it: a `primary` is an entry
+    # point and a `subagent` is somebody's worker, neither is a peer to be asked.
+    if not callee_mode.askable:
+        return _refuse(HopRefusal.CALLEE_MODE_NOT_ASKABLE)
 
     # The stricter side owns the limit; see BOTH SIDES, ALWAYS above.
     if hop >= min(caller_policy.max_hops, callee_policy.max_hops):

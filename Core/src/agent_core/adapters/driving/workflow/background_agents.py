@@ -146,6 +146,7 @@ class WorkflowBackgroundAgents:
             callee=AgentId(child.target),
             callee_policy=callee.peers,
             hop=max(child.hop - 1, 0),  # the hops made BEFORE the child's own ask
+            callee_mode=callee.mode,
         )
         if not decision.allowed or decision.next_hop is None:
             reason = decision.reason.value if decision.reason else "refused"

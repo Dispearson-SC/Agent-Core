@@ -41,6 +41,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
+from agent_core.domain.agent_mode import AgentMode
 from agent_core.domain.answer_cache import MAX_TTL_SECONDS, AnswerCacheScope
 from agent_core.domain.compaction import CompactionPolicy
 from agent_core.domain.knowledge import KnowledgePolicy, RetrievalMode
@@ -614,6 +615,18 @@ def _fan_out(value: object) -> FanOutPolicy:
     raise ProfileValidationError(f"peers.fan_out must be one of {allowed}, got {value!r}")
 
 
+def _agent_mode(value: object) -> AgentMode:
+    """`mode` (C27): `primary`, `peer`, `subagent` or `all`. A misspelling refuses to load: falling
+    back to `all` would widen who may reach the agent, silently."""
+    if isinstance(value, str):
+        try:
+            return AgentMode(value)
+        except ValueError:
+            pass
+    allowed = ", ".join(mode.value for mode in AgentMode)
+    raise ProfileValidationError(f"profile.mode must be one of {allowed}, got {value!r}")
+
+
 def _strict_bool(value: object, *, where: str) -> bool:
     """A real boolean. `bool("false")` is True, and a switch that grants a capability must not be
     flipped on by a misspelt string."""
@@ -789,6 +802,9 @@ class AgentProfile:
     # Empty falls back to the display name the asker's allowlist gave it. Part of the content hash.
     description: str = ""
 
+    # C27 (D61). What this agent is for: `primary`, `peer`, `subagent` or `all` (default).
+    mode: AgentMode = AgentMode.ALL
+
     # C9 (D44). The JSON Schema (canonical JSON text, root an object) this agent answers with, or
     # None for prose (the default). The callee runs with structured output; an asker receives the
     # validated answer as `data`. Part of the content hash.
@@ -879,6 +895,7 @@ class AgentProfile:
             ),
             public_alias=_build_public_alias(mapping.get("public_alias")),
             description=_build_description(mapping.get("description")),
+            mode=_agent_mode(mapping.get("mode", defaults.mode)),
             answer_schema=_build_answer_schema(mapping.get("answer_schema")),
             channel_instructions=_build_fragment_map(
                 mapping.get("channel_instructions"), where="channel_instructions"
