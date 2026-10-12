@@ -38,7 +38,7 @@ class Effect(StrEnum):
 
 
 # C15 (D41). Which argument of a tool call names the THING it acts on, for the tools whose rules can
-# be narrowed to it: `ask_peer` (its `target` is the peer id) and `spawn_subagent` (C28: its `agent`).
+# be narrowed to it: `ask_peer` (its `target`, the peer id) and `spawn_subagent` (C28: `agent`).
 # A tool that is not listed has no resource, and a rule that names one never matches it.
 RESOURCE_ARGUMENTS: Final[Mapping[str, str]] = MappingProxyType(
     {"ask_peer": "target", "spawn_subagent": "agent"}
