@@ -42,13 +42,16 @@ import pytest
 
 from agent_core.adapters.driven.agent_pydantic.runner import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
 from agent_core.domain.peers import (
+    BACKGROUND_LIST_LIMIT,
     AgentId,
     AgentRef,
+    BackgroundKeys,
     BackgroundState,
     PeerAnswerRefusedError,
     PeerBackgroundRefusedError,
     PeerContinuationRefusedError,
     PeerPolicy,
+    background_followup_turn_id,
     new_answer_token,
     peer_root_origin,
     peer_session_key,
@@ -750,6 +753,111 @@ class MailboxConformance:
         assert await queue.mailbox.is_cancelled(ordinary) is False, "not background"
         assert await queue.mailbox.is_cancelled(elsewhere) is False, "another conversation"
         assert await queue.mailbox.cancel_background(SESSION, "again") == ()
+
+    # --- counting, lookup and the follow-up check do not go through the listing window (C1o) -----
+
+    async def test_counting_open_background_asks_is_not_limited_by_the_listing_window(
+        self, harness: MailboxHarness
+    ) -> None:
+        _background(harness)
+        total = BACKGROUND_LIST_LIMIT + 3
+        for n in range(total):
+            await harness.ask(f"q{n}", request_key=f"tc-{n}", background_caller=CALLER)
+
+        assert len(await harness.mailbox.background_asks(SESSION)) == BACKGROUND_LIST_LIMIT
+        assert await harness.mailbox.count_background(SESSION) == total
+        assert await harness.mailbox.count_background(SESSION, open_only=True) == total
+
+    async def test_the_listing_limit_is_the_callers_to_choose(
+        self, harness: MailboxHarness
+    ) -> None:
+        _background(harness)
+        for n in range(3):
+            await harness.ask(f"q{n}", request_key=f"tc-{n}", background_caller=CALLER)
+
+        assert len(await harness.mailbox.background_asks(SESSION, limit=2)) == 2
+
+    async def test_a_count_covers_the_conversation_only_and_open_asks_only_when_asked(
+        self, harness: MailboxHarness
+    ) -> None:
+        queue = _queue(_background(harness))
+        done = await queue.ask("one", request_key="tc-1", background_caller=CALLER)
+        await queue.ask("two", request_key="tc-2", background_caller=CALLER)
+        await queue.ask("ordinary", request_key="tc-3")
+        other_case = SessionRef(session_id=SessionId("another-case"), tenant_id=SESSION.tenant_id)
+        await queue.ask(
+            "elsewhere", request_key="tc-4", session=other_case, background_caller=CALLER
+        )
+        await queue.mailbox.answer(done, "ok", answer_token=await _token(queue, done))
+
+        assert await queue.mailbox.count_background(SESSION) == 2
+        assert await queue.mailbox.count_background(SESSION, open_only=True) == 1
+
+    async def test_a_count_can_leave_out_the_asks_a_turn_already_keyed(
+        self, harness: MailboxHarness
+    ) -> None:
+        """A step that re-runs after a crash must not count its own earlier asks (C1o)."""
+        _background(harness)
+        for question, turn, key in (
+            ("one", "turn-a", "r1.s0.tc-1"),
+            ("two", "turn-a", "r1.s1.tc-2"),
+            ("other", "turn-b", "r1.s0.tc-1"),
+        ):
+            await harness.ask(question, turn_id=turn, request_key=key, background_caller=CALLER)
+
+        leave_out = BackgroundKeys(turn_id="turn-a", keys=("r1.s0.tc-1", "r1.s1.tc-2"))
+
+        assert await harness.mailbox.count_background(SESSION, open_only=True) == 3
+        assert (
+            await harness.mailbox.count_background(SESSION, open_only=True, excluding=leave_out)
+            == 1
+        ), "only turn-b's ask is left: the key alone is not enough, the turn must match too"
+
+    async def test_a_background_ask_is_found_by_its_handle_however_old(
+        self, harness: MailboxHarness
+    ) -> None:
+        _background(harness)
+        oldest = await harness.ask("oldest", request_key="tc-old", background_caller=CALLER)
+        for n in range(BACKGROUND_LIST_LIMIT + 2):
+            await harness.ask(f"q{n}", request_key=f"tc-{n}", background_caller=CALLER)
+        assert oldest not in {a.handle for a in await harness.mailbox.background_asks(SESSION)}
+
+        found = await harness.mailbox.background_ask(SESSION, oldest)
+
+        assert found is not None and (found.handle, found.question) == (oldest, "oldest")
+        assert found.state is BackgroundState.QUEUED and found.session == _session_of(oldest)
+
+    async def test_a_handle_of_another_conversation_or_an_ordinary_ask_is_not_found(
+        self, harness: MailboxHarness
+    ) -> None:
+        _background(harness)
+        other_case = SessionRef(session_id=SessionId("another-case"), tenant_id=SESSION.tenant_id)
+        other_tenant = SessionRef(session_id=SESSION.session_id, tenant_id=TenantId("tenant-2"))
+        elsewhere = await harness.ask(
+            "x", request_key="tc-1", session=other_case, background_caller=CALLER
+        )
+        foreign = await harness.ask(
+            "y", request_key="tc-2", session=other_tenant, background_caller=CALLER
+        )
+        ordinary = await harness.ask("z", request_key="tc-3")
+
+        for handle in (elsewhere, foreign, ordinary, "never-existed"):
+            assert await harness.mailbox.background_ask(SESSION, handle) is None
+
+    async def test_the_follow_up_turn_of_an_answered_background_ask_is_recognised(
+        self, harness: MailboxHarness
+    ) -> None:
+        queue = _queue(_background(harness))
+        corr = await queue.ask("slow", request_key="tc-1", background_caller=CALLER)
+        await queue.ask("ordinary", request_key="tc-2")
+        await queue.mailbox.answer(corr, "done", answer_token=await _token(queue, corr))
+        follow_up = background_followup_turn_id(corr)
+        other_case = SessionRef(session_id=SessionId("another-case"), tenant_id=SESSION.tenant_id)
+
+        assert await queue.mailbox.is_background_followup(SESSION, follow_up) is True
+        assert await queue.mailbox.is_background_followup(SESSION, "turn-1") is False
+        assert await queue.mailbox.is_background_followup(SESSION, "not-a-turn") is False
+        assert await queue.mailbox.is_background_followup(other_case, follow_up) is False
 
 
 async def _never_exists(correlation_id: str, generation: int) -> bool:

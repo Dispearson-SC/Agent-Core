@@ -19,13 +19,16 @@ from datetime import UTC, datetime, timedelta
 
 from agent_core.adapters.driven.peers.mailbox import PeerAsk, wrap_peer_answer
 from agent_core.domain.peers import (
+    BACKGROUND_LIST_LIMIT,
     AgentId,
     AgentRef,
     BackgroundAsk,
+    BackgroundKeys,
     BackgroundState,
     PeerAnswerRefusedError,
     PeerContinuationRefusedError,
     PeerPolicy,
+    background_followup_turn_id,
     derived_peer_session,
     names_a_session_of_this_case,
     new_answer_token,
@@ -59,6 +62,7 @@ class _Row:
     background_caller: CallerIdentity | None = None
     enqueued_at: datetime | None = None
     finished_at: datetime | None = None
+    request_key: str | None = None
 
 
 class InMemoryAgentMailbox:
@@ -113,6 +117,7 @@ class InMemoryAgentMailbox:
             max_concurrent=policy.max_concurrent_asks,
             root_turn_id=root_turn_id if root_turn_id is not None else str(turn_id),
             background_caller=background_caller,
+            request_key=request_key,
             enqueued_at=self._clock(),
             peer_session_id=(
                 continue_session
@@ -202,28 +207,65 @@ class InMemoryAgentMailbox:
             await self.cancel(correlation_id, reason)
         return tuple(ended)
 
-    async def background_asks(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
-        mine = sorted(
+    def _background_rows(self, session: SessionRef) -> list[_Row]:
+        return sorted(
             (
                 row
                 for row in self.rows.values()
                 if row.background_caller is not None and row.from_session == session
             ),
             key=lambda row: (-row.seq, row.correlation_id),
-        )[:50]
-        return tuple(
-            BackgroundAsk(
-                handle=row.correlation_id,
-                target=str(row.target),
-                question=row.question,
-                asked_at=row.enqueued_at or self._clock(),
-                state=_state_of(row),
-                finished_at=row.finished_at,
-                session=row.peer_session_id,
-                hop=row.hop,
-                root_turn_id=row.root_turn_id,
+        )
+
+    @staticmethod
+    def _as_ask(row: _Row, fallback: datetime) -> BackgroundAsk:
+        return BackgroundAsk(
+            handle=row.correlation_id,
+            target=str(row.target),
+            question=row.question,
+            asked_at=row.enqueued_at or fallback,
+            state=_state_of(row),
+            finished_at=row.finished_at,
+            session=row.peer_session_id,
+            hop=row.hop,
+            root_turn_id=row.root_turn_id,
+        )
+
+    async def background_ask(self, session: SessionRef, handle: str) -> BackgroundAsk | None:
+        for row in self._background_rows(session):
+            if row.correlation_id == handle:
+                return self._as_ask(row, self._clock())
+        return None
+
+    async def count_background(
+        self,
+        session: SessionRef,
+        *,
+        open_only: bool = False,
+        excluding: BackgroundKeys | None = None,
+    ) -> int:
+        return sum(
+            1
+            for row in self._background_rows(session)
+            if (not open_only or row.state in ("queued", "delivered"))
+            and not (
+                excluding is not None
+                and row.turn_id == excluding.turn_id
+                and row.request_key in excluding.keys
             )
-            for row in mine
+        )
+
+    async def is_background_followup(self, session: SessionRef, turn_id: str) -> bool:
+        return any(
+            row.state == "answered" and background_followup_turn_id(row.correlation_id) == turn_id
+            for row in self._background_rows(session)
+        )
+
+    async def background_asks(
+        self, session: SessionRef, *, limit: int = BACKGROUND_LIST_LIMIT
+    ) -> tuple[BackgroundAsk, ...]:
+        return tuple(
+            self._as_ask(row, self._clock()) for row in self._background_rows(session)[:limit]
         )
 
     async def is_cancelled(self, correlation_id: str) -> bool:

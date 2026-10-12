@@ -26,7 +26,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from agent_core.domain.peers import AgentId, AgentRef, BackgroundAsk, PeerPolicy
+from agent_core.domain.peers import (
+    BACKGROUND_LIST_LIMIT,
+    AgentId,
+    AgentRef,
+    BackgroundAsk,
+    BackgroundKeys,
+    PeerPolicy,
+)
 from agent_core.domain.turn import CallerIdentity, SessionRef, TurnId
 
 
@@ -165,8 +172,27 @@ class ControlledMailbox:
     async def cancel_background(self, session: SessionRef, reason: str) -> tuple[str, ...]:
         return await self._invoke("cancel_background", session, reason)  # type: ignore[no-any-return]
 
-    async def background_asks(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
-        return await self._invoke("background_asks", session)  # type: ignore[no-any-return]
+    async def background_asks(
+        self, session: SessionRef, *, limit: int = BACKGROUND_LIST_LIMIT
+    ) -> tuple[BackgroundAsk, ...]:
+        return await self._invoke("background_asks", session, limit=limit)  # type: ignore[no-any-return]
+
+    async def background_ask(self, session: SessionRef, handle: str) -> BackgroundAsk | None:
+        return await self._invoke("background_ask", session, handle)  # type: ignore[no-any-return]
+
+    async def count_background(
+        self,
+        session: SessionRef,
+        *,
+        open_only: bool = False,
+        excluding: BackgroundKeys | None = None,
+    ) -> int:
+        return await self._invoke(  # type: ignore[no-any-return]
+            "count_background", session, open_only=open_only, excluding=excluding
+        )
+
+    async def is_background_followup(self, session: SessionRef, turn_id: str) -> bool:
+        return await self._invoke("is_background_followup", session, turn_id)  # type: ignore[no-any-return]
 
     async def is_cancelled(self, correlation_id: str) -> bool:
         return await self._invoke("is_cancelled", correlation_id)  # type: ignore[no-any-return]

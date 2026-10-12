@@ -84,9 +84,11 @@ import httpx
 
 from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
 from agent_core.domain.peers import (
+    BACKGROUND_LIST_LIMIT,
     AgentId,
     AgentRef,
     BackgroundAsk,
+    BackgroundKeys,
     PeerAnswerRefusedError,
     PeerBackgroundRefusedError,
     PeerContinuationRefusedError,
@@ -349,9 +351,26 @@ class A2AAgentMailbox:
         self._cancelled.update(open_ids)
         return tuple(open_ids)
 
-    async def background_asks(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
+    async def background_asks(
+        self, session: SessionRef, *, limit: int = BACKGROUND_LIST_LIMIT
+    ) -> tuple[BackgroundAsk, ...]:
         """No background asks over A2A (`ask` refuses them): always empty."""
         return ()
+
+    async def background_ask(self, session: SessionRef, handle: str) -> BackgroundAsk | None:
+        return None
+
+    async def count_background(
+        self,
+        session: SessionRef,
+        *,
+        open_only: bool = False,
+        excluding: BackgroundKeys | None = None,
+    ) -> int:
+        return 0
+
+    async def is_background_followup(self, session: SessionRef, turn_id: str) -> bool:
+        return False
 
     async def cancel_background(self, session: SessionRef, reason: str) -> tuple[str, ...]:
         return ()

@@ -300,11 +300,14 @@ def test_protocol_exposes_no_blocking_receive() -> None:
         "answer",
         "answer_failed",
         "ask",
+        "background_ask",
         "background_asks",
         "cancel",
         "cancel_background",
         "cancel_open",
+        "count_background",
         "discover",
+        "is_background_followup",
         "is_cancelled",
         "read_answer",
         "redeliveries",
@@ -313,7 +316,7 @@ def test_protocol_exposes_no_blocking_receive() -> None:
         "discover + ask + answer + read_answer, plus the asker's way out of an ask it no "
         "longer wants (C4: cancel, cancel_open, is_cancelled) and the generation a cancel must "
         "reach (D33: redeliveries), and a conversation's background asks (C19: background_asks, "
-        "cancel_background). "
+        "cancel_background; C1o: background_ask, count_background, is_background_followup). "
         f"Found: {members}. Asking and "
         "reading the reply back are two halves of ONE question, and a port that declares "
         "only the first half forces application code to name a concrete adapter to get "
@@ -500,7 +503,7 @@ def _stub(*, read_answer: bool) -> str:
     return f'''
 from __future__ import annotations
 
-from agent_core.domain.peers import AgentId, AgentRef, BackgroundAsk, PeerPolicy
+from agent_core.domain.peers import AgentId, AgentRef, BackgroundAsk, BackgroundKeys, PeerPolicy
 from agent_core.domain.turn import CallerIdentity, SessionRef, TurnId
 from agent_core.ports.agent_mailbox import AgentMailbox
 
@@ -542,7 +545,24 @@ class StubMailbox:
     async def cancel_open(self, turn_id: str, reason: str) -> tuple[str, ...]:
         raise NotImplementedError
 
-    async def background_asks(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
+    async def background_asks(
+        self, session: SessionRef, *, limit: int = 50
+    ) -> tuple[BackgroundAsk, ...]:
+        raise NotImplementedError
+
+    async def background_ask(self, session: SessionRef, handle: str) -> BackgroundAsk | None:
+        raise NotImplementedError
+
+    async def count_background(
+        self,
+        session: SessionRef,
+        *,
+        open_only: bool = False,
+        excluding: BackgroundKeys | None = None,
+    ) -> int:
+        raise NotImplementedError
+
+    async def is_background_followup(self, session: SessionRef, turn_id: str) -> bool:
         raise NotImplementedError
 
     async def cancel_background(self, session: SessionRef, reason: str) -> tuple[str, ...]:

@@ -26,9 +26,11 @@ from agent_core.adapters.driving.peers.worker import new_peer_session
 from agent_core.adapters.driving.workflow import turn_workflow
 from agent_core.domain.peer_result import PeerResult, PeerStatus
 from agent_core.domain.peers import (
+    BACKGROUND_LIST_LIMIT,
     AgentId,
     AgentRef,
     BackgroundAsk,
+    BackgroundKeys,
     BackgroundState,
     PeerAnswerRefusedError,
     PeerBackgroundRefusedError,
@@ -112,6 +114,8 @@ class Mailbox:
         self.refuse_background = False
         self.cancelled: dict[str, str] = {}  # correlation id -> reason, in cancel order
         self.turn_of: dict[str, str] = {}
+        self.key_of: dict[str, str | None] = {}  # correlation id -> request key
+        self.followup_turns: set[str] = set()  # turn ids that are background follow-ups (C1o)
         self.redelivered: dict[str, int] = {}  # correlation id -> redeliveries (the generation)
         self.answers: dict[str, str] = {}
         self.failed: set[str] = set()  # correlation ids closed as a callee failure (C1l)
@@ -139,6 +143,7 @@ class Mailbox:
             if kwargs.get("background_caller") is not None:
                 self.background_sessions[self._ids[key]] = kwargs.get("from_session")
             self.turn_of[self._ids[key]] = str(kwargs.get("turn_id"))
+            self.key_of[self._ids[key]] = kwargs.get("request_key")
         return self._ids[key]
 
     async def cancel(self, correlation_id: str, reason: str) -> bool:
@@ -151,7 +156,37 @@ class Mailbox:
     async def is_cancelled(self, correlation_id: str) -> bool:
         return correlation_id in self.cancelled
 
-    async def background_asks(self, session: Any) -> tuple[BackgroundAsk, ...]:
+    async def count_background(
+        self,
+        session: Any,
+        *,
+        open_only: bool = False,
+        excluding: BackgroundKeys | None = None,
+    ) -> int:
+        asks = await self.background_asks(session, limit=10**6)
+        return sum(
+            1
+            for ask in asks
+            if (ask.is_open or not open_only)
+            and not (
+                excluding is not None
+                and self.turn_of.get(ask.handle) == excluding.turn_id
+                and self.key_of.get(ask.handle) in excluding.keys
+            )
+        )
+
+    async def background_ask(self, session: Any, handle: str) -> BackgroundAsk | None:
+        for ask in await self.background_asks(session, limit=10**6):
+            if ask.handle == handle:
+                return ask
+        return None
+
+    async def is_background_followup(self, session: Any, turn_id: str) -> bool:
+        return turn_id in self.followup_turns
+
+    async def background_asks(
+        self, session: Any, *, limit: int = BACKGROUND_LIST_LIMIT
+    ) -> tuple[BackgroundAsk, ...]:
         """The conversation's background asks: `open_background` synthetic running ones from
         earlier turns, plus the ones this mailbox took (C19)."""
         at = datetime(2026, 1, 1, tzinfo=UTC)
@@ -177,7 +212,7 @@ class Mailbox:
             for corr, owner in self.background_sessions.items()
             if owner == session
         )
-        return earlier + mine
+        return (earlier + mine)[:limit]
 
     async def cancel_background(self, session: Any, reason: str) -> tuple[str, ...]:
         ids = sorted(

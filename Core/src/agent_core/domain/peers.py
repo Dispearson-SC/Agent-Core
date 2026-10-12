@@ -68,6 +68,11 @@ DEFAULT_MAX_CONCURRENT_ASKS: Final[int] = 4
 # conversation may have running at once.
 DEFAULT_MAX_BACKGROUND_ASKS: Final[int] = 4
 
+# C1o (D51). How many of a conversation's background asks `AgentMailbox.background_asks` returns at
+# most (the newest). A listing is bounded; a COUNT or a lookup by handle is not, so a long-lived
+# conversation never loses an open ask to the window.
+BACKGROUND_LIST_LIMIT: Final[int] = 50
+
 # What a peer ask is answered with when the answering turn could not produce an answer. FIXED
 # text: the exception message stays out of what the asking model reads, and a person's
 # non-answer is not turned into a sentence an agent supposedly wrote.
@@ -243,6 +248,19 @@ class BackgroundAsk:
     @property
     def is_open(self) -> bool:
         return self.state in (BackgroundState.QUEUED, BackgroundState.RUNNING)
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundKeys:
+    """Asks one turn already keyed, to leave out of a count (C1o, D51).
+
+    A step that re-runs after a crash finds the rows its first attempt wrote. Counted against the
+    cap they would refuse the very asks that wrote them, so the count leaves them out and the step
+    adds them back as its own. `keys` are the `request_key`s the step derives for its asks.
+    """
+
+    turn_id: str
+    keys: tuple[str, ...]
 
 
 class FanOutPolicy(StrEnum):

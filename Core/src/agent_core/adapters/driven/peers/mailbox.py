@@ -106,7 +106,7 @@ import json
 import logging
 import re
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Final
@@ -115,13 +115,16 @@ import psycopg
 
 from agent_core.adapters.driven.agent_pydantic.runner import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
 from agent_core.domain.peers import (
+    BACKGROUND_LIST_LIMIT,
     AgentId,
     AgentRef,
     BackgroundAsk,
+    BackgroundKeys,
     BackgroundState,
     PeerAnswerRefusedError,
     PeerContinuationRefusedError,
     PeerPolicy,
+    background_followup_turn_id,
     derived_peer_session,
     names_a_session_of_this_case,
     new_answer_token,
@@ -274,13 +277,37 @@ _CANCEL_BACKGROUND_SQL = """
 """
 
 # C20. The background asks of one conversation, newest first. The state is derived from the row.
-_BACKGROUND_ASKS_SQL = """
+# A LISTING: bounded by the caller's limit. Counting and looking a handle up have their own
+# statements below (C1o), so a long-lived conversation never loses an open ask to the window.
+_BACKGROUND_COLUMNS = """
     SELECT correlation_id, target_agent_id, question, enqueued_at, state, answer_failed,
            answered_at, cancelled_at, peer_session_id, hop, root_turn_id
     FROM peer_messages
     WHERE from_tenant_id = %s AND from_session_id = %s AND background IS NOT NULL
+"""
+_BACKGROUND_ASKS_SQL = _BACKGROUND_COLUMNS + """
     ORDER BY enqueued_at DESC, correlation_id
-    LIMIT 50
+    LIMIT %s
+"""
+_BACKGROUND_ASK_SQL = _BACKGROUND_COLUMNS + "    AND correlation_id = %s\n"
+
+# Open = queued or delivered and unanswered, the same predicate as the cancel. `excluding` leaves
+# out the rows ONE turn keyed with the given request keys (an empty array leaves nothing out):
+# the turn and the key must both match.
+_COUNT_BACKGROUND_SQL = """
+    SELECT count(*) FROM peer_messages
+    WHERE from_tenant_id = %s AND from_session_id = %s AND background IS NOT NULL
+      AND (NOT %s OR (state IN ('queued', 'delivered') AND answered_at IS NULL))
+      AND NOT (turn_id = %s AND COALESCE(request_key = ANY(%s::text[]), false))
+"""
+
+# The follow-up turn of an ask exists once the ask is answered (a failure answer included), and
+# its id is a hash of the correlation id, so "is this turn a follow-up" is asked of the ANSWERED
+# background asks of the conversation (ids only) and decided here.
+_ANSWERED_BACKGROUND_SQL = """
+    SELECT correlation_id FROM peer_messages
+    WHERE from_tenant_id = %s AND from_session_id = %s AND background IS NOT NULL
+      AND answered_at IS NOT NULL
 """
 
 _IS_CANCELLED_SQL = "SELECT state = 'cancelled' FROM peer_messages WHERE correlation_id = %s"
@@ -482,6 +509,21 @@ def _background_state(state: str, answer_failed: bool, answered_at: object) -> B
     if answered_at is not None:
         return BackgroundState.FAILED if answer_failed else BackgroundState.ANSWERED
     return BackgroundState.RUNNING if state == "delivered" else BackgroundState.QUEUED
+
+
+def _background_ask_of(row: Sequence[object]) -> BackgroundAsk:
+    """A background ask from a `_BACKGROUND_COLUMNS` row."""
+    return BackgroundAsk(
+        handle=str(row[0]),
+        target=str(row[1]),
+        question=str(row[2]),
+        asked_at=row[3],  # type: ignore[arg-type]
+        state=_background_state(str(row[4]), bool(row[5]), row[6]),
+        finished_at=row[7] if str(row[4]) == "cancelled" else row[6],  # type: ignore[arg-type]
+        session=None if row[8] is None else str(row[8]),
+        hop=int(row[9]),  # type: ignore[call-overload]
+        root_turn_id=None if row[10] is None else str(row[10]),
+    )
 
 
 class PgAgentMailbox:
@@ -875,29 +917,62 @@ class PgAgentMailbox:
             ).fetchall()
         return tuple(sorted(str(row[0]) for row in rows))
 
-    async def background_asks(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
-        """The background asks of one conversation, newest first. See the port."""
-        return await asyncio.to_thread(self._background_asks_sync, session)
+    async def background_ask(self, session: SessionRef, handle: str) -> BackgroundAsk | None:
+        """One background ask of the conversation by handle, however old. See the port."""
+        return await asyncio.to_thread(self._background_ask_sync, session, handle)
 
-    def _background_asks_sync(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
+    def _background_ask_sync(self, session: SessionRef, handle: str) -> BackgroundAsk | None:
+        with psycopg.connect(self._conninfo) as conn:
+            row = conn.execute(
+                _BACKGROUND_ASK_SQL, (session.tenant_id, session.session_id, handle)
+            ).fetchone()
+        return None if row is None else _background_ask_of(row)
+
+    async def count_background(
+        self,
+        session: SessionRef,
+        *,
+        open_only: bool = False,
+        excluding: BackgroundKeys | None = None,
+    ) -> int:
+        """How many background asks the conversation has, counted in SQL. See the port."""
+        return await asyncio.to_thread(self._count_background_sync, session, open_only, excluding)
+
+    def _count_background_sync(
+        self, session: SessionRef, open_only: bool, excluding: BackgroundKeys | None
+    ) -> int:
+        turn_id = "" if excluding is None else excluding.turn_id
+        keys = [] if excluding is None else list(excluding.keys)
+        with psycopg.connect(self._conninfo) as conn:
+            row = conn.execute(
+                _COUNT_BACKGROUND_SQL,
+                (session.tenant_id, session.session_id, open_only, turn_id, keys),
+            ).fetchone()
+        return 0 if row is None else int(row[0])
+
+    async def is_background_followup(self, session: SessionRef, turn_id: str) -> bool:
+        """Whether `turn_id` is a follow-up turn of the conversation. See the port."""
+        return await asyncio.to_thread(self._is_background_followup_sync, session, turn_id)
+
+    def _is_background_followup_sync(self, session: SessionRef, turn_id: str) -> bool:
         with psycopg.connect(self._conninfo) as conn:
             rows = conn.execute(
-                _BACKGROUND_ASKS_SQL, (session.tenant_id, session.session_id)
+                _ANSWERED_BACKGROUND_SQL, (session.tenant_id, session.session_id)
             ).fetchall()
-        return tuple(
-            BackgroundAsk(
-                handle=str(row[0]),
-                target=str(row[1]),
-                question=str(row[2]),
-                asked_at=row[3],
-                state=_background_state(str(row[4]), bool(row[5]), row[6]),
-                finished_at=row[7] if str(row[4]) == "cancelled" else row[6],
-                session=None if row[8] is None else str(row[8]),
-                hop=int(row[9]),
-                root_turn_id=None if row[10] is None else str(row[10]),
-            )
-            for row in rows
-        )
+        return any(background_followup_turn_id(str(row[0])) == turn_id for row in rows)
+
+    async def background_asks(
+        self, session: SessionRef, *, limit: int = BACKGROUND_LIST_LIMIT
+    ) -> tuple[BackgroundAsk, ...]:
+        """The background asks of one conversation, newest first. See the port."""
+        return await asyncio.to_thread(self._background_asks_sync, session, limit)
+
+    def _background_asks_sync(self, session: SessionRef, limit: int) -> tuple[BackgroundAsk, ...]:
+        with psycopg.connect(self._conninfo) as conn:
+            rows = conn.execute(
+                _BACKGROUND_ASKS_SQL, (session.tenant_id, session.session_id, limit)
+            ).fetchall()
+        return tuple(_background_ask_of(row) for row in rows)
 
     async def is_cancelled(self, correlation_id: str) -> bool:
         return await asyncio.to_thread(self._is_cancelled_sync, correlation_id)

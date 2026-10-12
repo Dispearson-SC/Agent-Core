@@ -40,7 +40,14 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from agent_core.domain.peers import AgentId, AgentRef, BackgroundAsk, PeerPolicy
+from agent_core.domain.peers import (
+    BACKGROUND_LIST_LIMIT,
+    AgentId,
+    AgentRef,
+    BackgroundAsk,
+    BackgroundKeys,
+    PeerPolicy,
+)
 from agent_core.domain.turn import CallerIdentity, SessionRef, TurnId
 
 
@@ -178,14 +185,43 @@ class AgentMailbox(Protocol):
         """
         ...
 
-    async def background_asks(self, session: SessionRef) -> tuple[BackgroundAsk, ...]:
+    async def background_asks(
+        self, session: SessionRef, *, limit: int = BACKGROUND_LIST_LIMIT
+    ) -> tuple[BackgroundAsk, ...]:
         """The background asks that conversation (tenant AND session id) started, newest first.
 
         Scoped in the query by both: the same session id under another tenant, another
         conversation of the same tenant and every ordinary ask are not in the result (C20). Their
-        state is derived from the row (`BackgroundState`). Bounded (the newest 50). An adapter with
-        no background asks returns an empty tuple.
+        state is derived from the row (`BackgroundState`). Bounded to the newest `limit` (default
+        `BACKGROUND_LIST_LIMIT`): a LISTING. Never count or look up through it (C1o): use
+        `count_background` and `background_ask`. An adapter with no background asks returns an
+        empty tuple.
         """
+        ...
+
+    async def background_ask(self, session: SessionRef, handle: str) -> BackgroundAsk | None:
+        """One background ask of that conversation by handle, however old; None if the handle is
+        not one of THIS conversation's (another conversation's, another tenant's, an ordinary
+        ask's and one that never existed are indistinguishable). C1o."""
+        ...
+
+    async def count_background(
+        self,
+        session: SessionRef,
+        *,
+        open_only: bool = False,
+        excluding: BackgroundKeys | None = None,
+    ) -> int:
+        """How many background asks that conversation has (all, or only the OPEN ones: queued or
+        running). Counted in the store, not from a window. `excluding` leaves out the rows a turn
+        already keyed with those request keys, so a step that re-runs does not count its own
+        earlier work against the cap (C1o). 0 for an adapter with no background asks."""
+        ...
+
+    async def is_background_followup(self, session: SessionRef, turn_id: str) -> bool:
+        """Whether `turn_id` is the follow-up turn of one of that conversation's background asks
+        (`background_followup_turn_id`). Lets a turn tell it was started to carry an answer back,
+        so a follow-up cannot start the next background ask of an unbounded chain (C1o, D51)."""
         ...
 
     async def cancel_background(self, session: SessionRef, reason: str) -> tuple[str, ...]:
