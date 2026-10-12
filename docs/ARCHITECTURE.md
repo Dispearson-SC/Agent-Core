@@ -661,6 +661,14 @@ another agent. The asker validates it again against the callee's schema before i
 answer that breaks the contract is `error` and is not shown, and a cut one is plain text. No schema,
 no change: prose stays the default.
 
+**Agent modes (C27, D61).** `mode: primary | peer | subagent | all` on a profile (default `all`) says
+who may reach the agent: a channel starts `primary`/`all`, another agent asks `peer`/`all`, a parent
+spawns `subagent`/`all`. Asking a `primary` or a `subagent` is a `refused` envelope
+(`callee_mode_not_askable`) and the agent is absent from the `ask_peer` catalogue; starting a `peer` or
+`subagent` agent from a channel is a 422 at `POST /turns` and a `ModeRefusedError` in `StartTurn`.
+A turn another agent started, and the follow-up that brings a background answer home, are not channel
+starts.
+
 **Model tiering (C24, D56).** A profile may declare `model_fast` (and `fast_steps`, default
 `[peer_answer]`). `StartTurn` runs a turn another agent started to answer an ask on that model
 (`AgentProfile.for_step`); a person's own turn, a resumed turn and any profile without `model_fast`

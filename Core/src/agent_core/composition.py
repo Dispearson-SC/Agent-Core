@@ -2026,6 +2026,8 @@ def build_container(
             context=context,
             skills=skills,
             profiles=profiles,
+            # C27. Lets a non-entry agent run the follow-up that carries a background answer home.
+            is_follow_up=mailbox.is_background_followup,
         ),
         # t-f3-20. The SAME runner, store, audit sink and profile map `start_turn` holds.
         # A second set here would police the continuation with rules loaded from another

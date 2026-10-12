@@ -2325,3 +2325,40 @@ so `PINNED_DBOS_APPLICATION_VERSION` stays `agent-core-turns.10`.
   `PgEventPublisher`; `events_connections` (max 4) serves the feed's reader and the task graph. A
   slow read can no longer make a publish wait for a checkout. The LISTEN wake-up already had its
   own connection.
+
+## D61 - Agent modes (C27)
+
+A profile says what it is FOR with `mode: primary | peer | subagent | all` (default `all`, so a
+profile that never says behaves exactly as before; a misspelt mode refuses to load, because falling
+back to `all` would silently widen who may reach the agent). The mode is part of the content hash.
+
+| mode | a channel may start it | another agent may ask it | a parent may spawn it |
+|---|---|---|---|
+| `primary` | yes | no | no |
+| `peer` | no | yes | no |
+| `subagent` | no | no | yes |
+| `all` | yes | yes | yes |
+
+- **A mode never grants a reach, it only removes one.** Asking still needs both sides' allowlists and
+  switches (`authorise_hop`), spawning needs the parent's `subagents` allowlist (D62).
+- **Asking: the gate and the catalogue.** `authorise_hop` takes the callee's mode and refuses with
+  `callee_mode_not_askable` (after the feature switches, before the hop limit). The workflow turns that
+  into the usual `refused` C8 envelope, so the asking model reads the reason; the catalogue (C14) builds
+  from the same gate, so a `primary` or `subagent` agent is not in the `ask_peer` enum.
+- **Starting: the door and the backstop.** `POST /turns` refuses a non-entry profile with 422 before a
+  turn exists (`create_app(channel_startable=...)`, wired from the container's profiles; an unknown id
+  passes and fails later in the profile lookup as it always did). `StartTurn` is the backstop for the
+  doors that have no profile map (the scheduler, pull channels, the console): it raises
+  `ModeRefusedError` before anything is written or any model call is made, so the turn fails visibly.
+- **What is NOT a channel start.** The turn of an agent another agent started (`request.owner` set)
+  and the follow-up turn that carries a background answer home. The follow-up runs as the agent that
+  asked, which may be a `peer` or a `subagent`; it is recognised through the mailbox
+  (`AgentMailbox.is_background_followup`, asked only when the mode already says no), because its turn id
+  is a hash and cannot be recognised by shape. With no check bound a turn nobody owns counts as a
+  channel start (the conservative reading).
+- **Product decision taken conservatively: `peer` is not channel-startable.** The task text only says a
+  `subagent` cannot be started by a channel. A `peer` agent exists to be asked; letting a channel start
+  it would make `peer` the same as `all` minus spawning. If a deployment wants an agent that is both an
+  entry point and askable, that is `all`.
+- **Not done here:** the A2A boundary (an inbound A2A task to a `primary`) is a transport adapter that
+  does not exist in this codebase as an inbound server, so there is nothing to refuse there yet.

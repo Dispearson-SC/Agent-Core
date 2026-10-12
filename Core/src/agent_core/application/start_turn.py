@@ -99,6 +99,7 @@ COMMUNICABLE SUSPENSION - t-f9-06, D17, CLAUDE.md non-negotiable #11
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Final
 
@@ -107,6 +108,7 @@ from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     PendingKind,
     PendingRequest,
+    SessionRef,
     TurnId,
     TurnOutcome,
     TurnRequest,
@@ -158,6 +160,20 @@ class UnknownProfileError(KeyError):
     """
 
 
+class ModeRefusedError(Exception):
+    """A channel tried to start an agent whose `mode` is not an entry point (C27, D61).
+
+    Not a `KeyError`: the profile exists, it just is not for this door. A driving adapter that
+    can check first (the HTTP route) answers 422 before any turn exists; this is the backstop for
+    the doors that cannot (a scheduler, a pull channel, the console).
+    """
+
+
+FollowUpCheck = Callable[[SessionRef, TurnId], Awaitable[bool]]
+"""Whether a turn id is the follow-up that carries a background ask's answer back (the mailbox
+knows: `AgentMailbox.is_background_followup`)."""
+
+
 class StartTurn:
     """Starts a turn and returns its two-shaped outcome."""
 
@@ -172,6 +188,7 @@ class StartTurn:
         context: ContextEngine,
         skills: SkillRegistry,
         profiles: dict[str, AgentProfile],
+        is_follow_up: FollowUpCheck | None = None,
     ) -> None:
         self._runner = runner
         self._tools = tools
@@ -181,6 +198,7 @@ class StartTurn:
         self._context = context
         self._skills = skills
         self._profiles = profiles
+        self._is_follow_up = is_follow_up
 
     async def execute(self, turn_id: TurnId, request: TurnRequest) -> TurnOutcome:
         """Run one turn. Steps are numbered to match the task notes in docs/TASKS.md.
@@ -197,6 +215,15 @@ class StartTurn:
         # STEP 1 - RESOLVE THE PROFILE. Before the write, so an unknown id leaves no
         # half-started turn behind for an operator to puzzle over.
         profile = self._resolve_profile(request.profile_id)
+        # C27. An agent that is only a peer or a subagent has no door of its own.
+        if not profile.mode.startable_by_channel and await self._is_channel_start(
+            turn_id, request
+        ):
+            raise ModeRefusedError(
+                f"Profile {profile.id!r} has mode {profile.mode.value!r}, so a channel cannot "
+                "start it: it is reached by another agent (ask_peer or spawn_subagent). Start a "
+                "profile with mode 'primary' or 'all' instead."
+            )
 
         # STEP 2 - READ THE CONVERSATION SO FAR, THEN PERSIST THIS REQUEST INTO IT.
         #
@@ -286,6 +313,21 @@ class StartTurn:
         # workflow's decision, which is what lets one use case serve the HTTP path and the
         # cron path.
         return outcome
+
+    async def _is_channel_start(self, turn_id: TurnId, request: TurnRequest) -> bool:
+        """Whether a person or a channel started this turn, and so must reach an entry point.
+
+        Not a channel start: the turn of an agent another agent asked or spawned (`request.owner`
+        is set), and the follow-up turn that carries a background answer back to its conversation,
+        which runs as the agent that asked and so may be a `peer` or a `subagent` (the follow-up
+        check, asked only when the mode already says no). With no check bound, a turn nobody owns
+        is a channel start: the conservative reading.
+        """
+        if request.owner is not None:
+            return False
+        if self._is_follow_up is None:
+            return True
+        return not await self._is_follow_up(request.session, turn_id)
 
     def _resolve_profile(self, profile_id: str) -> AgentProfile:
         try:

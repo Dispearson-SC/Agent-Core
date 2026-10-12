@@ -418,6 +418,7 @@ def create_app(
     channels: ChannelRegistry | None = None,
     event_feed: EventFeed | None = None,
     task_graph: TaskGraphReader | None = None,
+    channel_startable: Callable[[str], bool] | None = None,
 ) -> FastAPI:
     """The HTTP surface, wired to one way of starting a turn.
 
@@ -489,6 +490,17 @@ def create_app(
         # must leave no half-started turn behind for an operator to puzzle over.
         caller = _authenticate(x_subject_id, x_tenant_id, x_channel, x_roles, x_modality)
         refuse_unregistered_channel(caller)
+        if channel_startable is not None and not channel_startable(body.profile_id):
+            # C27. A `peer` or `subagent` agent has no door of its own; refuse it before a turn
+            # exists instead of letting the turn fail behind a 202.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"profile {body.profile_id!r} cannot be started from a channel: its mode is "
+                    "peer or subagent, so only another agent reaches it. Start a profile with "
+                    "mode primary or all."
+                ),
+            )
 
         request = TurnRequest(
             session=SessionRef(

@@ -374,6 +374,12 @@ def build_app(
         # C22. The progress feed of a turn tree: one broker per process, started with the app.
         event_feed=container.event_feed,
         task_graph=container.task_graph,
+        # C27. A profile whose mode is `peer` or `subagent` is refused at the door. An unknown id
+        # passes: the profile lookup fails it later, as it always did.
+        channel_startable=lambda profile_id: (
+            profile_id not in container.profiles
+            or container.profiles[profile_id].mode.startable_by_channel
+        ),
     )
 
     # t-f11-33. THE DEBT THIS COMMENT USED TO RECORD IS PAID. Both of these were built
