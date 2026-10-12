@@ -518,11 +518,10 @@ class _RecordingMailbox:
 class _InBandResume:
     """`ResumeTurn` as `_step_resume_round` reaches it, recording what it was handed.
 
-    `_step_resume` is swapped out by `_install`, but a round with any peer ask resumes
-    through `_step_resume_round` (D28): peer answers, refusals, timeouts and humans'
-    decisions in ONE batch. This fake receives that batch. It returns the same outcome the
-    caller's `resumes_to` produces, so the body reaches an answer down either route and the
-    decision sequence stays the thing under test.
+    EVERY round resumes through `_step_resume_round` (D28 for rounds with a peer ask, D32 for
+    the rest): peer answers, refusals, timeouts and humans' decisions in ONE batch. This fake
+    receives that batch. It returns what the caller's `resumes_to` produces, so the body reaches
+    an answer and the decision sequence stays the thing under test.
     """
 
     def __init__(self, resumes_to: Callable[[TurnId], TurnOutcome]) -> None:
@@ -624,8 +623,12 @@ def _install(
         label = ",".join(str(item.tool_call_id) for item in pending)
         return await log.call("_step_publish", label, lambda: None)
 
-    async def resume(turn_id: TurnId, request: TurnRequest, answer: object) -> Any:
-        return await log.call("_step_resume", str(turn_id), lambda: resumes_to(turn_id))
+    async def round_clock() -> Any:
+        # D32. A collected round reads the clock from a recorded step (`_step_round_clock`) and
+        # sizes its wait from it, so the clock has to be a step of this log or the two passes
+        # below would wait for different numbers of seconds. A whole number of seconds, so the
+        # wait label still reads `...:259200` for the three days a person is given.
+        return await log.call("_step_round_clock", "", lambda: 1000)
 
     async def abandon(turn_id: TurnId, reason: str) -> Any:
         return await log.call(
@@ -647,19 +650,21 @@ def _install(
     class _DurableReceive:
         @staticmethod
         async def recv_async(topic: str | None = None, timeout_seconds: float = 60) -> Any:
-            # `wakes` script what a round that COLLECTS (peer asks present) is woken by;
-            # the default is the opaque payload the per-answer wait never looks inside.
-            wake = pending_wakes.pop(0) if pending_wakes else None
-            return await log.call(
-                "recv_async",
-                f"{topic}:{timeout_seconds}",
-                (lambda: wake(mailbox)) if wake is not None else (lambda: ("answer",)),
-            )
+            # `wakes` script what every round is woken by (D32: every round collects its
+            # results). There is no default: the old per-answer wait accepted an opaque payload
+            # and a test that forgot to script a wake passed on it; a collected round refuses
+            # anything that is not a decision or a peer answer, so an unscripted wake is a bug
+            # in the test, said out loud.
+            def produce() -> object:
+                assert pending_wakes, f"the body waited for a wake nobody scripted ({topic})"
+                return pending_wakes.pop(0)(mailbox)
+
+            return await log.call("recv_async", f"{topic}:{timeout_seconds}", produce)
 
     monkeypatch.setattr(turn_workflow, "_step_new_turn_id", new_turn_id)
     monkeypatch.setattr(turn_workflow, "_step_start", start)
     monkeypatch.setattr(turn_workflow, "_step_publish", publish)
-    monkeypatch.setattr(turn_workflow, "_step_resume", resume)
+    monkeypatch.setattr(turn_workflow, "_step_round_clock", round_clock)
     monkeypatch.setattr(turn_workflow, "_step_abandon", abandon)
     monkeypatch.setattr(turn_workflow, "_step_expire", expire)
     monkeypatch.setattr(turn_workflow, "DBOS", _DurableReceive)
@@ -719,9 +724,16 @@ def test_replaying_the_workflow_body_reaches_the_same_decision_sequence(
     body = _workflow_body()
 
     first = _StepLog()
-    _install(monkeypatch, first, mint=_minter(), resumes_to=_finished)
+    _install(
+        monkeypatch,
+        first,
+        mint=_minter(),
+        resumes_to=_finished,
+        wakes=(_the_human_approves("tc-a"), _the_human_approves("tc-b")),
+    )
     outcome = asyncio.run(body(_request()))
 
+    # The replay is handed the recorded wakes back by the log, so it scripts none.
     replayed = _StepLog(recorded=first.recorded)
     _install(monkeypatch, replayed, mint=_minter(), resumes_to=_finished)
     replayed_outcome = asyncio.run(body(_request()))
@@ -766,7 +778,14 @@ def test_a_turn_that_never_stops_asking_is_abandoned_rather_than_looping(
     body = _workflow_body()
 
     log = _StepLog()
-    _install(monkeypatch, log, mint=_minter(), resumes_to=_suspended)
+    _install(
+        monkeypatch,
+        log,
+        mint=_minter(),
+        resumes_to=_suspended,
+        wakes=(_the_human_approves("tc-a"), _the_human_approves("tc-b"))
+        * turn_workflow.MAX_HUMAN_ROUNDS,
+    )
     outcome = asyncio.run(body(_request()))
 
     publishes = [name for name, _ in log.decisions if name == "_step_publish"]
@@ -2274,7 +2293,7 @@ def test_an_evidence_request_resumes_with_the_uploaded_image(
     with a description of it.
 
     EXACTLY HOW FAR THIS REACHES, SAID PLAINLY RATHER THAN IMPLIED
-        It ends where the durable boundary ends: at the resolution `_step_resume` hands the
+        It ends where the durable boundary ends: at the resolution `_step_resume_round` hands the
         application layer. `ResumeTurn` step 3 is what then turns a `MediaRef` into bytes or
         a signed URL for the provider, and `tests/unit/test_resume_turn.py` pins that half -
         duplicating it here would need a media store and would prove it about a fake.

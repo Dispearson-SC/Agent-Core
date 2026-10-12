@@ -877,10 +877,11 @@ slowest call.
   is accepted by the new round. Nothing marks a handle dead for good.
 - **Unchanged.** Hop gate per ask, mailbox idempotency, answer wrapping at one place, audit.
 
-**Still on the per-answer path.** A round with no peer ask (one or several human requests)
-keeps the previous wait: one `THREE_DAYS` wait per answer. Several human-only requests in
-one step have the same partial-resume defect and are a separate decision. Timed-out ask
-rows stay open in the mailbox (no close verb).
+**Still on the per-answer path (superseded by D32/C6, which collects human-only rounds too).**
+A round with no peer ask (one or several human requests) kept the previous wait: one
+`THREE_DAYS` wait per answer. Several human-only requests in one step had the same
+partial-resume defect. Timed-out ask rows stayed open in the mailbox (no close verb; D31 added
+`cancel`).
 
 **Deploying D28 (replay shape).** D28 removed the steps `_step_refuse_peers` and
 `_step_resume_peers`, added `_collect_round` (a new step order for single-ask and mixed
@@ -1213,3 +1214,34 @@ OpenCode's `restart.ts` counts resumes durably before each one and terminalizes 
 - *Not done.* No message is delivered to the person whose turn was poisoned (a product decision:
   `_step_deliver` is a step and the channel text is F3's); the ERROR status, the log line and
   the ledger row are the operator's evidence.
+
+**C6 · a round with only people is collected too.** Rounds with several human requests and no peer
+ask still used the per-answer wait and resumed on the first decision, so a model step that stopped
+on two approvals failed with `UserError: Tool call results need to be provided for all deferred
+tool calls` (observed RED: the first approval alone reached `ResumeTurn`, and a second request that
+expired still produced an answer instead of an expiry). Now `_drive_turn` sends EVERY round through
+`_collect_round`:
+
+- the humans' decisions are collected and `_step_resume_round` runs once, in `tool_call_id` order;
+- humans keep the `THREE_DAYS` semantics of D28, counted from the round's recorded clock
+  (`_step_round_clock`) rather than from each answer. A person who has not decided by then expires
+  the turn (`_step_expire`) and nothing is resumed on the decisions that did arrive: no partial
+  resume. Cost: with several requests the last one has what is left of ONE three days, not three
+  fresh days after the previous answer;
+- what the per-answer step refused is still refused, now by `_collect_round`: a `HumanAnswer` of
+  another turn, a payload that is no answer, a peer wake for a handle the turn never asked under;
+  a duplicate decision does not resolve a second call, and an uploaded file reaches the
+  resolution unchanged;
+- `_step_resume`, `_step_answer_peer` and `_answer_the_deferred_calls` had no caller left and are
+  deleted; the reasoning about the resumed continuation's identity (`request.caller`, never the
+  approver) moved to `_step_resume_round`. `test_durability.py`'s step-log fakes were updated
+  deliberately: the clock is now a recorded step of the log, and an unscripted wake fails the test
+  instead of being accepted as an opaque payload (the old per-answer wait never looked inside it);
+  no assertion was weakened. The refusal test of `test_resume_turn.py` moved to
+  `test_human_collect_round.py` with both its payloads.
+
+**Deploying D32 (replay shape).** C6 added a recorded step to every human-only round and replaced
+`_step_resume` with `_step_resume_round`, so the pinned application version moved
+`agent-core-turns.3` -> `.4` (ONE bump for the whole batch; C1f, C1g, C1h and C5 changed no step
+name or order). A turn suspended on a person under `.3` is stranded, not recovered: drain it or
+cancel it (OPERATIONS.md). Peer asks stranded the same way are rerun under `.4` by the lease (C1g).

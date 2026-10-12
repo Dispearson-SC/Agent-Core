@@ -17,7 +17,8 @@ Status:  IMPLEMENTED (t-f2-01, t-f2-03, t-f2-10, t-f2-11, t-f3-07) - the body, i
          `signal_evidence` is the evidence door onto the same durable topic; before it,
          F7's own acceptance test could only reach this wire through a `cast`.
          t-f3-17 IMPLEMENTED - `_step_publish` asks through `HumanGateway`.
-         t-f3-16 IMPLEMENTED on this side - `_step_resume` turns a `HumanAnswer` into the
+         t-f3-16 IMPLEMENTED on this side - `_step_resume_round` (which replaced the per-answer
+         `_step_resume` in D32) turns the round's `HumanAnswer`s into the
          `tuple[ToolResolution, ...]` `ResumeTurn` takes and supplies `request.caller` as
          the identity the resumed continuation is policed and audited as. `composition.py`
          binds the `resume_turn` seat (t-f3-20); a container built without it still
@@ -123,10 +124,10 @@ WHICH MESSAGE TRAVELS IN THE TURN, ANSWERED ONCE FOR BOTH HALVES OF THE COALESCI
     either repeat one sentence or lose one, and no test could say which.
 
     `_step_publish` is WIRED (docs/TASKS.md#t-f3-17): `HumanGateway` landed at t-f3-04 and
-    the step asks through it. `_step_resume` is wired too (docs/TASKS.md#t-f3-16), and it
-    reads the `HumanAnswer` that `POST /decisions/{corr_id}` puts on the durable topic. It
-    refuses anything else rather than coercing it: a silent fallback on either step would
-    resume a turn without asking anybody.
+    the step asks through it. The resume is wired too (docs/TASKS.md#t-f3-16): `_collect_round`
+    reads the `HumanAnswer` that `POST /decisions/{corr_id}` puts on the durable topic and
+    `_step_resume_round` applies it. A wake of any other type is refused rather than coerced: a
+    silent fallback on either step would resume a turn without asking anybody.
 
 NOT EVERY SUSPENSION IS A QUESTION FOR A HUMAN
     Three mechanisms suspend a turn through one primitive: an approval, an evidence
@@ -1014,9 +1015,9 @@ async def _step_ask_peers(
 def _require_resume_turn() -> ResumeTurn:
     """The bound `ResumeTurn`, or the loud failure. Shared by every resuming step.
 
-    One raise rather than one per step: `_step_resume` and `_step_answer_peer` are
-    answering the same question - "an answer arrived and there is nothing to apply it
-    with" - and two spellings of it would mean two things to recognise in an incident.
+    One raise rather than one per use: every resuming step answers the same question - "an
+    answer arrived and there is nothing to apply it with" - and two spellings of it would mean
+    two things to recognise in an incident.
     """
     resume = _require_dependencies().resume_turn
     if resume is None:
@@ -1026,100 +1027,6 @@ def _require_resume_turn() -> ResumeTurn:
             "composition.py's bind_turn_workflow must pass resume_turn=container.resume_turn."
         )
     return resume
-
-
-async def _answer_the_deferred_calls(
-    turn_id: TurnId, request: TurnRequest, answered: tuple[tuple[ToolCallId, str], ...]
-) -> TurnOutcome:
-    """Feed externally-executed results back in. NOT a step - called from inside one.
-
-    `approved=True` WITH A PAYLOAD, which is the externally-executed shape rather than a
-    decision anybody made: the peer already ran the work and its reply IS the tool's
-    result, so the call must not be executed locally as well
-    (`adapters/driven/agent_pydantic/runner.py::_deferred_results`, the three shapes).
-    `approved=False` would arrive as a `ToolDenied` and re-run nothing, which reads to the
-    model as "your ask was rejected" even when a peer answered it in full.
-
-    A REFUSAL TAKES THE SAME SHAPE, and that is not a fudge: a refused ask WAS executed
-    externally, by the gate, and its result is the sentence saying so. Routing it through
-    the denial branch instead would tell the model the tool was blocked pending approval,
-    which is a different fact and a different thing for it to try next.
-
-    The identity is `request.caller` - the identity the TURN belongs to - for the reason
-    `_step_resume` spells out in full: CLAUDE.md non-negotiable #9, no code path widens one
-    identity into another, and a peer is not an identity this system acts as at all.
-    """
-    return await _require_resume_turn().execute(
-        turn_id,
-        request.session,
-        request.profile_id,
-        tuple(
-            ResolvedTool(tool_call_id=tool_call_id, approved=True, payload=payload)
-            for tool_call_id, payload in answered
-        ),
-        caller=request.caller,
-    )
-
-
-@DBOS.step()
-async def _step_answer_peer(
-    turn_id: TurnId,
-    request: TurnRequest,
-    answer: PeerAnswer,
-    tool_call_id: ToolCallId | None,
-) -> TurnOutcome:
-    """Redeem a peer's handle and resume the turn with what it said. t-f11-44.
-
-    THE ANSWER IS ALREADY WRAPPED AND IS NOT WRAPPED AGAIN
-        `AgentMailbox.read_answer` returns the peer's bytes inside the same delimiters an
-        `mcp_*` result gets - the PORT requires it, so no caller typed on the port can be
-        handed raw peer bytes. The mistake available here is wrapping it a second time:
-        a model shown a nested `<untrusted-tool-output>` cannot tell which delimiter is
-        the real one, and non-negotiable #10's protection comes from exactly one boundary
-        being exactly one boundary.
-
-        There is deliberately no "is it already wrapped?" sniff, because a hostile peer
-        controls its own bytes and would pass the sniff on purpose. That is also why the
-        two re-wrapping helpers this paragraph used to name were DELETED rather than
-        documented: while a second way to wrap exists, the only defence is remembering not
-        to use it, and a delimiter count cannot catch the error because the outer wrap
-        neutralises the inner one. Only an equality against `wrap_peer_answer` can, which
-        is what `test_runner_deferred.py` asserts.
-
-    THE `tool_call_id` IS THE BODY'S, NOT THE WIRE'S, AND THAT IS THE POINT
-        `PeerAnswer` carries only the correlation id, and the body looks the provider's
-        `tool_call_id` up in the handles `_step_ask_peers` recorded. So the id never leaves
-        this workflow: it is not serialised through a queue, not re-read from a row, not
-        re-cased by anything. CLAUDE.md non-negotiable #5 says a mismatch is dropped
-        without an exception and surfaces as a provider 400 much later; the cheapest way to
-        round-trip a string verbatim is never to round-trip it at all.
-
-    THREE WAYS THIS REFUSES RATHER THAN GUESSING, and each is a turn resumed on something
-    nobody sent: an answer addressed to another turn, a handle this turn never asked
-    under, and a wake with no answer recorded behind it. A plausible outcome invented here
-    would resume the conversation with content nobody gave it.
-    """
-    if answer.turn_id != turn_id:
-        raise UnusableResumeAnswerError(
-            f"a peer answer for turn {answer.turn_id!r} was delivered to turn {turn_id!r}. "
-            "Applying it would resume this turn on an answer given to another one."
-        )
-    if tool_call_id is None:
-        raise UnusableResumeAnswerError(
-            f"the durable wait woke on peer handle {answer.correlation_id!r} and this turn "
-            "never asked under it. Resolving it would name a tool_call_id the model never "
-            "issued, which Pydantic AI drops in silence while the agent asks forever."
-        )
-
-    wrapped = await _read_wrapped_answer(answer.correlation_id)
-    if wrapped is None:
-        raise UnusableResumeAnswerError(
-            f"the turn was woken for peer handle {answer.correlation_id!r} and the mailbox "
-            "holds no answer under it. The wake and the record disagree; resuming on an "
-            "empty result would hand the model an answer the peer never gave."
-        )
-
-    return await _answer_the_deferred_calls(turn_id, request, ((tool_call_id, wrapped),))
 
 
 @DBOS.step()
@@ -1145,10 +1052,11 @@ async def _step_peer_reply_timeout(request: TurnRequest) -> int:
 async def _step_read_peer_answer(
     turn_id: TurnId, answer: PeerAnswer, tool_call_id: ToolCallId
 ) -> tuple[ToolCallId, str]:
-    """Redeem one peer's handle WITHOUT resuming the turn. The collecting twin of
-    `_step_answer_peer`.
+    """Redeem one peer's handle WITHOUT resuming the turn.
 
-    Same refusals, same wrapping rule (the port wraps; nothing here wraps again), but the
+    Refuses an answer addressed to another turn, a handle this turn never asked under and a
+    wake with no answer recorded behind it (each is a turn resumed on something nobody sent), and
+    follows the wrapping rule (the port wraps; nothing here wraps again), but the
     result is only a `(tool_call_id, wrapped answer)` pair that the body holds until every
     ask of the round has one. Pydantic AI resumes a run only when it is handed results for
     ALL of its deferred calls.
@@ -1419,23 +1327,44 @@ async def _step_resume_round(
     decisions: tuple[HumanAnswer, ...],
 ) -> TurnOutcome:
     """Resume ONCE with every result of a round: peer answers, refusals and timeouts (all
-    externally executed) and the humans' decisions.
+    externally executed) and the humans' decisions. Every round resumes through here (D28, D32).
 
     `order` is the round's `tool_call_id` order, so the batch never follows arrival order
     (CLAUDE.md non-negotiable #7). `ResumeTurn` keys its ledger on `(turn_id,
     tool_call_id)` and treats the batch as a unit, so a replayed step re-runs nothing.
+
+    WHICH CALLER THE RESUMED CONTINUATION IS POLICED AS: `request.caller`, the identity the TURN
+    belongs to. A resume is not one tool call: the model may ask for more on the same
+    continuation, and `ToolPolicy.load_rules` needs an identity before any of them can be
+    checked, audited or compacted. IT IS NOT THE APPROVING HUMAN (CLAUDE.md non-negotiable #9:
+    no code path widens one identity into another): the approver reviewed ONE call, and treating
+    them as the actor would run every later call on the continuation under the reviewer's
+    permissions. `HumanAnswer` carries no identity for exactly this reason; who decided is
+    recorded by `DecideApproval` on the human's own request before this step ever wakes.
+
+    NOTHING IS COERCED. The body only hands this step a `HumanAnswer` addressed to this turn
+    (`_collect_round` refuses a wake of another type or turn), so the resolution cannot name a
+    `tool_call_id` the model never issued, which Pydantic AI drops in silence while the agent
+    asks the same question for ever.
     """
     peer = dict(peer_results)
     human = {decision.tool_call_id: decision for decision in decisions}
     resolved: list[ResolvedTool] = []
     for tool_call_id in order:
         if tool_call_id in peer:
-            # The shape `_answer_the_deferred_calls` documents: approved WITH a payload.
+            # An externally executed result: approved WITH a payload. The peer (or the gate that
+            # refused the ask) already did the work and its reply IS the tool's result, so the
+            # call must not be executed locally as well (`runner._deferred_results`).
+            # `approved=False` would arrive as a `ToolDenied` and tell the model its ask was
+            # rejected even when a peer answered it in full.
             resolved.append(ResolvedTool(tool_call_id, approved=True, payload=peer[tool_call_id]))
         else:
             decision = human[tool_call_id]
-            # The human's note IS the tool result, passed through unnarrowed (see
-            # `_step_resume`).
+            # The human's note IS the tool result, passed through unnarrowed: a reason when they
+            # refused, so the agent can adapt; a `MediaRef` when they were asked for a file
+            # (`ResumeTurn` recognises it by TYPE); `None` on a bare approval, which tells the
+            # runner to execute the deferred call itself. A branch here would be a second copy
+            # of a rule that lives in `ResumeTurn`.
             resolved.append(
                 ResolvedTool(tool_call_id, approved=decision.approved, payload=decision.note)
             )
@@ -1476,7 +1405,7 @@ async def _collect_round(
         left; an ask unanswered at it is resolved with an error text for that call only
         and the answers that did arrive are still delivered. Humans (approval, evidence,
         and any kind nobody can answer): `THREE_DAYS` from the same moment, and a person
-        who has not decided by then expires the TURN, as the per-answer wait always did.
+        who has not decided by then expires the TURN, as the old per-answer wait did.
         Each wait is bounded by the nearest live deadline; the remaining time is
         recomputed from the recorded clock after every wake.
 
@@ -1623,89 +1552,6 @@ async def _collect_round(
             tuple(peer_results.items()),
             tuple(decisions.values()),
         )
-    )
-
-
-@DBOS.step()
-async def _step_resume(turn_id: TurnId, request: TurnRequest, answer: object) -> TurnOutcome:
-    """Feed the human's answer back into the suspended turn. docs/TASKS.md#t-f3-16.
-
-    THE WIRE SHAPE. `HumanAnswer` is what `signal_decision` sends and what
-    `DBOS.recv_async` hands this step (docs/TASKS.md#t-f3-11). `answer` stays `object`
-    because the parameter is part of the durable step log and a peer's reply arrives on
-    this same topic (docs/TASKS.md#t-f9-04); the narrowing belongs here, to the reader.
-
-    WHICH CALLER THE RESUMED CONTINUATION IS POLICED AS, WHICH IS THE POINT OF THE ANCHOR
-        `request.caller` - the identity the TURN belongs to, carried in the request this
-        step already holds. A resume is not one tool call: the model may ask for more on
-        the same continuation, and `ToolPolicy.load_rules` needs an identity before any of
-        them can be checked, audited or compacted.
-
-        IT IS NOT THE APPROVING HUMAN, and that is a rule rather than a convenience.
-        CLAUDE.md non-negotiable #9: no code path widens one identity into another. The
-        approver reviewed ONE call; treating them as the actor would run every later call
-        on the continuation under the reviewer's permissions, so approving a refund would
-        silently lend the agent everything else that operator may do. The permissions the
-        model acts under do not change because somebody said yes once.
-
-        `HumanAnswer` carries no identity for exactly this reason, and it should not grow
-        one: who decided is already recorded by `DecideApproval` through
-        `AuditSink.record_human_decision`, on the human's own request, before this step
-        ever wakes.
-
-    A SILENT FALLBACK IS THE ONE THING THIS MUST NOT DO. Returning a plausible outcome
-    here resumes a turn as though a human had answered when nobody did - the exact
-    approval-without-an-approver the correlation table exists to prevent. So a payload
-    that is not this turn's answer raises rather than being coerced: `HumanAnswer` carries
-    its own `turn_id` precisely so that mismatch is detectable, and a resolution built from
-    a misrouted payload would name a `tool_call_id` the model never issued - which Pydantic
-    AI drops silently while the agent asks the same question forever.
-
-    IDEMPOTENCE IS THE USE CASE'S (R4 below). `ResumeTurn` keys on
-    `(turn_id, tool_call_id)` and returns the stored outcome for an answered pair, so a
-    replayed step re-runs no tool. Nothing is re-checked here: a second, weaker copy of
-    that rule in the adapter is how the two come to disagree.
-    """
-    if not isinstance(answer, HumanAnswer):
-        raise UnusableResumeAnswerError(
-            f"the durable wait woke with a {type(answer).__name__} on {RESUME_TOPIC!r} and "
-            "only a HumanAnswer (docs/TASKS.md#t-f3-11) can be turned into a resolution "
-            "here. A peer's reply arrives on this topic too and is a `PeerAnswer`, which "
-            "the body routes to `_step_answer_peer` (docs/TASKS.md#t-f11-44) before this "
-            "step is reached; guessing at anything else resumes the turn on something "
-            "nobody sent."
-        )
-    if answer.turn_id != turn_id:
-        raise UnusableResumeAnswerError(
-            f"an answer for turn {answer.turn_id!r} was delivered to turn {turn_id!r}. "
-            "Applying it would resume this turn on a decision given about another one."
-        )
-
-    return await _require_resume_turn().execute(
-        turn_id,
-        request.session,
-        request.profile_id,
-        (
-            ResolvedTool(
-                tool_call_id=answer.tool_call_id,
-                approved=answer.approved,
-                # What the human supplied IS the tool result the model receives: a reason
-                # when they refused, so the agent can adapt instead of retrying blindly; a
-                # `MediaRef` when they were asked for a file and sent one (t-f7-11), which
-                # `ResumeTurn` recognises by TYPE and turns into bytes or a signed URL;
-                # `None` on a bare approval, which is what tells the runner to execute the
-                # deferred call itself rather than answer it (ports/agent_runner.py).
-                #
-                # Passed through unnarrowed on purpose. `HumanPayload` is the carrier's
-                # whole vocabulary and `ResolvedTool.payload` is `object | None`, so a
-                # branch here would be this adapter deciding what an evidence answer means
-                # - a second copy of a rule that already lives in `ResumeTurn`, and the
-                # day a third kind of answer lands, the copy that is not updated is the
-                # one that silently drops it.
-                payload=answer.note,
-            ),
-        ),
-        caller=request.caller,
     )
 
 
@@ -1922,45 +1768,20 @@ async def _drive_turn(request: TurnRequest) -> _TurnEnd:
         dispatch = await _step_ask_peers(turn_id, request, _for_a_peer(ordered))
         peer_calls.update(dispatch.handles)
 
-        # Any round that asked a peer (one ask, several, or mixed with a human's request):
-        # collect EVERY result - peer answers, refusals, timeouts and the humans'
-        # decisions - then resume once. Pydantic AI will not continue on a subset of its
-        # deferred calls, and a peer wait is bounded by the asker's reply timeout.
-        # A round with no peer ask keeps the per-answer wait below.
-        if _for_a_peer(ordered):
-            collected = await _collect_round(
-                turn_id, request, ordered, dispatch, peer_calls, timed_out_peers, earlier_calls
-            )
-            if collected.closed:
-                return collected
-            outcome = collected.outcome
-            continue
-
-        # Only human-only rounds reach here (a round with any peer ask went through
-        # `_collect_round` above, which also resolves refused asks in-band). One wait per
-        # human answer, explicitly THREE_DAYS - the 60-second default is the trap, and a
-        # person decides in hours, not seconds.
-        while True:
-            await _note_wait(parked=True)
-            answer = await DBOS.recv_async(RESUME_TOPIC, timeout_seconds=THREE_DAYS)
-            await _note_wait(parked=False)
-            if isinstance(answer, PeerAnswer) and answer.correlation_id in timed_out_peers:
-                continue
-            break
-        if answer is None:
-            return _TurnEnd(await _step_expire(turn_id), closed=True)
-
-        # ONE topic, two payload types, and the branch is on the TYPE rather than on
-        # anything this body remembers. `DBOS.recv_async` returns whatever was sent to this
-        # workflow and the type is part of the durable payload, so the branch replays
-        # identically; deciding from "was a peer asked?" instead would take a different
-        # path the day both a human and a peer answer the same turn.
-        if isinstance(answer, PeerAnswer):
-            outcome = await _step_answer_peer(
-                turn_id, request, answer, peer_calls.get(answer.correlation_id)
-            )
-        else:
-            outcome = await _step_resume(turn_id, request, answer)
+        # EVERY round is collected (D28 for rounds with a peer ask, D32/C6 for the rest): wait
+        # for EVERY result of the model step - peer answers, refusals and timeouts and the
+        # humans' decisions - then resume once. Pydantic AI will not continue on a subset of its
+        # deferred calls (`UserError: Tool call results need to be provided for all deferred
+        # tool calls`), so resuming per answer failed a step that stopped on two approvals at
+        # the first decision. A peer wait is bounded by the asker's reply timeout; a person's
+        # keeps `THREE_DAYS`, counted from the round's recorded clock, and a person who has not
+        # decided by then expires the turn with nothing resumed.
+        collected = await _collect_round(
+            turn_id, request, ordered, dispatch, peer_calls, timed_out_peers, earlier_calls
+        )
+        if collected.closed:
+            return collected
+        outcome = collected.outcome
 
     return _TurnEnd(outcome)
 
@@ -1990,7 +1811,7 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
         transaction would hold a connection for the length of the model call.
 
     R4. STEPS ARE IDEMPOTENT WHERE THEY TOUCH THE WORLD.
-        `_step_resume` keys on (turn_id, tool_call_id) and treats an already-resolved id
+        `_step_resume_round` keys on (turn_id, tool_call_id) and treats an already-resolved id
         as a no-op returning the stored outcome. Without it, a crash between the tool
         running and the outcome being persisted freezes the account twice on recovery.
 
@@ -2182,8 +2003,8 @@ async def run_peer_turn_workflow(job: PeerTurnJob) -> TurnOutcome:
         raise
     result = end.outcome.result
     # C1e. "Closed unanswered" is the TYPED `_TurnEnd.closed` (abandoned after too many rounds,
-    # expired waiting for a person - on the per-answer path and inside a collected round alike),
-    # never a comparison with the sentinel sentences: a callee's genuine answer may read the same.
+    # expired waiting for a person), never a comparison with the sentinel sentences: a callee's
+    # genuine answer may read the same.
     # `result is None` cannot happen for a finished turn (I2) and only narrows the type.
     text = PEER_ASK_CLOSED_ANSWER if end.closed or result is None else result.text
     await _close_peer_ask(job, text)
@@ -2217,14 +2038,14 @@ HumanPayload = str | MediaRef | None
 class HumanAnswer:
     """What a human's decision looks like on the durable wire. docs/TASKS.md#t-f3-11.
 
-    A TYPE AND NOT A DICT, for the reason `_step_resume` refused to guess a shape: the
+    A TYPE AND NOT A DICT, for the reason `_step_resume_round` refuses to guess a shape: the
     payload is written by `POST /decisions/{corr_id}` in one process and read back inside
     a workflow that may be running in another, days later, after a redeploy. A dict whose
     keys drifted between the two sides would not raise - it would hand the runner a
     resolution for a `tool_call_id` the model never issued, Pydantic AI would drop it
     silently, and the agent would ask the same question forever.
 
-    IT CARRIES ITS OWN `turn_id` even though `_step_resume` already has one. That is not
+    IT CARRIES ITS OWN `turn_id` even though `_step_resume_round` already has one. That is not
     redundancy, it is the check: `DBOS.recv_async` returns whatever was sent to this
     workflow, and a mismatch means an answer was routed into the wrong turn - the exact
     approval-without-an-approver the correlation table exists to prevent. A reader that
@@ -2333,7 +2154,7 @@ async def signal_evidence(
     `signal_decision` takes a yes/no and a note and cannot be handed a file;
     `signal_evidence` takes the stored reference and cannot be handed a yes/no. One
     function with an optional everything would let a caller send an approval carrying a
-    photo, which `_step_resume` would then pass on as the tool's result.
+    photo, which `_step_resume_round` would then pass on as the tool's result.
 
     `approved=True` IS NOT A DECISION ANYBODY MADE, and it must not be read as one. A
     person who was asked for a photo and sent one has answered the request; there was no
@@ -2378,7 +2199,7 @@ async def signal_peer_answer(turn_id: TurnId, correlation_id: str) -> None:
     (docs/TASKS.md#t-f11-43) calls this rather than importing DBOS to build the send.
 
     THE TWO CALLS ARE ORDERED AND THE ORDER IS NOT COSMETIC
-        `AgentMailbox.answer(correlation_id, ...)` first, THEN this. `_step_answer_peer`
+        `AgentMailbox.answer(correlation_id, ...)` first, THEN this. `_step_read_peer_answer`
         redeems the handle through `read_answer` the moment it wakes, so a signal sent
         before the answer is recorded wakes a turn onto a row that is still unanswered -
         which that step refuses, loudly, rather than resuming on an empty result. Recording

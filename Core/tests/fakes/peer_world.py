@@ -146,10 +146,26 @@ class Start:
     def __init__(self, *, c_waits_for_a_human: bool = False) -> None:
         self.c_waits_for_a_human = c_waits_for_a_human
         self.b_answers_directly = False
+        # Approvals A asks of its own people instead of asking B (C6): their tool call ids.
+        self.a_asks_people: tuple[str, ...] = ()
         self.requests: list[TurnRequest] = []
 
     async def execute(self, turn_id: TurnId, request: TurnRequest) -> TurnOutcome:
         self.requests.append(request)
+        if request.profile_id == A and self.a_asks_people:
+            return TurnOutcome(
+                turn_id=turn_id,
+                pending=tuple(
+                    PendingRequest(
+                        kind=PendingKind.APPROVAL,
+                        tool_call_id=ToolCallId(call),
+                        tool_name="freeze_account",
+                        arguments={},
+                        reason="a human must agree",
+                    )
+                    for call in self.a_asks_people
+                ),
+            )
         asks = {A: B} if self.b_answers_directly else {A: B, B: C}
         if request.profile_id in asks:
             pending = PendingRequest(
@@ -179,6 +195,7 @@ class Start:
 class Resume:
     def __init__(self) -> None:
         self.payloads: dict[str, list[object]] = {}
+        self.calls: list[tuple[str, tuple[tuple[str, bool], ...]]] = []  # (profile, decisions)
 
     async def execute(
         self,
@@ -190,6 +207,8 @@ class Resume:
         caller: CallerIdentity,
     ) -> TurnOutcome:
         self.payloads.setdefault(profile_id, []).extend(r.payload for r in resolutions)
+        decisions = tuple((str(r.tool_call_id), r.approved) for r in resolutions)
+        self.calls.append((profile_id, decisions))
         text = {A: "a done", B: "b relays"}.get(profile_id, "c finished")
         return TurnOutcome(turn_id=turn_id, result=TurnResult(text=text))
 

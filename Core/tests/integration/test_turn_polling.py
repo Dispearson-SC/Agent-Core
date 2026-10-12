@@ -29,7 +29,7 @@ WHY THIS IS AN INTEGRATION TEST
 
 WHY THE DECISION ROUTE IS PROVED BY HOLDING THE RESUME STEP
     "The route never blocks" cannot be proved with a stopwatch - a fast machine passes a
-    blocking route too. So `_step_resume` is held open until the test releases it, and
+    blocking route too. So `_step_resume_round` is held open until the test releases it, and
     the assertion is causal: the response arrived while the turn was demonstrably still
     inside the step it was woken into. The hold is bounded, so a route that DOES block
     fails with a sentence instead of hanging the suite.
@@ -81,7 +81,7 @@ _WINDOW_SECONDS = 0.2
 # Turns a hang into a readable failure. Never a tolerance an assertion depends on.
 _DEADLINE_SECONDS = 60.0
 
-# How long `_step_resume` holds itself open when the test has not released it. A route
+# How long `_step_resume_round` holds itself open when the test has not released it. A route
 # that blocked on the turn would otherwise deadlock against this hold; bounded, it fails
 # on the assertion below instead of hanging the suite.
 _HOLD_SECONDS = 5.0
@@ -445,7 +445,7 @@ def test_post_decisions_resolves_a_correlation_and_wakes_the_turn_without_blocki
     decision was accepted, and the turn sleeps for three days.
 
     THE NON-BLOCKING HALF IS PROVED CAUSALLY, NOT BY A CLOCK
-        `_step_resume` is held open. The response comes back while the woken turn is
+        `_step_resume_round` is held open. The response comes back while the woken turn is
         demonstrably still inside it, so the route provably did not wait for the turn.
         A stopwatch would pass a blocking route on a fast machine.
     """
@@ -471,13 +471,19 @@ def test_post_decisions_resolves_a_correlation_and_wakes_the_turn_without_blocki
     audit = _RecordingAudit()
     monkeypatch.setattr(turn_workflow, "_dependencies", _wired(started, channel, gateway))
 
-    async def resume(turn_id: TurnId, request: TurnRequest, answer: object) -> TurnOutcome:
-        received.append(answer)
+    async def resume(
+        turn_id: TurnId,
+        request: TurnRequest,
+        order: tuple[object, ...],
+        peer_results: tuple[object, ...],
+        decisions: tuple[object, ...],
+    ) -> TurnOutcome:
+        received.extend(decisions)
         entered.set()
         await asyncio.to_thread(release.wait, _HOLD_SECONDS)
         return TurnOutcome(turn_id=turn_id, result=TurnResult(text="resumed"))
 
-    monkeypatch.setattr(turn_workflow, "_step_resume", resume)
+    monkeypatch.setattr(turn_workflow, "_step_resume_round", resume)
 
     decide = DecideApproval(
         gateway=cast("Any", gateway), audit=cast("Any", audit), signal=signal

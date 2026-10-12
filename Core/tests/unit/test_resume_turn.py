@@ -28,7 +28,7 @@ The properties, and why each is here rather than left to an integration test:
    anything about those later calls needs the identity `ToolPolicy.load_rules` takes, so
    `AgentRunner.resume` grew a `caller` seat - and every layer above it has to be able to
    fill it, or the widening bought nothing. `execute` therefore has a `CallerIdentity`
-   seat of its own, and `_step_resume` supplies `request.caller`.
+   seat of its own, and `_step_resume_round` supplies `request.caller`.
 
 `FakeMediaStore` is imported from tests/fakes/ports.py - the one shared stand-in for the
 port (docs/TASKS.md#t-f7-02). `ContinuingRunner` stays local for a different reason: it is
@@ -226,7 +226,7 @@ def _wire(
 
 
 def _turn_request(session: SessionRef) -> TurnRequest:
-    """The request the suspended turn started from. `_step_resume` reads its `caller`."""
+    """The request the suspended turn started from. `_step_resume_round` reads its `caller`."""
     return TurnRequest(
         session=session,
         caller=TURN_CALLER,
@@ -242,7 +242,7 @@ def _bind(monkeypatch: pytest.MonkeyPatch, use_case: ResumeTurn) -> None:
     global with no way back: a unit test that called it would leave every later test in the
     process wired to this module's fakes.
 
-    `start_turn` is cast from None deliberately. `_step_resume` resolves exactly one field
+    `start_turn` is cast from None deliberately. `_step_resume_round` resolves exactly one field
     and a real `StartTurn` here would be eight collaborators built to be never called -
     which reads as though the step used them.
     """
@@ -513,11 +513,15 @@ def test_a_tool_call_made_after_a_resume_is_policed_and_audited_from_the_step_do
     _bind(monkeypatch, use_case)
 
     outcome = asyncio.run(
-        turn_workflow._step_resume(
+        turn_workflow._step_resume_round(
             TURN,
             request,
-            turn_workflow.HumanAnswer(
-                turn_id=TURN, tool_call_id=CALL_A, approved=True, note=None
+            (CALL_A,),
+            (),
+            (
+                turn_workflow.HumanAnswer(
+                    turn_id=TURN, tool_call_id=CALL_A, approved=True, note=None
+                ),
             ),
         )
     )
@@ -552,40 +556,10 @@ def test_a_tool_call_made_after_a_resume_is_policed_and_audited_from_the_step_do
     assert outcome is runner.outcome, "the step must return what the use case produced"
 
 
-@pytest.mark.phase("F3")
-@pytest.mark.silent
-def test_a_payload_that_is_not_this_turns_answer_is_refused_instead_of_applied(
-    monkeypatch: pytest.MonkeyPatch, session: SessionRef
-) -> None:
-    """`HumanAnswer` carries its own `turn_id` so that this check can exist; so use it.
-
-    `DBOS.recv_async` hands the step whatever was sent to this workflow, and the topic is
-    shared - a peer's reply to `ask_peer` arrives on it too (docs/TASKS.md#t-f9-04). A step
-    that applied whatever arrived would resume a turn on an answer given for another one:
-    the approval-without-an-approver the correlation table exists to prevent, and nothing
-    raises afterwards.
-    """
-    wiring = _wire()
-    _bind(monkeypatch, wiring.use_case)
-    request = _turn_request(session)
-
-    with pytest.raises(turn_workflow.UnusableResumeAnswerError):
-        asyncio.run(
-            turn_workflow._step_resume(
-                TURN,
-                request,
-                turn_workflow.HumanAnswer(
-                    turn_id=OTHER_TURN, tool_call_id=CALL_A, approved=True, note=None
-                ),
-            )
-        )
-
-    with pytest.raises(turn_workflow.UnusableResumeAnswerError):
-        asyncio.run(
-            turn_workflow._step_resume(TURN, request, {"tool_call_id": CALL_A, "approved": True})
-        )
-
-    assert wiring.runner.resume_calls == [], "neither payload may reach the runner"
+# The refusal of a payload that is not this turn's answer used to be tested here, against the
+# per-answer `_step_resume`. Every round is collected now (D32), and `_collect_round` refuses
+# it: see `test_human_collect_round.py` (another turn's `HumanAnswer`, a payload that is no answer,
+# a peer wake for a handle the turn never asked under), each asserting nothing reaches the runner.
 
 
 @pytest.mark.phase("F3")

@@ -9,7 +9,7 @@ TWO HOLES OF THE SAME SHAPE, WHICH IS WHY THEY ARE ASSERTED IN ONE FILE
     Both are a collaborator a TEST supplies and production never binds - the shape this
     build has now hit five times (docs/STATE.md, "the recurring process defect").
 
-    t-f3-20. `_step_resume` resolves `ResumeTurn` off the workflow's bound dependencies
+    t-f3-20. `_step_resume_round` resolves `ResumeTurn` off the workflow's bound dependencies
     and the container never built one, so every process that suspended on a human and got
     an answer died on `TurnWorkflowNotWiredError` - naming the fix, the same way
     `human_gateway` did one wave earlier. Every test of the step passed, because every one
@@ -90,7 +90,7 @@ def _bootstrap() -> ModuleType:
 
 
 def _suspended_turn(profile_id: str) -> TurnRequest:
-    """The request the suspended turn started from. `_step_resume` reads its `caller`."""
+    """The request the suspended turn started from. `_step_resume_round` reads its `caller`."""
     return TurnRequest(
         session=SessionRef(session_id=SessionId("s-1"), tenant_id=_TENANT),
         caller=CallerIdentity(subject_id="u-1", channel="http", tenant_id=_TENANT),
@@ -103,7 +103,7 @@ def _suspended_turn(profile_id: str) -> TurnRequest:
 def test_the_container_builds_a_resume_turn_and_binds_it_to_the_workflow() -> None:
     """t-f3-20. The workflow gets the container's OWN use case, never a second one.
 
-    `_step_resume` reads exactly this field. Unbound, it is `None` by deliberate design -
+    `_step_resume_round` reads exactly this field. Unbound, it is `None` by deliberate design -
     there is no correct silent behaviour for "a human answered and nothing applied it" -
     so the seat being empty is a process that cannot resume a turn at all.
     """
@@ -119,7 +119,7 @@ def test_the_container_builds_a_resume_turn_and_binds_it_to_the_workflow() -> No
     assert bound is not None, "bind_turn_workflow never called bind_dependencies()"
     assert bound.resume_turn is resume_turn, (
         "bind_turn_workflow builds TurnWorkflowDependencies without resume_turn, so a "
-        "turn that suspends on a human and IS answered dies in _step_resume with "
+        "turn that suspends on a human and IS answered dies in _step_resume_round with "
         "TurnWorkflowNotWiredError (docs/TASKS.md#t-f3-20)."
     )
 
@@ -129,7 +129,7 @@ def test_the_container_builds_a_resume_turn_and_binds_it_to_the_workflow() -> No
 def test_a_production_wired_process_reaches_the_real_resume_use_case() -> None:
     """The behavioural half: the answer actually gets applied, not refused at the seat.
 
-    Field identity alone would still pass if `_step_resume` resolved some other seat. So
+    Field identity alone would still pass if `_step_resume_round` resolved some other seat. So
     the step is driven, and what is asserted is WHERE it fails: an unknown profile means
     control reached `ResumeTurn.execute` and was refused by the use case's own validation,
     which no unwired process can get to - it raises `TurnWorkflowNotWiredError` first.
@@ -141,7 +141,7 @@ def test_a_production_wired_process_reaches_the_real_resume_use_case() -> None:
     )
 
     with pytest.raises(Exception) as refused:  # noqa: B017 - WHICH exception IS the assertion
-        asyncio.run(turn_workflow._step_resume(_TURN, request, answer))
+        asyncio.run(turn_workflow._step_resume_round(_TURN, request, (_CALL,), (), (answer,)))
 
     assert not isinstance(refused.value, turn_workflow.TurnWorkflowNotWiredError), (
         "the human's decision was dropped at the wiring seat: production binds no "
@@ -149,7 +149,7 @@ def test_a_production_wired_process_reaches_the_real_resume_use_case() -> None:
         f"(docs/TASKS.md#t-f3-20). It said: {refused.value}"
     )
     assert isinstance(refused.value, UnknownProfileError), (
-        "_step_resume did not reach ResumeTurn.execute - the bound seat is not the "
+        "_step_resume_round did not reach ResumeTurn.execute - the bound seat is not the "
         f"container's use case. It raised {type(refused.value).__name__}: {refused.value}"
     )
 

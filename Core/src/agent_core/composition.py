@@ -465,7 +465,12 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # .2 -> .3 with D31 (agent-comms v2 wave 1 follow-ups, ONE bump for the batch): the peer
 # workflow's input `PeerTurnJob` gained `answer_token` (C1c) and `_collect_round` / `_step_expire`
 # gained the cancel cascade steps (C4), so a turn or peer workflow suspended on .2 is stranded.
-PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.3"
+# .3 -> .4 with D32 (agent-comms v2 wave 1 reliability, ONE bump for the batch, taken by C6): a
+# round with people only is collected like every other (`_step_round_clock` and one
+# `_step_resume_round` instead of a `_step_resume` per answer; `_step_resume` and
+# `_step_answer_peer` are gone), so a turn suspended on a person under .3 is stranded, not
+# replayed. C1f, C1g, C1h and C5 changed no step name or order.
+PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.4"
 
 # C5 (D32). Default of `Settings.max_turn_attempts`.
 DEFAULT_MAX_TURN_ATTEMPTS: Final[int] = 10

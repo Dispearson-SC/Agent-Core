@@ -616,7 +616,9 @@ resumes the turn once, in `tool_call_id` order. Peer asks are bounded by the ask
 `reply_timeout_seconds` (an unanswered ask becomes an error result for that call only);
 humans keep their own, longer wait (three days, then the turn expires). Pydantic AI cannot
 continue on a subset. A re-ask of the same question after a timeout reuses the mailbox's
-idempotent handle and can still deliver. See DECISIONS D28.
+idempotent handle and can still deliver. See DECISIONS D28. D32 (C6) extends the same collection to
+rounds that ask only people: they are resumed once with every decision, and a person who has not
+decided by the three days expires the turn with nothing resumed.
 
 **The answering side is durable too.** The `peer-worker` claims a mailbox row and starts the
 DBOS workflow `peer-<correlation_id>` (`run_peer_turn_workflow`), then moves on. That workflow

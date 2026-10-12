@@ -114,7 +114,7 @@ def test_the_ask_peer_module_offers_no_way_to_wrap_an_answer() -> None:
     for retired in ("ask_peer_result", "ask_peer_result_for"):
         assert not hasattr(peer_tools, retired), (
             f"`{retired}` is back on adapters/driven/tools/peers.py. Nothing in production "
-            "calls it: `_step_answer_peer` reads through `AgentMailbox.read_answer` and "
+            "calls it: `_step_read_peer_answer` reads through `AgentMailbox.read_answer` and "
             "passes those bytes on unchanged. Whoever needs raw bytes wrapped calls "
             "`mailbox.wrap_peer_answer`, which is the one place the boundary is applied."
         )

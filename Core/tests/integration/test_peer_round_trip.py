@@ -4,7 +4,7 @@ Phase:   F11 - the cold start
 Tasks:   docs/TASKS.md#t-f11-42 (the ask never leaves),
          docs/TASKS.md#t-f11-44 (the answer never comes back)
 Covers:  adapters/driving/workflow/turn_workflow.py - `_step_ask_peers`, the durable
-         `PeerAnswer` wake, `_step_answer_peer`, and `composition.bind_turn_workflow`
+         `PeerAnswer` wake, `_step_read_peer_answer`, and `composition.bind_turn_workflow`
 
 WHY THIS RUNS AGAINST A REAL DBOS AND NOT AGAINST THE BODY
 

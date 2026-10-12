@@ -67,7 +67,7 @@ PART IN APPLYING IT
     `mailbox.py` owns that boundary. It wraps ON READ rather than on write, and said why:
     wrapping on write would "double-wrap the day a second reader is added". So
     `AgentMailbox.read_answer` returns the peer's answer ALREADY inside the delimiters,
-    and `workflow/turn_workflow.py::_step_answer_peer` puts exactly those bytes into
+    and `workflow/turn_workflow.py::_step_resume_round` puts exactly those bytes into
     `DeferredToolResults.calls[tool_call_id]` - unchanged, unexamined, unwrapped again.
 
     ONE BOUNDARY, APPLIED AT ONE PLACE, IS THE WHOLE PROPERTY. Non-negotiable 10 is not

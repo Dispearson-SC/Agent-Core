@@ -5,11 +5,13 @@ changes. Decisions behind them are in `docs/DECISIONS.md`.
 
 ## Bumping the DBOS application version
 
-`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.3`) is bumped when a
+`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.4`) is bumped when a
 change makes turns that are already in flight incompatible with the new code: a workflow step
 added, removed, renamed or reordered, or a changed workflow argument (D28 took `.1` to `.2`;
 D31 took `.2` to `.3`: the peer job gained `answer_token` and the round gained the cancel
-cascade steps. Peer asks in flight on `.2` are stranded too: `stranded-turns` lists them, and
+cascade steps; D32 took `.3` to `.4`: every round, including one that asks only people, is
+collected and resumed once, so a turn suspended on a person under `.3` is stranded. Peer asks in
+flight on `.2` are stranded too: `stranded-turns` lists them, and
 their mailbox rows stay `delivered` until the lease reclaims them: since D32 the lease treats a
 workflow left open under another version as absent, cancels it and reruns the ask under the new
 build, see "Peer redelivery lease").

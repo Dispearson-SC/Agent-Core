@@ -531,3 +531,14 @@ def test_the_replay_shape_change_moved_the_pinned_application_version() -> None:
     ), "D31 changed the peer job input and the round step order: the version moved past .2"
     for gone in ("_step_refuse_peers", "_step_resume_peers", "_step_peer_clock"):
         assert not hasattr(turn_workflow, gone), f"{gone} came back: bump the pinned version"
+
+
+def test_collecting_every_round_moved_the_pinned_application_version_to_four() -> None:
+    """D32 (C6): a round with people only now collects (new recorded clock step and one
+    `_step_resume_round` instead of a `_step_resume` per answer), so a turn suspended on a human
+    under .3 would replay into a different step sequence and is stranded, not recovered."""
+    from agent_core import composition
+
+    assert composition.PINNED_DBOS_APPLICATION_VERSION == "agent-core-turns.4"
+    for gone in ("_step_resume", "_step_answer_peer"):
+        assert not hasattr(turn_workflow, gone), f"{gone} came back: bump the pinned version"

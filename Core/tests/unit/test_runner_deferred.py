@@ -349,7 +349,7 @@ def test_run_then_resume_completes_the_loop_and_the_peer_answer_stays_fenced() -
     class Answer:
         tool_call_id = ToolCallId(pending.tool_call_id)
         approved = True
-        # What `_step_answer_peer` actually puts here: the bytes `AgentMailbox.read_answer`
+        # What `_step_resume_round` actually puts here: the bytes `AgentMailbox.read_answer`
         # hands back, which the adapter wrapped on read. Built with `wrap_peer_answer`
         # directly now that `peers.ask_peer_result` is retired - and closer to production
         # for it, because that is the one function the mailbox itself calls.
