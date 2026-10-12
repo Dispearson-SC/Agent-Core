@@ -195,6 +195,14 @@ disable response buffering for the path (the app sends `X-Accel-Buffering: no`) 
 timeout above 15 s (the keepalive interval). A feed that cannot read the database logs `the event feed
 could not read new events; retrying` at WARNING and recovers by itself; clients reconnect to a snapshot.
 
+### The task graph
+
+`GET /turns/<root turn id>/graph` (same headers as `GET /turns/<id>`) reads `peer_messages` for the
+tenant and root, newest 500 asks. By hand: `SELECT correlation_id, target_agent_id, from_agent_id,
+turn_id, state, enqueued_at, delivered_at, answered_at FROM peer_messages WHERE from_tenant_id =
+'<tenant>' AND root_turn_id = '<root>' ORDER BY enqueued_at;`. Migration `0038` (an index) is
+additive and safe under a running build.
+
 ## Peer redelivery lease
 
 The peer worker claims an ask (`delivered`) and then enqueues the callee workflow of the ask

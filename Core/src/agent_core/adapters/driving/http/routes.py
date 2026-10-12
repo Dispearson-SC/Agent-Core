@@ -121,14 +121,14 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 from fastapi import FastAPI, File, Header, HTTPException, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent_core.adapters.driving.channels.registry import ChannelRegistry
-from agent_core.adapters.driving.http.event_routes import frames
+from agent_core.adapters.driving.http.event_routes import frames, graph_json
 from agent_core.adapters.driving.workflow.turn_workflow import (
     DEFAULT_WINDOW_SECONDS,
     enqueue_turn_window,
@@ -142,6 +142,7 @@ from agent_core.application.event_feed import EventFeed
 from agent_core.application.ingest_media import IngestMedia, MediaRejectedError, MediaTooLargeError
 from agent_core.domain.media import MediaRef
 from agent_core.domain.profile import AgentProfile
+from agent_core.domain.task_graph import build_task_graph
 from agent_core.domain.turn import (
     CallerIdentity,
     SessionId,
@@ -151,6 +152,7 @@ from agent_core.domain.turn import (
     TurnRequest,
     UserInput,
 )
+from agent_core.ports.task_graph_reader import TaskGraphReader
 
 __all__ = [
     "DecisionBody",
@@ -403,6 +405,7 @@ def create_app(
     signal_evidence: EvidenceSignal | None = None,
     channels: ChannelRegistry | None = None,
     event_feed: EventFeed | None = None,
+    task_graph: TaskGraphReader | None = None,
 ) -> FastAPI:
     """The HTTP surface, wired to one way of starting a turn.
 
@@ -569,6 +572,34 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.get("/turns/{turn_id}/graph")
+    async def get_turn_graph(
+        turn_id: str,
+        x_subject_id: Annotated[str | None, Header()] = None,
+        x_tenant_id: Annotated[str | None, Header()] = None,
+        x_channel: Annotated[str | None, Header()] = None,
+        x_roles: Annotated[str | None, Header()] = None,
+    ) -> dict[str, Any]:
+        """The ownership tree of a turn: the agents it asked, what they asked in turn, background
+        asks, each one's state and how long it waited and ran (C23, D54).
+
+        AUTHORISED EXACTLY AS `GET /turns/{id}`, and read from the mailbox rows of the AUTHENTICATED
+        tenant. A caller the lookup refuses never reaches the mailbox.
+        """
+        caller = _authenticate(x_subject_id, x_tenant_id, x_channel, x_roles)
+        if task_graph is None or lookup_turn is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="This process was built without a task graph reader.",
+            )
+        if await lookup_turn(TurnId(turn_id), caller) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No turn with that id in this tenant.",
+            )
+        records = await task_graph.asks_under(str(caller.tenant_id), turn_id)
+        return graph_json(build_task_graph(turn_id, records))
 
     @app.post("/decisions/{correlation_id}", status_code=status.HTTP_202_ACCEPTED)
     async def post_decision(

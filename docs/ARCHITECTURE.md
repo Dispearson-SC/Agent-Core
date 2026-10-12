@@ -753,6 +753,12 @@ missed, then live events again. Every connection, including a reconnect, starts 
 the stream ends with `end` when nothing under the turn is running. Authorised exactly as
 `GET /turns/{id}` (same lookup, same 404) and scoped by the authenticated tenant in SQL.
 
+**The task graph (C23, D54).** `GET /turns/{id}/graph` returns the ownership tree of a turn built from
+the mailbox rows under that root: root -> the asks it made -> what each callee asked in turn, to any
+depth, background asks flagged, each node with its state, queue wait and run time. A callee's turn id
+is derived from its row (`peer_workflow_id`), which is what links a nested ask to its parent. Same
+authorisation as reading the turn; an ask whose parent is unknown is listed under `unlinked`.
+
 **Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
 and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the
 two-sided gate), the caller's policy rules and each callee profile's `description`. A denied,

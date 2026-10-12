@@ -145,7 +145,6 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
-import uuid
 from collections import deque
 from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass, field, replace
@@ -179,7 +178,9 @@ from agent_core.domain.peers import (
     PeerPolicy,
     PeerVisibility,
     background_followup_turn_id,
+    legacy_peer_workflow_id,
     peer_session_key,
+    peer_workflow_id,
 )
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
@@ -2585,45 +2586,6 @@ class PeerTurnJob:
     # C1c. The per-ask secret from the claimed row. It is part of the durable input (so a
     # recovered workflow still holds it) and is what lets this workflow, and only it, answer.
     answer_token: str | None = field(default=None, repr=False)
-
-
-PEER_WORKFLOW_NAMESPACE: Final[uuid.UUID] = uuid.UUID("5b0f6a3e-2c1d-5e47-9a68-7d3c4f1b8e20")
-"""The fixed namespace of peer workflow ids. NEVER change it: it is part of every id already
-issued, and a changed namespace names every in-flight peer workflow differently."""
-
-
-def peer_workflow_id(correlation_id: str, generation: int = 0) -> str:
-    """The durable id of the workflow that answers one ask. Pure.
-
-    DETERMINISTIC ON PURPOSE (C1): starting it twice - a worker that claimed the row, died
-    and claimed it again, or two workers racing - names the same workflow, and DBOS returns
-    the existing one instead of running the callee's turn twice. It is also the callee's
-    TURN ID (`_step_new_turn_id` reads the workflow id), so an approval for the callee's
-    human is addressed to it.
-
-    A UUID, ON PURPOSE (C1i, D33). The callee's turn id is persisted in `turns`, `human_requests`,
-    the `audit_*` tables and `turn_reasoning`, all UUID columns, so a readable `peer-<id>` id (the
-    C1 scheme) made its first `INSERT INTO turns` fail on real Postgres. The id is
-    `uuid5(namespace, "<id>:<generation>")`.
-    It is not reversible: nothing may recognise a peer workflow by its spelling, ask this function
-    for the id instead.
-
-    `generation` (C1g, D32) is the row's `redeliveries`. Once the lease has put the ask back
-    because its workflow was stranded by a version bump, the next attempt has the next generation:
-    the stranded one keeps its id (cancelled, with its history), and the new build starts a
-    workflow that does not collide with it.
-    """
-    return str(uuid.uuid5(PEER_WORKFLOW_NAMESPACE, f"{correlation_id}:{generation}"))
-
-
-def legacy_peer_workflow_id(correlation_id: str, generation: int = 0) -> str:
-    """The id a `.4` build gave the workflow of this attempt: `peer-<id>` or `peer-<id>-r<n>`. Pure.
-
-    Kept ONLY so a deploy of `.5` can still see (`DurablePeerTurnStarter.exists`), retire and
-    cascade-cancel a callee a live `.4` executor started (C1k, D34). Nothing starts a workflow
-    under this spelling any more (it cannot be persisted: D33).
-    """
-    return f"peer-{correlation_id}" if generation == 0 else f"peer-{correlation_id}-r{generation}"
 
 
 def _attempt_workflow_ids(correlation_id: str, generation: int) -> tuple[str, str]:

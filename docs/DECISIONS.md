@@ -2108,3 +2108,32 @@ agents without polling tables.
   trimming of old events (OPERATIONS).
 - **Replay shape: unchanged by C22** (the `.10` bump was taken by C21).
 
+## D54 · Agent-comms v2: the task graph view (C23)
+
+`GET /turns/{id}/graph` answers "which agents did this turn ask, what did they ask in turn, and how
+is each doing" (Pi's `taskGraph()`), from the mailbox, with no new table.
+
+- **The rows are the graph.** Every ask is a `peer_messages` row naming the turn that asked, the
+  target, the asker, its state and its times. A callee's own turn id is a pure function of its row
+  (`peer_workflow_id(handle, generation)`, now in `domain/peers.py`, re-exported by the workflow
+  module), so a nested ask, whose asking turn IS that id, is linked to its parent with no stored
+  parent pointer. The builder (`domain/task_graph.build_task_graph`) is pure; the reader
+  (`TaskGraphReader.asks_under(tenant, root)`, `PgTaskGraphReader`) is one tenant-scoped query.
+- **Shape.** The root is the turn a person started; children are the asks it made; each child's
+  children are what that callee asked, to any depth. Each node carries agent, handle, state
+  (`queued|running|answered|failed|cancelled`, the background-ask vocabulary), `background`,
+  `asked_at`, `queued_ms` (asked to claimed) and `run_ms` (claimed to answered or cancelled). All
+  redelivery generations of a callee (and the `.4` spelling of its id) are searched for children.
+- **Unknown ancestry is not guessed.** An ask whose asking turn matches no known callee (a row
+  older than the owner chain, a parent beyond the read limit of 500) is returned under `unlinked`,
+  never hung on the root, which would claim an ownership nobody recorded. A row that points at
+  itself cannot loop (each ask is placed once).
+- **Authorised as reading the turn**, like the feed (D53): the same lookup and 404, then the
+  authenticated tenant in SQL. Migration `0038` adds `ix_peer_messages_root (from_tenant_id,
+  root_turn_id)` for the search (additive).
+- **Not in the graph yet:** the root turn's own state and agent (the rows do not know them; the
+  agent is the asker of its first ask and `state` is null: C21 events carry both, a later change can
+  join them), the follow-up turns of background asks, subagents (W5 adds them as the same kind of
+  node), and the live view (the feed of D53 is the live one).
+- **Replay shape: unchanged by C23** (the `.10` bump was taken by C21).
+

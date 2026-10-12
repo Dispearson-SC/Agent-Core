@@ -372,6 +372,7 @@ def build_app(
         channels=container.channels,
         # C22. The progress feed of a turn tree: one broker per process, started with the app.
         event_feed=container.event_feed,
+        task_graph=container.task_graph,
     )
 
     # t-f11-33. THE DEBT THIS COMMENT USED TO RECORD IS PAID. Both of these were built

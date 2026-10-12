@@ -502,7 +502,7 @@ def cap_wrapped_answer(wrapped: str, max_chars: int) -> CappedAnswer:
     )
 
 
-def _background_state(state: str, answer_failed: bool, answered_at: object) -> BackgroundState:
+def background_state(state: str, answer_failed: bool, answered_at: object) -> BackgroundState:
     """The state of a background ask as its owner sees it, from the row's columns."""
     if state == "cancelled":
         return BackgroundState.CANCELLED
@@ -518,7 +518,7 @@ def _background_ask_of(row: Sequence[object]) -> BackgroundAsk:
         target=str(row[1]),
         question=str(row[2]),
         asked_at=row[3],  # type: ignore[arg-type]
-        state=_background_state(str(row[4]), bool(row[5]), row[6]),
+        state=background_state(str(row[4]), bool(row[5]), row[6]),
         finished_at=row[7] if str(row[4]) == "cancelled" else row[6],  # type: ignore[arg-type]
         session=None if row[8] is None else str(row[8]),
         hop=int(row[9]),  # type: ignore[call-overload]

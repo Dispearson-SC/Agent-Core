@@ -1,7 +1,7 @@
 """Driving adapter: the Server-Sent Events wire format of the event feed (C22, D53).
 
-Phase:   Agent-comms v2, C22
-Tests:   Core/tests/unit/test_event_routes.py
+Phase:   Agent-comms v2, C22 (and the JSON of C23's task graph)
+Tests:   Core/tests/unit/test_event_routes.py, Core/tests/unit/test_task_graph.py
 
 `GET /turns/{id}/events` itself is registered in `routes.create_app`, next to `GET /turns/{id}`,
 because it must authenticate and authorise by the SAME rules (same identity headers, the same
@@ -28,8 +28,9 @@ from typing import Any
 
 from agent_core.application.event_feed import FeedItem, FeedKind
 from agent_core.domain.events import FeedSnapshot, StoredEvent
+from agent_core.domain.task_graph import TaskGraph, TaskNode
 
-__all__ = ["frames", "snapshot_json", "event_json"]
+__all__ = ["event_json", "frames", "graph_json", "snapshot_json"]
 
 
 def _default(value: object) -> str:
@@ -93,3 +94,23 @@ async def frames(items: AsyncIterator[FeedItem]) -> AsyncIterator[bytes]:
             yield b": keepalive\n\n"
         elif item.kind is FeedKind.END:
             yield _frame("end", {})
+
+
+def _node_json(node: TaskNode) -> dict[str, Any]:
+    return {
+        "turn_id": node.turn_id,
+        "agent": node.agent,
+        "handle": node.handle,
+        "state": None if node.state is None else node.state.value,
+        "background": node.background,
+        "asked_at": None if node.asked_at is None else node.asked_at.isoformat(),
+        "queued_ms": node.queued_ms,
+        "run_ms": node.run_ms,
+        "children": [_node_json(child) for child in node.children],
+    }
+
+
+def graph_json(graph: TaskGraph) -> dict[str, Any]:
+    """The ownership tree: the root node's fields, `children` nested to any depth, and the asks
+    whose parent could not be found under `unlinked` (C23, D54)."""
+    return {**_node_json(graph.root), "unlinked": [_node_json(n) for n in graph.unlinked]}

@@ -181,6 +181,7 @@ from agent_core.adapters.driven.llm_litellm.gateway import LiteLLMGateway
 from agent_core.adapters.driven.media_fs.store import FilesystemMediaStore
 from agent_core.adapters.driven.peers.asker_context import TranscriptAskerContext
 from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
+from agent_core.adapters.driven.peers.task_graph import PgTaskGraphReader
 from agent_core.adapters.driven.peers.typed_answer import check_answer_schema
 from agent_core.adapters.driven.persistence_pg.attempt_ledger import PgAttemptLedger
 from agent_core.adapters.driven.persistence_pg.audit_read_repository import (
@@ -261,6 +262,7 @@ from agent_core.ports.agent_mailbox import AgentMailbox
 from agent_core.ports.audit_sink import AuditSink
 from agent_core.ports.event_publisher import EventPublisher
 from agent_core.ports.knowledge_admin import KnowledgeAdmin
+from agent_core.ports.task_graph_reader import TaskGraphReader
 from agent_core.ports.transcript_reader import TranscriptReader
 
 __all__ = [
@@ -1101,6 +1103,8 @@ class Container:
     events: EventPublisher
     # C22 (D53). The bounded feed behind `GET /turns/{id}/events`: one broker per process.
     event_feed: EventFeed
+    # C23 (D54). The ownership tree behind `GET /turns/{id}/graph`, read from the mailbox rows.
+    task_graph: TaskGraphReader
     # One runner for the process. `AgentRunner.run` takes the `turn_id` as its first
     # parameter (docs/TASKS.md#t-f1-05), so whoever runs a turn passes the id it generated
     # inside its DBOS step and nothing here is per-turn. A container-level binding would
@@ -1939,6 +1943,7 @@ def build_container(
         event_feed=EventFeed(
             PgEventReader(resolved.app_conninfo), PgEventWakeup(resolved.app_conninfo)
         ),
+        task_graph=PgTaskGraphReader(resolved.app_conninfo),
         audit_reader=audit_reader,
         transcripts=transcripts,
         knowledge_admin=knowledge_admin,
