@@ -745,6 +745,14 @@ background -> follow-up -> background chain cannot run on (D51); the cap, a hand
 (root turn, asker turn, asker profile, ask handle) and timing, never model text or arguments. A
 publisher that fails costs the event, not the turn.
 
+**The event feed (C22, D53).** `GET /turns/{id}/events` is Server-Sent Events over `turn_events`.
+`EventFeed` is one broker per process (woken by `LISTEN`, polling as a floor) that fans events out to
+subscribers by (tenant, root turn); each subscriber has a bounded queue, and one that falls behind is
+emptied and handed a SNAPSHOT of the tree (state, tools, timing per turn) instead of the events it
+missed, then live events again. Every connection, including a reconnect, starts with a snapshot, and
+the stream ends with `end` when nothing under the turn is running. Authorised exactly as
+`GET /turns/{id}` (same lookup, same 404) and scoped by the authenticated tenant in SQL.
+
 **Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
 and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the
 two-sided gate), the caller's policy rules and each callee profile's `description`. A denied,

@@ -174,6 +174,7 @@ from agent_core.adapters.driven.context.engine import LadderContextEngine
 from agent_core.adapters.driven.context.summariser import ModelSummariser
 from agent_core.adapters.driven.events_pg.audit_events import EventingAuditSink
 from agent_core.adapters.driven.events_pg.publisher import PgEventPublisher
+from agent_core.adapters.driven.events_pg.reader import PgEventReader, PgEventWakeup
 from agent_core.adapters.driven.human.gateway import ChannelHumanGateway
 from agent_core.adapters.driven.knowledge_pg.admin import PgKnowledgeAdmin
 from agent_core.adapters.driven.llm_litellm.gateway import LiteLLMGateway
@@ -241,6 +242,7 @@ from agent_core.adapters.driving.workflow.turn_workflow import (
     signal_evidence as durable_signal_evidence,
 )
 from agent_core.application.decide_approval import DecideApproval, PendingCheck, RequesterLookup
+from agent_core.application.event_feed import EventFeed
 from agent_core.application.ingest_media import IngestMedia
 from agent_core.application.resume_turn import ResumeTurn
 from agent_core.application.start_turn import StartTurn
@@ -1097,6 +1099,8 @@ class Container:
     audit: AuditSink
     # C21 (D52). Where progress events go: the application database, never the audit pool.
     events: EventPublisher
+    # C22 (D53). The bounded feed behind `GET /turns/{id}/events`: one broker per process.
+    event_feed: EventFeed
     # One runner for the process. `AgentRunner.run` takes the `turn_id` as its first
     # parameter (docs/TASKS.md#t-f1-05), so whoever runs a turn passes the id it generated
     # inside its DBOS step and nothing here is per-turn. A container-level binding would
@@ -1932,6 +1936,9 @@ def build_container(
         policy=policy,
         audit=audit,
         events=events,
+        event_feed=EventFeed(
+            PgEventReader(resolved.app_conninfo), PgEventWakeup(resolved.app_conninfo)
+        ),
         audit_reader=audit_reader,
         transcripts=transcripts,
         knowledge_admin=knowledge_admin,

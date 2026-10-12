@@ -13,12 +13,22 @@ no model text and no tool arguments: a tool's NAME, a duration and a short error
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import Final
 
-__all__ = ["EventKind", "EventOwner", "ProgressEvent", "progress_event_id"]
+__all__ = [
+    "EventKind",
+    "EventOwner",
+    "FeedSnapshot",
+    "ProgressEvent",
+    "StoredEvent",
+    "TurnProgress",
+    "TurnState",
+    "fold_snapshot",
+    "progress_event_id",
+]
 
 _EVENT_NAMESPACE: Final[uuid.UUID] = uuid.UUID("0d3e8c52-6a1b-5b7e-8f40-2c9a7e1d5b63")
 """Fixed namespace of event ids. NEVER change it: ids already stored were derived from it."""
@@ -78,3 +88,91 @@ def progress_event_id(turn_id: str, kind: EventKind, discriminator: str = "") ->
     the same event, and the store keeps one row per id. `discriminator` separates events of the same
     kind in one turn (none for started/finished/failed, which happen once)."""
     return str(uuid.uuid5(_EVENT_NAMESPACE, f"{turn_id}:{kind.value}:{discriminator}"))
+
+
+# --- the state a feed shows a late or lagging subscriber (C22) -----------------------------------
+
+
+class TurnState(StrEnum):
+    RUNNING = "running"
+    FINISHED = "finished"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class StoredEvent:
+    """An event with the sequence number the store gave it: the total order a feed resumes from."""
+
+    seq: int
+    event: ProgressEvent
+
+
+@dataclass(frozen=True, slots=True)
+class TurnProgress:
+    """Where one turn of the tree stands, folded from its events."""
+
+    turn_id: str
+    agent: str
+    state: TurnState
+    asker_turn_id: str | None
+    asker: str | None
+    call: str | None
+    started_at: datetime
+    elapsed_ms: int | None
+    tools_called: int
+    last_tool: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FeedSnapshot:
+    """The whole tree under `root_turn_id` as of event `last_seq` (0 = nothing yet).
+
+    What a subscriber that connected late, reconnected, or fell behind receives INSTEAD of the
+    events it missed: the newest state, not a replay (D53). Turns are in order of first event.
+    """
+
+    root_turn_id: str
+    last_seq: int
+    turns: tuple[TurnProgress, ...]
+
+    @property
+    def settled(self) -> bool:
+        """The root turn and everything under it has finished or failed (nothing is running)."""
+        return bool(self.turns) and all(t.state is not TurnState.RUNNING for t in self.turns)
+
+
+def fold_snapshot(root_turn_id: str, events: tuple[StoredEvent, ...]) -> FeedSnapshot:
+    """The state of the tree after `events` (in `seq` order). Pure."""
+    turns: dict[str, TurnProgress] = {}
+    last = 0
+    for stored in events:
+        last = max(last, stored.seq)
+        event = stored.event
+        current = turns.get(event.turn_id)
+        if event.kind is EventKind.STARTED:
+            owner = event.owner
+            turns[event.turn_id] = TurnProgress(
+                turn_id=event.turn_id,
+                agent=event.agent,
+                state=TurnState.RUNNING,
+                asker_turn_id=None if owner is None else owner.asker_turn_id,
+                asker=None if owner is None else owner.asker,
+                call=None if owner is None else owner.call,
+                started_at=event.at,
+                elapsed_ms=None,
+                tools_called=0,
+                last_tool=None,
+            )
+        elif current is None:
+            continue  # an event of a turn whose `started` is not in this window
+        elif event.kind is EventKind.TOOL_CALLED:
+            turns[event.turn_id] = replace(
+                current, tools_called=current.tools_called + 1, last_tool=event.tool
+            )
+        else:
+            turns[event.turn_id] = replace(
+                current,
+                state=TurnState.FINISHED if event.kind is EventKind.FINISHED else TurnState.FAILED,
+                elapsed_ms=event.elapsed_ms,
+            )
+    return FeedSnapshot(root_turn_id=root_turn_id, last_seq=last, turns=tuple(turns.values()))

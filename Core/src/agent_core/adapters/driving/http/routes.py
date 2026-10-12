@@ -115,15 +115,20 @@ THE EVIDENCE UPLOAD - docs/TASKS.md#t-f7-08
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated, Literal, Protocol
 
 from fastapi import FastAPI, File, Header, HTTPException, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent_core.adapters.driving.channels.registry import ChannelRegistry
+from agent_core.adapters.driving.http.event_routes import frames
 from agent_core.adapters.driving.workflow.turn_workflow import (
     DEFAULT_WINDOW_SECONDS,
     enqueue_turn_window,
@@ -133,6 +138,7 @@ from agent_core.application.decide_approval import (
     FourEyesError,
     UnknownCorrelationError,
 )
+from agent_core.application.event_feed import EventFeed
 from agent_core.application.ingest_media import IngestMedia, MediaRejectedError, MediaTooLargeError
 from agent_core.domain.media import MediaRef
 from agent_core.domain.profile import AgentProfile
@@ -396,6 +402,7 @@ def create_app(
     resolve_evidence: EvidenceCorrelate | None = None,
     signal_evidence: EvidenceSignal | None = None,
     channels: ChannelRegistry | None = None,
+    event_feed: EventFeed | None = None,
 ) -> FastAPI:
     """The HTTP surface, wired to one way of starting a turn.
 
@@ -416,7 +423,20 @@ def create_app(
     rather than reading like success. Wire it: an evidence request that is never resumed
     expires after three days in silence.
     """
-    app = FastAPI(title="agent-core")
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        """C22. The event feed's broker lives as long as the app: one reader per process."""
+        broker = None if event_feed is None else asyncio.create_task(event_feed.run())
+        try:
+            yield
+        finally:
+            if broker is not None:
+                broker.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await broker
+
+    app = FastAPI(title="agent-core", lifespan=lifespan)
 
     def refuse_unregistered_channel(caller: CallerIdentity) -> None:
         """422 for a channel the registry cannot deliver on, BEFORE a turn is started.
@@ -512,6 +532,43 @@ def create_app(
             )
 
         return {"turn_id": str(view.turn_id), "status": view.status, "text": view.text}
+
+    @app.get("/turns/{turn_id}/events")
+    async def get_turn_events(
+        turn_id: str,
+        x_subject_id: Annotated[str | None, Header()] = None,
+        x_tenant_id: Annotated[str | None, Header()] = None,
+        x_channel: Annotated[str | None, Header()] = None,
+        x_roles: Annotated[str | None, Header()] = None,
+    ) -> StreamingResponse:
+        """The progress of a turn and the agents under it, as Server-Sent Events (C22, D53).
+
+        AUTHORISED EXACTLY AS `GET /turns/{id}`: the same identity headers, the same `TurnLookup`
+        with the caller inside it, the same 404 for an unknown turn and for another tenant's.
+        The stream itself is then scoped by the authenticated tenant, never by anything the path
+        or a header says.
+
+        Every connection, a first one or a reconnect with `Last-Event-ID`, starts with a snapshot
+        of the whole tree; a client too slow for the live events is handed a fresh snapshot
+        instead of a growing buffer (`application/event_feed.py`). The stream ends with an `end`
+        event once nothing under the turn is still running.
+        """
+        caller = _authenticate(x_subject_id, x_tenant_id, x_channel, x_roles)
+        if event_feed is None or lookup_turn is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="This process was built without an event feed.",
+            )
+        if await lookup_turn(TurnId(turn_id), caller) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No turn with that id in this tenant.",
+            )
+        return StreamingResponse(
+            frames(event_feed.follow(str(caller.tenant_id), turn_id)),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.post("/decisions/{correlation_id}", status_code=status.HTTP_202_ACCEPTED)
     async def post_decision(

@@ -2073,3 +2073,38 @@ agents without polling tables.
 - **Not done:** retention (rows are never deleted; OPERATIONS gives the statement), publishing from
   the poison path (a given-up turn publishes no `failed`), events for compaction or delivery.
 
+## D53 · Agent-comms v2: a bounded event feed over SSE (C22)
+
+`GET /turns/{id}/events` streams the events of D52 for the tree under a turn.
+
+- **One broker per process, one bounded queue per subscriber.** `EventFeed` (application layer)
+  reads new rows once (`EventReader.after(seq)`, woken by `LISTEN turn_events`, with a poll as the
+  floor: a lost NOTIFY costs latency, not events) and hands each to the subscribers of that
+  (tenant, root). Every subscriber owns a queue of at most `queue_size` (64) events.
+- **A slow client is collapsed to the newest snapshot (Pi), never buffered (OpenCode).** When a
+  subscriber's queue is full it is emptied and replaced by one lag marker; everything offered
+  while the marker is unread is dropped on purpose. The subscriber's next item is a SNAPSHOT of
+  the tree as of now (each turn's state, tools called, elapsed time), after which live events
+  continue; events at or below the snapshot's sequence are skipped. Memory per subscriber is
+  bounded, the broker never waits on a client, and the client is always TOLD (a snapshot replaces
+  what it held) instead of silently missing events.
+- **Reconnect resumes from a snapshot.** Every connection, first or `Last-Event-ID`, starts with a
+  snapshot (`id:` is its last sequence). The header is accepted and not needed: replaying deltas
+  would be a second catch-up path to build and to get wrong, and a snapshot is small. A tree that
+  has settled (nothing running) is a snapshot and an `end`, so a reconnect after the end is cheap.
+- **Authz is reading the turn.** Same identity headers, same `TurnLookup` with the caller in it,
+  same 404 for an unknown turn and another tenant's; then every read is scoped by the authenticated
+  tenant in SQL (`EventReader.tree`). The path never names the tenant. Events carry no model text,
+  arguments or exception messages (D52), so the feed shows nothing the transcript would hide.
+- **Frames:** `event: snapshot|started|tool_called|finished|failed|end`, JSON data, `id:` = the
+  store's sequence, `: keepalive` comments every 15 s so proxies do not close a quiet stream
+  (`X-Accel-Buffering: no`, `Cache-Control: no-cache`).
+- **Known limit.** Order is the sequence at INSERT. Two publishers in different transactions can
+  commit a lower sequence after a higher one was read, and the broker does not go back; any
+  snapshot corrects it. Events of a turn are published seconds apart from different steps, so the
+  window is tiny. Consumers must not build exactness on the feed (the audit trail is the record).
+- **Not done:** a per-tenant cap on open streams, authentication beyond the shared header scheme,
+  C26 streaming of the final answer (it will publish token chunks as events through this feed),
+  trimming of old events (OPERATIONS).
+- **Replay shape: unchanged by C22** (the `.10` bump was taken by C21).
+
