@@ -87,6 +87,7 @@ from agent_core.domain.peers import (
     AgentId,
     AgentRef,
     PeerAnswerRefusedError,
+    PeerContinuationRefusedError,
     PeerPolicy,
     new_answer_token,
     peer_ask_id,
@@ -176,6 +177,7 @@ class A2AAgentMailbox:
         hop: int,
         asker: AgentId | None = None,
         request_key: str | None = None,
+        continue_session: str | None = None,
     ) -> str:
         """Send one A2A `message/send` request and return the task id as correlation id.
 
@@ -196,6 +198,10 @@ class A2AAgentMailbox:
         replayed send carries the same id and a peer that de-duplicates on it runs the task
         once. Omitted, no `messageId` is sent (the previous behaviour).
         """
+        if continue_session is not None:
+            # The A2A peer owns its sessions: this adapter could only forward a context id the peer
+            # may not honour, and a follow-up that silently starts fresh is worse than a refusal.
+            raise PeerContinuationRefusedError("this peer cannot continue a session over A2A")
         endpoint = _endpoint_for(policy, target)
         answer_token = new_answer_token()
         if asker is None:

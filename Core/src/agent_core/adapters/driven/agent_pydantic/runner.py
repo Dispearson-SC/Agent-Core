@@ -1502,6 +1502,7 @@ class PydanticAgentRunner:
                     session=request.session,
                     agent_id=request.profile_id,
                     peer_catalogue=self._peer_catalogue(profile, rules),
+                    allow_continuation=profile.peers.allow_continuation,
                 ),
                 usage_limits=self.usage_limits_for(profile),
             )
@@ -1645,6 +1646,7 @@ class PydanticAgentRunner:
                     session=session,
                     agent_id=profile.id,
                     peer_catalogue=self._peer_catalogue(profile, rules),
+                    allow_continuation=profile.peers.allow_continuation,
                 ),
                 usage_limits=self.usage_limits_for(profile),
             )

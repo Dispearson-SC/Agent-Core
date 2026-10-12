@@ -22,9 +22,13 @@ from agent_core.domain.peers import (
     AgentId,
     AgentRef,
     PeerAnswerRefusedError,
+    PeerContinuationRefusedError,
     PeerPolicy,
+    derived_peer_session,
+    names_a_session_of_this_case,
     new_answer_token,
     peer_ask_id,
+    peer_root_origin,
 )
 from agent_core.domain.turn import SessionRef, TurnId
 
@@ -48,6 +52,7 @@ class _Row:
     max_concurrent: int | None = None
     answer_failed: bool = False
     cancel_reason: str | None = None
+    peer_session_id: str | None = None
 
 
 class InMemoryAgentMailbox:
@@ -73,7 +78,10 @@ class InMemoryAgentMailbox:
         hop: int,
         asker: AgentId | None = None,
         request_key: str | None = None,
+        continue_session: str | None = None,
     ) -> str:
+        if continue_session is not None:
+            self._check_continuation(continue_session, target, from_session, asker)
         key = (str(turn_id), str(target), question)
         if request_key is None:
             if key in self._by_key:  # an unkeyed ask is idempotent per (turn, target, question)
@@ -95,10 +103,34 @@ class InMemoryAgentMailbox:
             answer_token=new_answer_token(),
             seq=self._seq,
             max_concurrent=policy.max_concurrent_asks,
+            peer_session_id=(
+                continue_session
+                if continue_session is not None
+                else derived_peer_session(str(from_session.session_id), correlation_id)
+            ),
         )
         if request_key is None:
             self._by_key[key] = correlation_id
         return correlation_id
+
+    def _check_continuation(
+        self, session: str, target: AgentId, from_session: SessionRef, asker: AgentId | None
+    ) -> None:
+        """The same rule as the Postgres adapter: this asker's own session, with this target."""
+        owned = asker is not None and names_a_session_of_this_case(
+            session, str(from_session.session_id)
+        )
+        owned = owned and any(
+            row.peer_session_id == session
+            and row.target == target
+            and row.from_session.tenant_id == from_session.tenant_id
+            and row.asker == asker
+            and peer_root_origin(str(row.from_session.session_id))
+            == peer_root_origin(str(from_session.session_id))
+            for row in self.rows.values()
+        )
+        if not owned:
+            raise PeerContinuationRefusedError("that session cannot be continued")
 
     async def answer(
         self,
@@ -184,6 +216,7 @@ class InMemoryAgentMailbox:
             answer_token=row.answer_token,
             redeliveries=row.redeliveries,
             failures=row.failures,
+            peer_session_id=row.peer_session_id,
         )
 
     def _at_its_cap(self, row: _Row) -> bool:

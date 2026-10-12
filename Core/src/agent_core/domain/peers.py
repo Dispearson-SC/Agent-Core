@@ -111,6 +111,65 @@ def peer_session_key(correlation_id: str) -> str:
     return str(uuid5(_PEER_ID_NAMESPACE, correlation_id))
 
 
+def peer_root_origin(session_id: str) -> str:
+    """The case a session id stands for: itself, or the root inside a peer session id.
+
+    Raises `ValueError` for an id containing `~` that is not `peer~<origin>~<uuid>`.
+    """
+    if "~" not in session_id:
+        return session_id
+    parts = session_id.split("~")
+    if len(parts) == 3 and parts[0] == "peer" and parts[1] and parts[2]:
+        return parts[1]
+    raise ValueError(
+        f"session id {session_id!r} contains '~' but is not a peer~<origin>~<uuid> id; "
+        "'~' is reserved as the peer origin separator"
+    )
+
+
+def peer_session_name(root_origin: str, key: str) -> str:
+    """The id of the conversation an ask's callee runs in: `peer~<root origin>~<key>`. Pure.
+
+    The root origin is the case the ask belongs to (`peer_root_origin` of the asking session) and
+    `key` is `peer_session_key(correlation_id)`, or the key of an earlier session when an ask
+    CONTINUES one (C12).
+    """
+    if "~" in key:
+        raise ValueError(f"a peer session key must not contain '~': {key!r}")
+    return f"peer~{root_origin}~{key}"
+
+
+def derived_peer_session(asking_session_id: str, correlation_id: str) -> str:
+    """The session a FRESH ask's callee runs in: the asking case's root, plus the ask's own key."""
+    return peer_session_name(peer_root_origin(asking_session_id), peer_session_key(correlation_id))
+
+
+def names_a_session_of_this_case(session_name: str, asking_session_id: str) -> bool:
+    """Whether `session_name` is a peer session id (`peer~<root>~<key>`) of the case the asking
+    session belongs to. Pure and only about the NAME: that the session exists, and is this asker's
+    own, is for the mailbox to check against the rows that made it (C12)."""
+    try:
+        root = peer_root_origin(asking_session_id)
+    except ValueError:
+        return False
+    parts = session_name.split("~")
+    return len(parts) == 3 and parts[0] == "peer" and parts[1] == root and bool(parts[2])
+
+
+class PeerContinuationRefusedError(Exception):
+    """An ask asked to continue a peer session it may not (C12, D45).
+
+    Raised by a mailbox when the session is unknown, or belongs to another tenant, case, asking
+    agent or target, or when the transport cannot continue one. The workflow turns it into a
+    refused result the model can read; the reason never says which of those it was, so a guess
+    learns nothing.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class FanOutPolicy(StrEnum):
     """What one failed ask does to the other asks made in the same model step (C10, D39).
 
@@ -197,6 +256,10 @@ class PeerPolicy:
     # answers. Both per asking profile, both part of the content hash.
     max_parallel_asks: int = DEFAULT_MAX_PARALLEL_ASKS
     max_concurrent_asks: int = DEFAULT_MAX_CONCURRENT_ASKS
+    # C12 (D45). Whether this profile's `ask_peer` may CONTINUE a peer session it started earlier
+    # (`continue_session`), so a follow-up sees the prior exchange. Off by default; per asking
+    # profile; part of the content hash.
+    allow_continuation: bool = False
 
     def may_ask(self, agent_id: AgentId) -> bool:
         """Whether this profile may address `agent_id`. Empty `peers` means nobody.

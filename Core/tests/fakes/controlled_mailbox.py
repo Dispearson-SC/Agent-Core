@@ -122,6 +122,7 @@ class ControlledMailbox:
         hop: int,
         asker: AgentId | None = None,
         request_key: str | None = None,
+        continue_session: str | None = None,
     ) -> str:
         return await self._invoke(  # type: ignore[no-any-return]
             "ask",
@@ -133,6 +134,7 @@ class ControlledMailbox:
             hop=hop,
             asker=asker,
             request_key=request_key,
+            continue_session=continue_session,
         )
 
     async def answer(

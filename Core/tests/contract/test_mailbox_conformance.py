@@ -10,6 +10,7 @@ import psycopg
 import pytest
 
 from agent_core.adapters.driven.persistence_pg import migrations
+from agent_core.domain.peers import PeerContinuationRefusedError
 from tests.contract.harnesses import A2AHarness, MemoryHarness, PgHarness, database_name_for
 from tests.contract.mailbox_conformance import MailboxConformance, MailboxHarness
 from tests.fakes import peer_world
@@ -59,3 +60,13 @@ class TestControlledMailboxIsTransparent(MailboxConformance):
     @pytest.fixture
     def harness(self) -> MailboxHarness:
         return MemoryHarness(controlled=True)
+
+
+class TestA2AContinuation:
+    """C12. The A2A transport owns its sessions, so a continuation is refused, not ignored."""
+
+    async def test_an_a2a_ask_that_asks_to_continue_a_session_is_refused(self) -> None:
+        harness = A2AHarness()
+
+        with pytest.raises(PeerContinuationRefusedError):
+            await harness.ask("again", continue_session="peer~s-conformance~key")

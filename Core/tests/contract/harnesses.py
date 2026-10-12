@@ -15,18 +15,17 @@ import psycopg
 from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
 from agent_core.adapters.driven.peers.mailbox_a2a import A2AAgentMailbox
 from agent_core.domain.peers import AgentId
-from agent_core.domain.turn import TurnId
-from tests.contract.mailbox_conformance import LEASE, POLICY, SESSION, TARGET
+from agent_core.domain.turn import SessionRef, TurnId
+from tests.contract.mailbox_conformance import ASKER, LEASE, POLICY, SESSION, TARGET
 from tests.fakes.controlled_mailbox import ControlledMailbox
 from tests.fakes.memory_mailbox import InMemoryAgentMailbox
-
-ASKER = AgentId("asking-agent")
 
 
 class PgHarness:
     """`PgAgentMailbox` on a migrated database. The caller hands in an EMPTY `peer_messages`."""
 
     supports_queue = True
+    supports_continuation = True
 
     def __init__(self, conninfo: str) -> None:
         self._conninfo = conninfo
@@ -39,6 +38,10 @@ class PgHarness:
         turn_id: str = "turn-1",
         request_key: str = "tc-1",
         max_concurrent: int | None = None,
+        target: AgentId = TARGET,
+        session: SessionRef = SESSION,
+        asker: AgentId = ASKER,
+        continue_session: str | None = None,
     ) -> str:
         policy = (
             POLICY
@@ -47,13 +50,14 @@ class PgHarness:
         )
         return await self.mailbox.ask(
             policy,
-            TARGET,
+            target,
             question,
-            from_session=SESSION,
+            from_session=session,
             turn_id=TurnId(turn_id),
             hop=0,
-            asker=ASKER,
+            asker=asker,
             request_key=request_key,
+            continue_session=continue_session,
         )
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -101,6 +105,7 @@ class A2AHarness:
     """
 
     supports_queue = False
+    supports_continuation = False
 
     def __init__(self) -> None:
         self._messages: dict[str, dict[str, Any]] = {}  # task id -> first message
@@ -127,6 +132,10 @@ class A2AHarness:
         turn_id: str = "turn-1",
         request_key: str = "tc-1",
         max_concurrent: int | None = None,
+        target: AgentId = TARGET,
+        session: SessionRef = SESSION,
+        asker: AgentId = ASKER,
+        continue_session: str | None = None,
     ) -> str:
         policy = (
             POLICY
@@ -135,13 +144,14 @@ class A2AHarness:
         )
         return await self.mailbox.ask(
             policy,
-            TARGET,
+            target,
             question,
-            from_session=SESSION,
+            from_session=session,
             turn_id=TurnId(turn_id),
             hop=0,
-            asker=ASKER,
+            asker=asker,
             request_key=request_key,
+            continue_session=continue_session,
         )
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -157,6 +167,7 @@ class MemoryHarness:
     """
 
     supports_queue = True
+    supports_continuation = True
 
     def __init__(self, *, controlled: bool = False) -> None:
         self.inner = InMemoryAgentMailbox()
@@ -169,6 +180,10 @@ class MemoryHarness:
         turn_id: str = "turn-1",
         request_key: str = "tc-1",
         max_concurrent: int | None = None,
+        target: AgentId = TARGET,
+        session: SessionRef = SESSION,
+        asker: AgentId = ASKER,
+        continue_session: str | None = None,
     ) -> str:
         policy = (
             POLICY
@@ -177,13 +192,14 @@ class MemoryHarness:
         )
         return await self.mailbox.ask(
             policy,
-            TARGET,
+            target,
             question,
-            from_session=SESSION,
+            from_session=session,
             turn_id=TurnId(turn_id),
             hop=0,
-            asker=ASKER,
+            asker=asker,
             request_key=request_key,
+            continue_session=continue_session,
         )
 
     def callee_token(self, correlation_id: str) -> str | None:

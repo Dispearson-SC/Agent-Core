@@ -661,6 +661,14 @@ another agent. The asker validates it again against the callee's schema before i
 answer that breaks the contract is `error` and is not shown, and a cut one is plain text. No schema,
 no change: prose stays the default.
 
+**Follow-up asks (C12, D45).** `ask_peer(target, question, continue_session?)`, offered only to a
+profile with `peers.allow_continuation: true`. The `session` of an earlier result is the handle: the
+specialist's next turn is filed in that same session, so it sees the exchange so far. The mailbox
+checks the claim against the rows that created the session (same tenant, same case, same asking
+agent, same target) and refuses anything else with one message that does not say which test failed;
+the workflow turns that into a `refused` result. The A2A adapter cannot continue a session and
+refuses too.
+
 **What one failed ask does to its siblings (C10, D39).** `peers.fan_out` on the asking profile:
 `all_settled` (default) lets every ask of a model step run to its own end; `fail_fast` cancels the
 siblings still out (the C4 cancel: row and callee workflow) as soon as one ask ends in `error`, hands

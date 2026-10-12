@@ -45,13 +45,18 @@ from agent_core.domain.peers import (
     AgentId,
     AgentRef,
     PeerAnswerRefusedError,
+    PeerContinuationRefusedError,
     PeerPolicy,
     new_answer_token,
+    peer_root_origin,
+    peer_session_key,
+    peer_session_name,
 )
 from agent_core.domain.turn import SessionId, SessionRef, TenantId
 from agent_core.ports.agent_mailbox import AgentMailbox
 
 TARGET = AgentId("personal-assistant")
+ASKER = AgentId("asking-agent")
 ENDPOINT = "http://peer.test"
 POLICY = PeerPolicy(
     enabled=True,
@@ -68,6 +73,7 @@ class MailboxHarness(Protocol):
 
     mailbox: AgentMailbox
     supports_queue: bool
+    supports_continuation: bool
 
     async def ask(
         self,
@@ -76,9 +82,14 @@ class MailboxHarness(Protocol):
         turn_id: str = "turn-1",
         request_key: str = "tc-1",
         max_concurrent: int | None = None,
+        target: AgentId = TARGET,
+        session: SessionRef = SESSION,
+        asker: AgentId = ASKER,
+        continue_session: str | None = None,
     ) -> str:
         """Enqueue one ask through the port and return its correlation id. `max_concurrent`
-        overrides the asking policy's `max_concurrent_asks` (C11)."""
+        overrides the asking policy's `max_concurrent_asks` (C11); `continue_session` asks to run
+        in an earlier peer session (C12)."""
         ...
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -109,6 +120,17 @@ def _queue(harness: MailboxHarness) -> QueueHarness:
     if not harness.supports_queue:
         pytest.skip("this adapter has no answering-side queue (its transport is the wire)")
     return harness  # type: ignore[return-value]
+
+
+def _continuation(harness: MailboxHarness) -> MailboxHarness:
+    if not harness.supports_continuation:
+        pytest.skip("this adapter cannot continue a peer session (its transport owns the session)")
+    return harness
+
+
+def _session_of(correlation_id: str, root: SessionRef = SESSION) -> str:
+    """The session an ask's callee runs in when it does not continue another one."""
+    return peer_session_name(peer_root_origin(root.session_id), peer_session_key(correlation_id))
 
 
 async def _token(harness: MailboxHarness, correlation_id: str) -> str:
@@ -470,6 +492,83 @@ class MailboxConformance:
         claimed = await queue.claim()
 
         assert claimed is not None and claimed.correlation_id == free
+
+    # --- session continuation (C12) -------------------------------------------------------------
+
+    async def test_a_follow_up_runs_in_the_session_of_the_ask_it_continues(
+        self, harness: MailboxHarness
+    ) -> None:
+        queue = _queue(_continuation(harness))
+        first = await queue.ask("first question", request_key="tc-1")
+        session = _session_of(first)
+        follow_up = await queue.ask("and then?", request_key="tc-2", continue_session=session)
+        third = await queue.ask("and after that?", request_key="tc-3", continue_session=session)
+
+        claimed = [await queue.claim() for _ in range(3)]
+
+        assert [c.correlation_id for c in claimed] == [first, follow_up, third]
+        assert [c.peer_session_id for c in claimed] == [session, session, session], (
+            "a fresh ask carries its own derived session, and a follow-up (or a follow-up of a "
+            "follow-up) the one it continues"
+        )
+
+    async def test_a_peer_session_of_the_same_case_may_continue_what_the_case_started(
+        self, harness: MailboxHarness
+    ) -> None:
+        """A nested asker's session id is `peer~<root>~...`: the ROOT origin is what is compared."""
+        queue = _queue(_continuation(harness))
+        first = await queue.ask("first question", request_key="tc-1")
+        nested = SessionRef(
+            session_id=SessionId(f"peer~{SESSION.session_id}~some-key"), tenant_id=SESSION.tenant_id
+        )
+
+        follow_up = await queue.ask(
+            "again", request_key="tc-2", session=nested, continue_session=_session_of(first)
+        )
+
+        assert follow_up
+
+    @pytest.mark.parametrize(
+        "case",
+        ["unknown", "other_tenant", "other_case", "other_target", "other_asker"],
+    )
+    async def test_a_session_that_is_not_the_askers_own_is_refused(
+        self, harness: MailboxHarness, case: str
+    ) -> None:
+        queue = _queue(_continuation(harness))
+        first = await queue.ask("first question", request_key="tc-1")
+        session = _session_of(first)
+        asking: dict[str, Any] = {}
+        if case == "unknown":
+            session = _session_of("never-asked")
+        elif case == "other_tenant":
+            asking["session"] = SessionRef(
+                session_id=SESSION.session_id, tenant_id=TenantId("another-tenant")
+            )
+        elif case == "other_case":
+            asking["session"] = SessionRef(
+                session_id=SessionId("another-case"), tenant_id=SESSION.tenant_id
+            )
+        elif case == "other_target":
+            asking["target"] = AgentId("somebody-else")
+        else:
+            asking["asker"] = AgentId("another-agent")
+
+        with pytest.raises(PeerContinuationRefusedError):
+            await queue.ask("sneak", request_key="tc-2", continue_session=session, **asking)
+
+        assert await queue.claim() is not None, "the first ask is still there"
+        assert await queue.claim() is None, "and the refused follow-up was never enqueued"
+
+    async def test_a_session_id_that_is_no_peer_session_is_refused(
+        self, harness: MailboxHarness
+    ) -> None:
+        queue = _queue(_continuation(harness))
+        await queue.ask("first question", request_key="tc-1")
+
+        for bad in ("s-conformance", "", "peer~only-two"):
+            with pytest.raises(PeerContinuationRefusedError):
+                await queue.ask("sneak", request_key="tc-x", continue_session=bad)
 
 
 async def _never_exists(correlation_id: str, generation: int) -> bool:

@@ -1768,3 +1768,36 @@ asker parse it back. `answer_schema` on a profile makes the contract explicit.
 - **Not done:** listing the schema in the `ask_peer` catalogue so the asking model knows the shape
   before it asks; a per-ask schema chosen by the asker; A2A servers publishing their own schema.
 
+## D45 · Agent-comms v2: session continuation (C12)
+
+A follow-up question to a specialist used to start from nothing: every ask ran in a fresh session
+(`peer~<root>~uuid5(correlation)`), so "and the second invoice?" reached an agent that had never seen
+the first. `ask_peer` now takes an optional `continue_session`.
+
+- **Opt-in on the asking profile: `peers.allow_continuation` (default false, a strict boolean).** The
+  parameter is not offered to the model unless the switch is on, and the workflow refuses it from a
+  profile that did not opt in whatever the model writes. It is the asker's switch, as `fan_out` and
+  the caps are: the callee's conversation is kept either way.
+- **Ownership is checked against rows, not strings.** A session id is a string anybody can write. A
+  new column `peer_messages.peer_session_id` (migration `0034`, set on every new row: the derived name
+  for a fresh ask, the continued one for a follow-up) lets `PgAgentMailbox.ask` ask "did this asker
+  create that session?": the name must be `peer~<root of the asking session>~<key>`, and a row with
+  that session must have the same tenant, the same target and the same asking agent, and the same
+  case. Every failure is the same `PeerContinuationRefusedError` with one message, so a guess learns
+  nothing. An asker of unknown identity owns nothing. Rejected: trusting the root origin embedded in
+  the name alone (two tenants can use the same session id; the name says nothing about the tenant or
+  the target).
+- **The asking agent must match too, beyond the brief's "same root origin".** Inside one case, a
+  specialist's session with the orchestrator is not another agent's to read through a follow-up.
+- **The worker files the callee's turn under the row's session** when it differs from the derived
+  one, in the asker's tenant. No new workflow shape: it is only the session id of the callee's turn.
+- **The envelope names the session the ask ran in** (`session="..."`), so a follow-up of a follow-up
+  works with the id the model already has. A refused continuation holds no slot of the parallel cap.
+- **A2A refuses.** The remote peer owns its sessions and this adapter cannot make it honour one; a
+  silent fresh start would be worse than a refusal.
+- **Port:** `AgentMailbox.ask` gains `continue_session` (default None); `PeerAsk` gains
+  `peer_session_id`. The contract tests that freeze the signature were updated on purpose.
+- **Replay shape: unchanged** (no step added or reordered; the existing steps carry one more value).
+- **Not done:** expiring or capping the length of a continued session (it grows until the context
+  engine compacts it like any session); letting the callee refuse being continued.
+

@@ -287,3 +287,37 @@ def test_a_wrong_arity_minter_fails_loudly_before_the_claim() -> None:
         )
 
     assert queue.answered == []
+
+
+def test_a_follow_up_ask_runs_in_the_session_it_continues_and_a_fresh_one_in_its_own() -> None:
+    """C12: the row names the session; the worker files the callee's turn under it."""
+    earlier = f"peer~case-77~{peer_session_key('first')}"
+    follow_up = PeerAsk(
+        correlation_id="second",
+        target=AgentId("specialist"),
+        question="and then?",
+        from_session=ORIGIN,
+        turn_id=TurnId("t2"),
+        hop=1,
+        asker=AgentId("coordinator"),
+        peer_session_id=earlier,
+    )
+    fresh = PeerAsk(
+        correlation_id="third",
+        target=AgentId("specialist"),
+        question="something else",
+        from_session=ORIGIN,
+        turn_id=TurnId("t3"),
+        hop=1,
+        asker=AgentId("coordinator"),
+        peer_session_id=f"peer~case-77~{peer_session_key('third')}",
+    )
+    runner = _Runner()
+
+    asyncio.run(answer_next_ask(_Queue(follow_up), runner, target=follow_up.target))
+    asyncio.run(answer_next_ask(_Queue(fresh), runner, target=fresh.target))
+
+    continued, own = runner.seen
+    assert continued.session.session_id == earlier
+    assert continued.session.tenant_id == "S030"
+    assert own.session.session_id == f"peer~case-77~{peer_session_key('third')}"

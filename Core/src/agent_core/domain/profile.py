@@ -537,6 +537,10 @@ def _build_peer_policy(data: object) -> PeerPolicy:
             mapping.get("max_concurrent_asks", defaults.max_concurrent_asks),
             where="peers.max_concurrent_asks",
         ),
+        allow_continuation=_strict_bool(
+            mapping.get("allow_continuation", defaults.allow_continuation),
+            where="peers.allow_continuation",
+        ),
     )
 
 
@@ -563,6 +567,14 @@ def _fan_out(value: object) -> FanOutPolicy:
             pass
     allowed = ", ".join(policy.value for policy in FanOutPolicy)
     raise ProfileValidationError(f"peers.fan_out must be one of {allowed}, got {value!r}")
+
+
+def _strict_bool(value: object, *, where: str) -> bool:
+    """A real boolean. `bool("false")` is True, and a switch that grants a capability must not be
+    flipped on by a misspelt string."""
+    if not isinstance(value, bool):
+        raise ProfileValidationError(f"{where} must be true or false, got {value!r}")
+    return value
 
 
 def _positive_int(value: object, *, where: str) -> int:

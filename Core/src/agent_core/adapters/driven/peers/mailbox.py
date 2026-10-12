@@ -117,9 +117,13 @@ from agent_core.domain.peers import (
     AgentId,
     AgentRef,
     PeerAnswerRefusedError,
+    PeerContinuationRefusedError,
     PeerPolicy,
+    derived_peer_session,
+    names_a_session_of_this_case,
     new_answer_token,
     peer_ask_id,
+    peer_root_origin,
 )
 from agent_core.domain.turn import SessionId, SessionRef, TenantId, TurnId
 
@@ -152,8 +156,9 @@ _FORGED_DELIMITER: Final[str] = "[delimiter removed]"
 _ENQUEUE_COLUMNS = """
     INSERT INTO peer_messages
         (correlation_id, target_agent_id, from_session_id, from_tenant_id,
-         turn_id, hop, question, from_agent_id, answer_token, request_key, max_concurrent)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         turn_id, hop, question, from_agent_id, answer_token, request_key, max_concurrent,
+         peer_session_id)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 _ENQUEUE_KEYED_SQL = (
     _ENQUEUE_COLUMNS
@@ -212,7 +217,8 @@ _CLAIM_ONE_SQL = """
     SET state = 'delivered', delivered_at = now()
     WHERE correlation_id = %s AND state = 'queued'
     RETURNING correlation_id, target_agent_id, from_session_id, from_tenant_id,
-              turn_id, hop, question, from_agent_id, answer_token, redeliveries, callee_failures
+              turn_id, hop, question, from_agent_id, answer_token, redeliveries, callee_failures,
+              peer_session_id
 """
 # `answered_at IS NULL` is the idempotency guard and it lives in the WHERE clause rather
 # than in a preceding SELECT, for the reason every other guard in this module does: two
@@ -286,6 +292,29 @@ _REQUEUE_SQL = """
     RETURNING correlation_id
 """
 
+# C12. The rows that created a peer session, for the ownership check of a continuation.
+_SESSION_OWNERS_SQL = """
+    SELECT from_session_id, from_agent_id FROM peer_messages
+    WHERE peer_session_id = %s AND target_agent_id = %s AND from_tenant_id = %s
+"""
+_CONTINUATION_REFUSED: Final[str] = (
+    "that session cannot be continued: it is not one this agent started with this peer"
+)
+
+
+def _owns(
+    row_session_id: object, row_asker: object, asking_session_id: str, asker: str
+) -> bool:
+    """Whether an earlier ask (its asking session and agent) belongs to the same case and the same
+    asking agent as the one that wants to continue it."""
+    if row_asker is None or str(row_asker) != asker:
+        return False
+    try:
+        return peer_root_origin(str(row_session_id)) == peer_root_origin(asking_session_id)
+    except ValueError:
+        return False
+
+
 _RECLAIM_BATCH: Final[int] = 50
 
 _READ_ANSWER_SQL = """
@@ -334,6 +363,10 @@ class PeerAsk:
     # ERROR). The redelivery cap counts these only: a worker crash or a retire during a deploy is
     # infrastructure, and must not abandon the ask.
     failures: int = 0
+    # C12. The session the callee runs in when it is NOT the one derived from the correlation id:
+    # the ask continues an earlier one. None for a legacy row; for a fresh ask it equals the derived
+    # name.
+    peer_session_id: str | None = None
 
 
 def wrap_peer_answer(answer: str) -> str:
@@ -419,6 +452,7 @@ class PgAgentMailbox:
         hop: int,
         asker: AgentId | None = None,
         request_key: str | None = None,
+        continue_session: str | None = None,
     ) -> str:
         """Enqueue durably and return the correlation id the answer will arrive with.
 
@@ -462,6 +496,7 @@ class PgAgentMailbox:
             asker,
             request_key,
             policy.max_concurrent_asks,
+            continue_session,
         )
 
     def _enqueue_sync(
@@ -474,6 +509,7 @@ class PgAgentMailbox:
         asker: AgentId | None,
         request_key: str | None,
         max_concurrent: int,
+        continue_session: str | None,
     ) -> str:
         correlation_id = (
             secrets.token_urlsafe(_CORRELATION_ID_BYTES)
@@ -481,6 +517,8 @@ class PgAgentMailbox:
             else peer_ask_id(str(turn_id), request_key, str(target), question)
         )
         with psycopg.connect(self._conninfo, autocommit=True) as conn:
+            if continue_session is not None:
+                self._check_continuation(conn, continue_session, target, from_session, asker)
             row = conn.execute(
                 _ENQUEUE_UNKEYED_SQL if request_key is None else _ENQUEUE_KEYED_SQL,
                 (
@@ -497,11 +535,41 @@ class PgAgentMailbox:
                     new_answer_token(),
                     request_key,
                     max_concurrent,
+                    continue_session
+                    if continue_session is not None
+                    else derived_peer_session(str(from_session.session_id), correlation_id),
                 ),
             ).fetchone()
         if row is None:  # pragma: no cover - DO UPDATE always returns the surviving row
             raise RuntimeError("peer ask was neither inserted nor found; the queue is unusable")
         return str(row[0])
+
+    @staticmethod
+    def _check_continuation(
+        conn: psycopg.Connection[Any],
+        continue_session: str,
+        target: AgentId,
+        from_session: SessionRef,
+        asker: AgentId | None,
+    ) -> None:
+        """Refuse a continuation the asker has no claim to (C12, D45). Every reason reads the same.
+
+        The session must be named for the asker's own case, and a row that CREATED it must have
+        the same tenant, the same target and the same asking agent. An asker of unknown identity
+        (`None`) owns nothing. The rows are the proof: a session id alone is a string anybody can
+        write.
+        """
+        if (
+            asker is None
+            or not names_a_session_of_this_case(continue_session, str(from_session.session_id))
+            or not any(
+                _owns(from_session_id, from_agent, str(from_session.session_id), str(asker))
+                for from_session_id, from_agent in conn.execute(
+                    _SESSION_OWNERS_SQL, (continue_session, target, from_session.tenant_id)
+                ).fetchall()
+            )
+        ):
+            raise PeerContinuationRefusedError(_CONTINUATION_REFUSED)
 
     async def claim_next(self, target: AgentId) -> PeerAsk | None:
         """Take the oldest queued ask for `target`, or None when the queue is empty.
@@ -560,6 +628,7 @@ class PgAgentMailbox:
             answer_token=None if row[8] is None else str(row[8]),
             redeliveries=int(row[9]),
             failures=int(row[10]),
+            peer_session_id=None if row[11] is None else str(row[11]),
         )
 
     async def reclaim_stale(

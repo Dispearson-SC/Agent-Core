@@ -139,7 +139,9 @@ from agent_core.domain.peers import (
     PEER_ASK_FAILED_ANSWER,
     AgentId,
     PeerAnswerRefusedError,
+    peer_root_origin,
     peer_session_key,
+    peer_session_name,
 )
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
@@ -433,23 +435,7 @@ def new_peer_session(
     if origin is None:
         return SessionRef(session_id=SessionId(f"peer-{suffix}"), tenant_id=tenant_id)
     root = peer_root_origin(origin.session_id)
-    return SessionRef(session_id=SessionId(f"peer~{root}~{suffix}"), tenant_id=tenant_id)
-
-
-def peer_root_origin(session_id: str) -> str:
-    """The case a session id stands for: itself, or the root inside a peer session id.
-
-    Raises `ValueError` for an id containing `~` that is not `peer~<origin>~<uuid>`.
-    """
-    if "~" not in session_id:
-        return session_id
-    parts = session_id.split("~")
-    if len(parts) == 3 and parts[0] == "peer" and parts[1] and parts[2]:
-        return parts[1]
-    raise ValueError(
-        f"session id {session_id!r} contains '~' but is not a peer~<origin>~<uuid> id; "
-        "'~' is reserved as the peer origin separator"
-    )
+    return SessionRef(session_id=SessionId(peer_session_name(root, suffix)), tenant_id=tenant_id)
 
 
 def _check_minter_arity(mint_session: Callable[..., SessionRef]) -> None:
@@ -517,6 +503,16 @@ def _session_for(
     minter that drops the origin would make the specialist lose its case, so it is refused
     before any turn runs.
     """
+    derived = peer_session_name(
+        peer_root_origin(ask.from_session.session_id), peer_session_key(ask.correlation_id)
+    )
+    if ask.peer_session_id is not None and ask.peer_session_id != derived:
+        # C12. A follow-up: the row names the earlier session (the mailbox checked that the asker
+        # owns it), and the callee's turn is filed under it so it sees the exchange so far. In the
+        # asker's tenant, like every peer session.
+        return SessionRef(
+            session_id=SessionId(ask.peer_session_id), tenant_id=ask.from_session.tenant_id
+        )
     session = (
         new_peer_session(
             ask.from_session.tenant_id,

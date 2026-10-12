@@ -116,15 +116,24 @@ from agent_core.adapters.driven.tools.context import TurnContext
 _AVAILABLE_PEERS = "Available peers (use the id as `target`):"
 
 
-def ask_peer(target: str, question: str) -> str:
+def ask_peer(target: str, question: str, continue_session: str | None = None) -> str:
     """Ask another agent `target` a question. Always defers - see module docstring.
 
     The return type is `str` only so a type checker can tell what the AGENT eventually
     sees once the deferred call resolves (a tool result has to have some declared shape) -
     the peer's answer, as `AgentMailbox.read_answer` hands it back: already inside the
     untrusted-content delimiters. Every actual call raises before reaching that return.
+
+    Args:
+        target: The id of the agent to ask.
+        question: What to ask it. The peer sees this and nothing else of your conversation.
+        continue_session: To follow up on an earlier exchange with the SAME agent, the `session`
+            of its earlier result. The peer then remembers that exchange. Omit it to start fresh.
     """
-    raise CallDeferred(metadata={"target": target, "question": question})
+    metadata = {"target": target, "question": question}
+    if continue_session is not None:
+        metadata["continue_session"] = continue_session
+    raise CallDeferred(metadata=metadata)
 
 
 async def _prepare_ask_peer(
@@ -141,6 +150,10 @@ async def _prepare_ask_peer(
     """
     deps = ctx.deps
     catalogue = deps.peer_catalogue if isinstance(deps, TurnContext) else None
+    # C12. The follow-up parameter is only offered to a profile that opted in (the workflow
+    # refuses it from one that did not, whatever the model writes).
+    if isinstance(deps, TurnContext) and not deps.allow_continuation:
+        tool_def = _without_continuation(tool_def)
     if catalogue is None:
         return tool_def
     if not catalogue:
@@ -151,6 +164,12 @@ async def _prepare_ask_peer(
     base = (tool_def.description or "").rstrip()
     description = f"{base}\n\n{_AVAILABLE_PEERS}\n{lines}"
     return replace(tool_def, parameters_json_schema=schema, description=description)
+
+
+def _without_continuation(tool_def: ToolDefinition) -> ToolDefinition:
+    schema = copy.deepcopy(tool_def.parameters_json_schema)
+    schema.get("properties", {}).pop("continue_session", None)
+    return replace(tool_def, parameters_json_schema=schema)
 
 
 def build_toolset() -> FunctionToolset[None]:

@@ -65,6 +65,7 @@ class AgentMailbox(Protocol):
         hop: int,
         asker: AgentId | None = None,
         request_key: str | None = None,
+        continue_session: str | None = None,
     ) -> str:
         """PSEUDO-CODE - F9. Returns a correlation id; the ANSWER arrives via DBOS.recv().
 

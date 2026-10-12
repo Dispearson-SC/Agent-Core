@@ -40,3 +40,6 @@ class TurnContext:
     # (a runner without a profile directory) and leaves the tool in its static shape; an empty
     # tuple means nobody is available and hides the tool.
     peer_catalogue: tuple[PeerEntry, ...] | None = None
+    # C12. Whether this profile may continue an earlier peer session: `ask_peer` offers the
+    # `continue_session` parameter only when it is true.
+    allow_continuation: bool = False

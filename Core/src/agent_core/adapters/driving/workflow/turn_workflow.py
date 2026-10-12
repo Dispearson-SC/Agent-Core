@@ -172,6 +172,7 @@ from agent_core.domain.peers import (
     AgentId,
     FanOutPolicy,
     PeerAnswerRefusedError,
+    PeerContinuationRefusedError,
     PeerPolicy,
     peer_session_key,
 )
@@ -302,6 +303,7 @@ _NO_ANSWER: Final[str] = (
 # - adapters/driven/tools/peers.py, WHAT TRAVELS IN THE METADATA.
 _ASK_TARGET: Final[str] = "target"
 _ASK_QUESTION: Final[str] = "question"
+_ASK_CONTINUE: Final[str] = "continue_session"
 
 # What the model is told when the gate refused, per reason. OUR text and not a peer's, so
 # it is deliberately NOT wrapped in the untrusted delimiters: nothing outside this process
@@ -344,6 +346,18 @@ _CANCEL_RETIRED: Final[str] = "stranded by a deploy: the application version mov
 _TYPED_ANSWER_REFUSED = (
     "The peer's answer did not match the schema it declares, so it was discarded. "
     "Ask again or tell the person the answer is unavailable."
+)
+
+# The results for an ask that wanted to continue a peer session and may not (C12). OUR text.
+_CONTINUATION_OFF: Final[str] = (
+    "The peer ask was refused before it was sent: this agent is not allowed to continue an earlier "
+    "peer session ({target!r}). Ask the question again without `continue_session`, including what "
+    "the peer needs to know."
+)
+_CONTINUATION_REFUSED: Final[str] = (
+    "The peer ask was refused before it was sent: the session to continue is not one this agent "
+    "started with {target!r}. Ask again without `continue_session`, including what the peer needs "
+    "to know."
 )
 
 # The result for an ask beyond `peers.max_parallel_asks` (C11). OUR text, not wrapped.
@@ -736,6 +750,13 @@ def _for_a_peer(pending: tuple[PendingRequest, ...]) -> tuple[PendingRequest, ..
     )
 
 
+def _continued_session(ask: PendingRequest) -> str | None:
+    """The session an ask asked to continue (C12), or None. Whether it was accepted is the
+    dispatch's business: this is only read for asks that left, whose session it then is."""
+    value = ask.arguments.get(_ASK_CONTINUE)
+    return value if isinstance(value, str) and value else None
+
+
 def _ask_key(round_number: int, position: int, tool_call_id: ToolCallId) -> str:
     """The request key of one ask: its round, its position in the round and the provider's call id.
 
@@ -744,13 +765,18 @@ def _ask_key(round_number: int, position: int, tool_call_id: ToolCallId) -> str:
     return f"r{round_number}.s{position}.{tool_call_id}"
 
 
-def _peer_session_id(request: TurnRequest, correlation_id: str) -> str | None:
+def _peer_session_id(
+    request: TurnRequest, correlation_id: str, continued: str | None = None
+) -> str | None:
     """The id of the conversation a peer ask runs in (C8), or None if it has no well-formed one.
 
     Pure: the same derivation the peer worker uses to file the callee's turn
     (`new_peer_session` with `peer_session_key`), so the id the model sees is the id the
-    transcript and the audit trail carry.
+    transcript and the audit trail carry. An ask that CONTINUES a session (C12) runs in that one,
+    which the mailbox accepted only because the asker owns it: it is the id the model passed.
     """
+    if continued is not None:
+        return continued
     try:
         session = new_peer_session(
             request.session.tenant_id, request.session, key=peer_session_key(correlation_id)
@@ -767,11 +793,17 @@ def _own_peer_result(
     status: PeerStatus,
     text: str,
     correlation_id: str | None = None,
+    continued: str | None = None,
 ) -> str:
     """An outcome WE wrote (timeout, cancelled, refused), as the tagged envelope. Not wrapped:
     nothing outside this process wrote the text. `correlation_id` is None for an ask that was
-    never sent, which therefore has no session."""
-    session = None if correlation_id is None else _peer_session_id(request, correlation_id)
+    never sent, which therefore has no session. `continued` is the session a follow-up ask runs in
+    (C12)."""
+    session = (
+        None
+        if correlation_id is None
+        else _peer_session_id(request, correlation_id, continued)
+    )
     return PeerResult(peer=target, status=status, text=text, session=session).render()
 
 
@@ -1027,7 +1059,16 @@ async def _step_ask_peers(
     for position, ask in enumerate(pending):
         target = ask.arguments.get(_ASK_TARGET)
         question = ask.arguments.get(_ASK_QUESTION)
-        if not isinstance(target, str) or not target or not isinstance(question, str):
+        continue_session = ask.arguments.get(_ASK_CONTINUE)
+        if (
+            not isinstance(target, str)
+            or not target
+            or not isinstance(question, str)
+            or (
+                continue_session is not None
+                and (not isinstance(continue_session, str) or not continue_session)
+            )
+        ):
             # The model's own arguments, and a model can write anything. Refused rather
             # than coerced: an empty question asked of "another agent" bills a peer turn
             # for a question nobody can answer.
@@ -1084,6 +1125,20 @@ async def _step_ask_peers(
             )
             continue
 
+        if continue_session is not None and not caller_policy.allow_continuation:
+            refusals.append(
+                (
+                    ask.tool_call_id,
+                    _own_peer_result(
+                        request,
+                        target=target,
+                        status=PeerStatus.REFUSED,
+                        text=_CONTINUATION_OFF.format(target=target),
+                    ),
+                )
+            )
+            continue
+
         if len(handles) >= caller_policy.max_parallel_asks:
             # C11. Only asks that would LEAVE count toward the cap (a refusal above holds no slot),
             # and the excess is the tail of the step in tool_call_id order (`pending` was
@@ -1112,27 +1167,41 @@ async def _step_ask_peers(
                 "see THE COUNT HAS TO TRAVEL in adapters/driven/peers/hop_limit.py."
             )
 
-        correlation_id = await seat.mailbox.ask(
-            caller_policy,
-            AgentId(target),
-            question,
-            from_session=request.session,
-            turn_id=turn_id,
-            hop=next_hop,
-            # The same identity the asking half of the gate was just run with, sent so
-            # the ANSWERING side can re-run `callee_policy.may_ask(caller)` on arrival
-            # instead of accepting the question on this side's word (t-f11-50). It was
-            # already in hand here and dropped, so every row was written with a NULL
-            # asker while both adapters were ready to carry one.
-            #
-            # `caller` is the PROFILE the turn runs under, never `request.caller`: a peer
-            # allowlist names agents, and CLAUDE.md non-negotiable #9 forbids widening one
-            # identity into another on any code path.
-            asker=caller,
-            # C2. The tool call that asked names the ask, so a replay of this step derives
-            # the same correlation id and cannot post (or run) a second peer turn.
-            request_key=_ask_key(round_number, position, ask.tool_call_id),
-        )
+        # The asker's identity travels with the ask (`asker=caller`), sent so the ANSWERING side
+        # can re-run `callee_policy.may_ask(caller)` on arrival instead of accepting the question
+        # on this side's word (t-f11-50). It was already in hand here and dropped, so every row
+        # was written with a NULL asker while both adapters were ready to carry one. `caller` is
+        # the PROFILE the turn runs under, never `request.caller`: a peer allowlist names agents,
+        # and CLAUDE.md non-negotiable #9 forbids widening one identity into another on any code
+        # path. C2: the tool call that asked names the ask (`request_key`), so a replay of this
+        # step derives the same correlation id and cannot post (or run) a second peer turn.
+        # C12: `continue_session` is the model's claim; the mailbox checks it against the rows
+        # that created that session, and a claim it cannot back is a refusal, not a crash.
+        try:
+            correlation_id = await seat.mailbox.ask(
+                caller_policy,
+                AgentId(target),
+                question,
+                from_session=request.session,
+                turn_id=turn_id,
+                hop=next_hop,
+                asker=caller,
+                request_key=_ask_key(round_number, position, ask.tool_call_id),
+                continue_session=continue_session,
+            )
+        except PeerContinuationRefusedError:
+            refusals.append(
+                (
+                    ask.tool_call_id,
+                    _own_peer_result(
+                        request,
+                        target=target,
+                        status=PeerStatus.REFUSED,
+                        text=_CONTINUATION_REFUSED.format(target=target),
+                    ),
+                )
+            )
+            continue
         handles.append((correlation_id, ask.tool_call_id))
 
     return PeerDispatch(handles=tuple(handles), refusals=tuple(refusals))
@@ -1189,6 +1258,7 @@ async def _step_read_peer_answer(
     tool_call_id: ToolCallId,
     request: TurnRequest,
     target: str,
+    continued: str | None = None,
 ) -> tuple[ToolCallId, str, bool]:
     """Redeem one peer's handle WITHOUT resuming the turn.
 
@@ -1205,7 +1275,7 @@ async def _step_read_peer_answer(
             f"a peer answer for turn {answer.turn_id!r} was delivered to turn {turn_id!r}. "
             "Applying it would resume this turn on an answer given to another one."
         )
-    found = await _peer_envelope(answer.correlation_id, request, target)
+    found = await _peer_envelope(answer.correlation_id, request, target, continued)
     if found is None:
         raise UnusableResumeAnswerError(
             f"the turn was woken for peer handle {answer.correlation_id!r} and the mailbox "
@@ -1225,7 +1295,7 @@ async def _read_wrapped_answer(correlation_id: str) -> str | None:
 
 
 async def _peer_envelope(
-    correlation_id: str, request: TurnRequest, target: str
+    correlation_id: str, request: TurnRequest, target: str, continued: str | None = None
 ) -> tuple[str, bool] | None:
     """A stored peer answer as `(the <peer> envelope, the callee failed)`, or None when none is
     stored (C8).
@@ -1244,7 +1314,7 @@ async def _peer_envelope(
     seat = _require_peer_seat()
     cap = _asking_policy(seat, request.profile_id).max_answer_chars
     capped = cap_wrapped_answer(wrapped, cap)
-    session = _peer_session_id(request, correlation_id)
+    session = _peer_session_id(request, correlation_id, continued)
     callee = seat.profiles.get(target)
     schema = None if callee is None else callee.answer_schema
     if schema is not None and not failed and not capped.truncated:
@@ -1286,7 +1356,7 @@ async def _peer_envelope(
 
 @DBOS.step()
 async def _step_peek_peer_answer(
-    correlation_id: str, request: TurnRequest, target: str
+    correlation_id: str, request: TurnRequest, target: str, continued: str | None = None
 ) -> str | None:
     """The wrapped answer already stored under a handle, or None. Read-only, no resume.
 
@@ -1297,7 +1367,7 @@ async def _step_peek_peer_answer(
     `_peer_envelope`. A failure found this way does not trip `fail_fast` (C10): this path is the
     defence for an adapter that folds repeats, and no shipped one does.
     """
-    found = await _peer_envelope(correlation_id, request, target)
+    found = await _peer_envelope(correlation_id, request, target, continued)
     return None if found is None else found[0]
 
 
@@ -1598,6 +1668,7 @@ async def _cancel_siblings(
     peer_results: dict[ToolCallId, str],
     timed_out: set[str],
     targets: dict[ToolCallId, str],
+    continued: dict[ToolCallId, str | None],
 ) -> None:
     """`fail_fast` (C10): an ask of this step failed, so stop the asks still out. Body code.
 
@@ -1617,6 +1688,7 @@ async def _cancel_siblings(
             status=PeerStatus.CANCELLED,
             text=_PEER_SIBLING_CANCELLED.format(target=targets[tool_call_id]),
             correlation_id=corr,
+            continued=continued[tool_call_id],
         )
 
 
@@ -1672,6 +1744,7 @@ async def _collect_round(
     awaiting: dict[str, ToolCallId] = {corr: tcid for corr, tcid in dispatch.handles}
     human_missing = {ask.tool_call_id for ask in asks if ask.kind is not PendingKind.DELEGATION}
     targets = {ask.tool_call_id: str(ask.arguments.get(_ASK_TARGET, "")) for ask in asks}
+    continued = {ask.tool_call_id: _continued_session(ask) for ask in asks}
 
     # A HANDLE GIVEN OUT AGAIN AFTER A TIMEOUT. Since C13 (D36) the shipped mailboxes name an ask
     # by its request key (round and position), so a repeat in a later round is a fresh row. An
@@ -1682,7 +1755,9 @@ async def _collect_round(
     # than waited for.
     for corr in [c for c in awaiting if c in timed_out]:
         timed_out.discard(corr)
-        stored = await _step_peek_peer_answer(corr, request, targets[awaiting[corr]])
+        stored = await _step_peek_peer_answer(
+            corr, request, targets[awaiting[corr]], continued[awaiting[corr]]
+        )
         if stored is not None:
             peer_results[awaiting.pop(corr)] = stored
         elif await _step_peer_ask_cancelled(corr):
@@ -1694,6 +1769,7 @@ async def _collect_round(
                 status=PeerStatus.CANCELLED,
                 text=_PEER_ASK_CANCELLED.format(target=targets[tool_call_id]),
                 correlation_id=corr,
+                continued=continued[tool_call_id],
             )
 
     seconds = 0
@@ -1734,6 +1810,7 @@ async def _collect_round(
                     status=PeerStatus.TIMEOUT,
                     text=_PEER_TIMED_OUT.format(target=targets[tool_call_id], seconds=seconds),
                     correlation_id=corr,
+                    continued=continued[tool_call_id],
                 )
             awaiting.clear()
             # C4: only the asks that timed out (the answered ones already left `awaiting`).
@@ -1799,11 +1876,13 @@ async def _collect_round(
             )
         del awaiting[answer.correlation_id]
         _, wrapped, callee_failed = await _step_read_peer_answer(
-            turn_id, answer, asked_id, request, targets[asked_id]
+            turn_id, answer, asked_id, request, targets[asked_id], continued[asked_id]
         )
         peer_results[asked_id] = wrapped
         if callee_failed and fan_out is FanOutPolicy.FAIL_FAST and awaiting:
-            await _cancel_siblings(request, awaiting, peer_results, timed_out, targets)
+            await _cancel_siblings(
+                request, awaiting, peer_results, timed_out, targets, continued
+            )
 
     return _TurnEnd(
         await _step_resume_round(
