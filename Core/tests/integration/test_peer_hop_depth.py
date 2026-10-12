@@ -158,6 +158,8 @@ class _RecordingMailbox:
         # left is what this double exists to report.
         asker: AgentId | None = None,
         request_key: str | None = None,
+        continue_session: str | None = None,
+        root_turn_id: str | None = None,
     ) -> str:
         self._next += 1
         correlation_id = f"corr-{self._next}"

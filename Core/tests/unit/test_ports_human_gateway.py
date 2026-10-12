@@ -171,7 +171,8 @@ def test_publish_is_frozen_at_turn_session_and_requests() -> None:
     calls at once and they must reach the human as one ask. Publishing them one at a time
     is how a human ends up answering half a turn.
     """
-    assert _parameters("publish") == ["turn_id", "session", "requests"]
+    # C16 added `owner` (default None): the chain a peer's own request belongs to.
+    assert _parameters("publish") == ["turn_id", "session", "requests", "owner"]
 
     hints = _hints("publish")
     assert hints["turn_id"] is TurnId

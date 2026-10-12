@@ -669,6 +669,15 @@ agent, same target) and refuses anything else with one message that does not say
 the workflow turns that into a `refused` result. The A2A adapter cannot continue a session and
 refuses too.
 
+**A specialist's approval is visible where the person is (C16, D46).** The worker turns the row that
+started a callee into `TurnRequest.owner` (root turn, asking turn, asking agent, call), the workflow
+hands it to `HumanGateway.publish`, and a nested ask carries the same root on. The request is then
+addressed to the CASE the specialist belongs to (not to its own `peer~...` session), stored with the
+chain, and listed by the transcript under the ROOT turn's conversation: an admin entry carries the
+chain, a user sees only the placeholder (#11). The inbox counts it when it decides whether that
+conversation is suspended. The answer flows back by the existing C1 path: approving the request wakes
+the callee's workflow, which answers the asker.
+
 **What one failed ask does to its siblings (C10, D39).** `peers.fan_out` on the asking profile:
 `all_settled` (default) lets every ask of a model step run to its own end; `fail_fast` cancels the
 siblings still out (the C4 cancel: row and callee workflow) as soon as one ask ends in `error`, hands

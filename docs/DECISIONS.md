@@ -1801,3 +1801,33 @@ the first. `ask_peer` now takes an optional `continue_session`.
 - **Not done:** expiring or capping the length of a continued session (it grows until the context
   engine compacts it like any session); letting the callee refuse being continued.
 
+## D46 · Agent-comms v2: child approvals visible to the user (C16)
+
+A specialist that suspended on a person was invisible to the person's own conversation: its request
+was filed (and addressed on the channel) under the specialist's session, `peer~<case>~<key>`, which
+no inbox lists, so the case looked stuck with nothing to approve.
+
+- **The chain is data on the row, not guessed from names.** `peer_messages.root_turn_id` (migration
+  `0035`) is the turn a person started that the ask hangs from: the asking turn for a direct ask, the
+  root the asking callee was itself started under for a nested one. `mailbox.ask` takes it as
+  `root_turn_id` (the workflow passes `request.owner.root_turn_id`, or its own turn id when it has no
+  owner). The asking turn, the asking agent and the call were already on the row.
+- **`TurnRequest.owner: PeerOwner | None`.** The worker builds it where the claimed row is in hand
+  (`peer_turn_request`), as it does the hop count; a model never supplies it. `_step_publish` passes
+  it to `HumanGateway.publish(..., owner=None)`, which stores it on the `human_requests` row (four
+  nullable columns).
+- **Addressing.** A request raised inside a peer session is sent to the case the session belongs to
+  (`peer_root_origin`), not to the id of the specialist's own session.
+- **Where the approval list lives.** There is no `GET /approvals`; the surface a person's UI reads is
+  the transcript of the conversation. So `transcript_entries` lists such a request under the ROOT
+  turn's conversation, with the chain in `payload.owner` for the admin audience; a user still gets
+  the placeholder with only `since` (#11: not which tool, not which agent). `transcript_conversations`
+  counts the request when it decides `is_suspended`, so the inbox's suspended queue shows the root
+  case. Both views are re-created from the 0016/0029 definitions with one branch patched, asserted at
+  import. A new endpoint was rejected: it would be a second place the redaction rule has to hold.
+- **Answering flows back unchanged.** `POST /decisions/{corr}` correlates to the callee's turn id and
+  wakes its workflow (C1); the callee then answers the asker. Nothing new.
+- **Replay shape: unchanged** (the publish step receives one more value; no step added).
+- **Not done:** the existing inbox view still collapses sessions by `session_id` alone, so two tenants
+  using the same session id would share a row (pre-existing; the tenant predicate on `page` holds).
+

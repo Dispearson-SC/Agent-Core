@@ -945,7 +945,7 @@ async def _step_publish(
             "bind_turn_workflow must pass human_gateway=container.human_gateway; "
             "docs/TASKS.md#t-f3-17."
         )
-    await gateway.publish(turn_id, request.session, pending)
+    await gateway.publish(turn_id, request.session, pending, owner=request.owner)
 
 
 def _require_peer_seat() -> PeerSeat:
@@ -1188,6 +1188,11 @@ async def _step_ask_peers(
                 asker=caller,
                 request_key=_ask_key(round_number, position, ask.tool_call_id),
                 continue_session=continue_session,
+                # C16. The root the whole tree hangs from: this turn when a person started it, the
+                # root this callee was itself started under otherwise.
+                root_turn_id=(
+                    request.owner.root_turn_id if request.owner is not None else str(turn_id)
+                ),
             )
         except PeerContinuationRefusedError:
             refusals.append(

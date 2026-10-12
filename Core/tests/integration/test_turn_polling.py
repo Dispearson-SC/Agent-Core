@@ -215,7 +215,8 @@ class _RecordingGateway:
     correlations: dict[str, tuple[TurnId, ToolCallId]] = field(default_factory=dict)
 
     async def publish(
-        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...]
+        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...],
+        owner: object | None = None,
     ) -> None:
         for request in requests:
             self.correlations[_CORRELATION_ID] = (turn_id, request.tool_call_id)

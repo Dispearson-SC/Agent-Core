@@ -157,8 +157,8 @@ _ENQUEUE_COLUMNS = """
     INSERT INTO peer_messages
         (correlation_id, target_agent_id, from_session_id, from_tenant_id,
          turn_id, hop, question, from_agent_id, answer_token, request_key, max_concurrent,
-         peer_session_id)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         peer_session_id, root_turn_id)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 _ENQUEUE_KEYED_SQL = (
     _ENQUEUE_COLUMNS
@@ -218,7 +218,7 @@ _CLAIM_ONE_SQL = """
     WHERE correlation_id = %s AND state = 'queued'
     RETURNING correlation_id, target_agent_id, from_session_id, from_tenant_id,
               turn_id, hop, question, from_agent_id, answer_token, redeliveries, callee_failures,
-              peer_session_id
+              peer_session_id, root_turn_id
 """
 # `answered_at IS NULL` is the idempotency guard and it lives in the WHERE clause rather
 # than in a preceding SELECT, for the reason every other guard in this module does: two
@@ -367,6 +367,9 @@ class PeerAsk:
     # the ask continues an earlier one. None for a legacy row; for a fresh ask it equals the derived
     # name.
     peer_session_id: str | None = None
+    # C16. The turn a person started that this ask hangs from (the asking turn itself for a direct
+    # ask); None only for a row written before migration 0035.
+    root_turn_id: str | None = None
 
 
 def wrap_peer_answer(answer: str) -> str:
@@ -453,6 +456,7 @@ class PgAgentMailbox:
         asker: AgentId | None = None,
         request_key: str | None = None,
         continue_session: str | None = None,
+        root_turn_id: str | None = None,
     ) -> str:
         """Enqueue durably and return the correlation id the answer will arrive with.
 
@@ -497,6 +501,7 @@ class PgAgentMailbox:
             request_key,
             policy.max_concurrent_asks,
             continue_session,
+            root_turn_id,
         )
 
     def _enqueue_sync(
@@ -510,6 +515,7 @@ class PgAgentMailbox:
         request_key: str | None,
         max_concurrent: int,
         continue_session: str | None,
+        root_turn_id: str | None,
     ) -> str:
         correlation_id = (
             secrets.token_urlsafe(_CORRELATION_ID_BYTES)
@@ -538,6 +544,8 @@ class PgAgentMailbox:
                     continue_session
                     if continue_session is not None
                     else derived_peer_session(str(from_session.session_id), correlation_id),
+                    # C16. A direct ask hangs from its own asking turn.
+                    root_turn_id if root_turn_id is not None else str(turn_id),
                 ),
             ).fetchone()
         if row is None:  # pragma: no cover - DO UPDATE always returns the surviving row
@@ -629,6 +637,7 @@ class PgAgentMailbox:
             redeliveries=int(row[9]),
             failures=int(row[10]),
             peer_session_id=None if row[11] is None else str(row[11]),
+            root_turn_id=None if row[12] is None else str(row[12]),
         )
 
     async def reclaim_stale(

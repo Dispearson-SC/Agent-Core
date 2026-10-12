@@ -96,6 +96,7 @@ class Mailbox:
         self.answer_calls: list[tuple[str, str]] = []
         self.answer_tokens: list[str | None] = []
         self.refuse_answers = False
+        self.root_turns: list[str | None] = []  # `root_turn_id` of each ask (C16)
         self.continued: list[str | None] = []  # `continue_session` of each ask, in ask order
         self.refuse_continuation = False  # the mailbox refuses every continuation (C12)
         self.cancelled: dict[str, str] = {}  # correlation id -> reason, in cancel order
@@ -114,6 +115,7 @@ class Mailbox:
         if kwargs.get("continue_session") is not None and self.refuse_continuation:
             raise PeerContinuationRefusedError("not yours")
         self.continued.append(kwargs.get("continue_session"))
+        self.root_turns.append(kwargs.get("root_turn_id"))
         key: tuple[str, ...] = (str(target), question)
         if not self.fold_repeats:
             key += (str(kwargs.get("request_key")),)

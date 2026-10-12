@@ -146,6 +146,7 @@ from agent_core.domain.peers import (
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     CallerIdentity,
+    PeerOwner,
     SessionId,
     SessionRef,
     TenantId,
@@ -490,6 +491,12 @@ def peer_turn_request(ask: PeerAsk, *, session: SessionRef) -> TurnRequest:
         profile_id=ask.target,
         input=UserInput(text=ask.question),
         hop=ask.hop,
+        owner=PeerOwner(
+            root_turn_id=ask.root_turn_id if ask.root_turn_id is not None else str(ask.turn_id),
+            asker_turn_id=str(ask.turn_id),
+            asker=None if ask.asker is None else str(ask.asker),
+            call=ask.correlation_id,
+        ),
     )
 
 

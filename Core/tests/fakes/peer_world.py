@@ -226,7 +226,8 @@ class Gateway:
         self.published: list[TurnId] = []
 
     async def publish(
-        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...]
+        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...],
+        owner: object | None = None,
     ) -> None:
         self.published.append(turn_id)
 

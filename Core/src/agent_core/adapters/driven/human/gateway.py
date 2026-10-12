@@ -79,8 +79,10 @@ from datetime import timedelta
 import psycopg
 
 from agent_core.adapters.driving.channels.registry import ChannelRegistry, OutboundMessage
+from agent_core.domain.peers import peer_root_origin
 from agent_core.domain.turn import (
     CallerIdentity,
+    PeerOwner,
     PendingKind,
     PendingRequest,
     SessionRef,
@@ -100,8 +102,9 @@ _DEFAULT_TTL = timedelta(days=7)
 
 _INSERT_REQUEST_SQL = """
     INSERT INTO human_requests
-        (correlation_id, turn_id, tool_call_id, kind, expires_at)
-    VALUES (%s, %s, %s, %s, now() + %s)
+        (correlation_id, turn_id, tool_call_id, kind, expires_at,
+         root_turn_id, asker_turn_id, asker_agent_id, ask_correlation_id)
+    VALUES (%s, %s, %s, %s, now() + %s, %s, %s, %s, %s)
     ON CONFLICT ON CONSTRAINT uq_human_requests_turn_tool DO NOTHING
     RETURNING correlation_id
 """
@@ -198,7 +201,11 @@ class ChannelHumanGateway:
         self._ttl = ttl
 
     async def publish(
-        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...]
+        self,
+        turn_id: TurnId,
+        session: SessionRef,
+        requests: tuple[PendingRequest, ...],
+        owner: PeerOwner | None = None,
     ) -> None:
         """Record a correlation row per request, then ask the human on the channel.
 
@@ -212,7 +219,7 @@ class ChannelHumanGateway:
         system cannot resolve, and it looks to them like the system lost their answer.
         """
         for request in requests:
-            correlation_id = await asyncio.to_thread(self._record_sync, turn_id, request)
+            correlation_id = await asyncio.to_thread(self._record_sync, turn_id, request, owner)
             if correlation_id is None:
                 # Already published for this (turn_id, tool_call_id) - a retried step.
                 # Staying silent here is the whole idempotency guarantee: the human keeps
@@ -222,7 +229,9 @@ class ChannelHumanGateway:
                 self._recipient(session), render_ask(request, correlation_id)
             )
 
-    def _record_sync(self, turn_id: TurnId, request: PendingRequest) -> str | None:
+    def _record_sync(
+        self, turn_id: TurnId, request: PendingRequest, owner: PeerOwner | None
+    ) -> str | None:
         """The new handle, or None when this request was already published.
 
         Autocommit and a single statement: the uniqueness decision belongs to the database
@@ -237,6 +246,10 @@ class ChannelHumanGateway:
                     request.tool_call_id,
                     request.kind.value,
                     self._ttl,
+                    None if owner is None else owner.root_turn_id,
+                    None if owner is None else owner.asker_turn_id,
+                    None if owner is None else owner.asker,
+                    None if owner is None else owner.call,
                 ),
             ).fetchone()
         if row is None:
@@ -256,8 +269,10 @@ class ChannelHumanGateway:
         message and is never an authorisation subject - the approver's identity arrives
         with the reply and is `DecideApproval`'s input (t-f3-03, t-f3-05), not this one.
         """
+        # C16. A peer session (`peer~<case>~<key>`) is not a conversation anybody is in: the person
+        # to ask is in the case it belongs to.
         return CallerIdentity(
-            subject_id=session.session_id,
+            subject_id=peer_root_origin(session.session_id),
             channel=self._channel_id,
             tenant_id=session.tenant_id,
         )

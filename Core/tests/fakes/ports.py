@@ -577,11 +577,14 @@ class FakeHumanGateway:
     def __init__(self) -> None:
         self.published: list[tuple[TurnId, SessionRef, tuple[PendingRequest, ...]]] = []
         self.handles: dict[str, tuple[TurnId, ToolCallId]] = {}
+        self.owners: list[object | None] = []  # the `owner` of each publish call (C16)
 
     async def publish(
-        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...]
+        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...],
+        owner: object | None = None,
     ) -> None:
         self.published.append((turn_id, session, requests))
+        self.owners.append(owner)
         for request in requests:
             self.handles.setdefault(
                 f"corr-{turn_id}-{request.tool_call_id}", (turn_id, request.tool_call_id)

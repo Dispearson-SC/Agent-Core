@@ -44,12 +44,16 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from agent_core.domain.turn import PendingRequest, SessionRef, ToolCallId, TurnId
+from agent_core.domain.turn import PeerOwner, PendingRequest, SessionRef, ToolCallId, TurnId
 
 
 class HumanGateway(Protocol):
     async def publish(
-        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...]
+        self,
+        turn_id: TurnId,
+        session: SessionRef,
+        requests: tuple[PendingRequest, ...],
+        owner: PeerOwner | None = None,
     ) -> None:
         """PSEUDO-CODE - F3.
 

@@ -53,6 +53,7 @@ class _Row:
     answer_failed: bool = False
     cancel_reason: str | None = None
     peer_session_id: str | None = None
+    root_turn_id: str | None = None
 
 
 class InMemoryAgentMailbox:
@@ -79,6 +80,7 @@ class InMemoryAgentMailbox:
         asker: AgentId | None = None,
         request_key: str | None = None,
         continue_session: str | None = None,
+        root_turn_id: str | None = None,
     ) -> str:
         if continue_session is not None:
             self._check_continuation(continue_session, target, from_session, asker)
@@ -103,6 +105,7 @@ class InMemoryAgentMailbox:
             answer_token=new_answer_token(),
             seq=self._seq,
             max_concurrent=policy.max_concurrent_asks,
+            root_turn_id=root_turn_id if root_turn_id is not None else str(turn_id),
             peer_session_id=(
                 continue_session
                 if continue_session is not None
@@ -217,6 +220,7 @@ class InMemoryAgentMailbox:
             redeliveries=row.redeliveries,
             failures=row.failures,
             peer_session_id=row.peer_session_id,
+            root_turn_id=row.root_turn_id,
         )
 
     def _at_its_cap(self, row: _Row) -> bool:

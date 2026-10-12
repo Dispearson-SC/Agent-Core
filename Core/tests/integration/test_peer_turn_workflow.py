@@ -157,6 +157,8 @@ class _Mailbox:
         hop: int,
         asker: AgentId | None = None,
         request_key: str | None = None,
+        continue_session: str | None = None,
+        root_turn_id: str | None = None,
     ) -> str:
         assert request_key is not None
         corr = peer_ask_id(str(turn_id), request_key, str(target), question)
@@ -260,7 +262,11 @@ class _Gateway:
         self.published: list[tuple[TurnId, tuple[PendingRequest, ...]]] = []
 
     async def publish(
-        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...]
+        self,
+        turn_id: TurnId,
+        session: SessionRef,
+        requests: tuple[PendingRequest, ...],
+        owner: object | None = None,
     ) -> None:
         self.published.append((turn_id, requests))
 

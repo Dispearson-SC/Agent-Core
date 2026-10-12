@@ -42,6 +42,7 @@ class PgHarness:
         session: SessionRef = SESSION,
         asker: AgentId = ASKER,
         continue_session: str | None = None,
+        root_turn_id: str | None = None,
     ) -> str:
         policy = (
             POLICY
@@ -58,6 +59,7 @@ class PgHarness:
             asker=asker,
             request_key=request_key,
             continue_session=continue_session,
+            root_turn_id=root_turn_id,
         )
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -136,6 +138,7 @@ class A2AHarness:
         session: SessionRef = SESSION,
         asker: AgentId = ASKER,
         continue_session: str | None = None,
+        root_turn_id: str | None = None,
     ) -> str:
         policy = (
             POLICY
@@ -152,6 +155,7 @@ class A2AHarness:
             asker=asker,
             request_key=request_key,
             continue_session=continue_session,
+            root_turn_id=root_turn_id,
         )
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -184,6 +188,7 @@ class MemoryHarness:
         session: SessionRef = SESSION,
         asker: AgentId = ASKER,
         continue_session: str | None = None,
+        root_turn_id: str | None = None,
     ) -> str:
         policy = (
             POLICY
@@ -200,6 +205,7 @@ class MemoryHarness:
             asker=asker,
             request_key=request_key,
             continue_session=continue_session,
+            root_turn_id=root_turn_id,
         )
 
     def callee_token(self, correlation_id: str) -> str | None:

@@ -501,6 +501,8 @@ class _RecordingMailbox:
         # test and refuse in production - a double arguing the opposite of the code.
         asker: AgentId | None = None,
         request_key: str | None = None,
+        continue_session: str | None = None,
+        root_turn_id: str | None = None,
     ) -> str:
         del policy, from_session, turn_id, asker
         self.asks.append((target, question, hop))
@@ -1191,7 +1193,8 @@ class _LedgerGateway:
         self._directory = directory
 
     async def publish(
-        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...]
+        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...],
+        owner: object | None = None,
     ) -> None:
         for request in requests:
             _note(self._directory, f"publish:{request.tool_call_id}")
@@ -1608,7 +1611,8 @@ class _RecordingGateway:
         self.rounds = 0
 
     async def publish(
-        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...]
+        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...],
+        owner: object | None = None,
     ) -> None:
         with self._lock:
             self.published.extend(requests)

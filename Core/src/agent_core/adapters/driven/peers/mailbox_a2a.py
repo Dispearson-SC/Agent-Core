@@ -178,6 +178,7 @@ class A2AAgentMailbox:
         asker: AgentId | None = None,
         request_key: str | None = None,
         continue_session: str | None = None,
+        root_turn_id: str | None = None,
     ) -> str:
         """Send one A2A `message/send` request and return the task id as correlation id.
 
@@ -217,6 +218,7 @@ class A2AAgentMailbox:
             "turn_id": str(turn_id),
             "hop": hop,
             "answer_token": answer_token,
+            "root_turn_id": root_turn_id if root_turn_id is not None else str(turn_id),
         }
         if asker is not None:
             metadata["from_agent_id"] = str(asker)

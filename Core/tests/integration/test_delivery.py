@@ -794,7 +794,8 @@ class _RecordingGateway:
         self.published: list[PendingRequest] = []
 
     async def publish(
-        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...]
+        self, turn_id: TurnId, session: SessionRef, requests: tuple[PendingRequest, ...],
+        owner: object | None = None,
     ) -> None:
         self.published.extend(requests)
 

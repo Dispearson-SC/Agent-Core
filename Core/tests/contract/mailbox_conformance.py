@@ -86,10 +86,12 @@ class MailboxHarness(Protocol):
         session: SessionRef = SESSION,
         asker: AgentId = ASKER,
         continue_session: str | None = None,
+        root_turn_id: str | None = None,
     ) -> str:
         """Enqueue one ask through the port and return its correlation id. `max_concurrent`
         overrides the asking policy's `max_concurrent_asks` (C11); `continue_session` asks to run
-        in an earlier peer session (C12)."""
+        in an earlier peer session (C12); `root_turn_id` names the turn a person started when the
+        asking turn is itself a callee's (C16)."""
         ...
 
     def callee_token(self, correlation_id: str) -> str | None:
@@ -569,6 +571,27 @@ class MailboxConformance:
         for bad in ("s-conformance", "", "peer~only-two"):
             with pytest.raises(PeerContinuationRefusedError):
                 await queue.ask("sneak", request_key="tc-x", continue_session=bad)
+
+    # --- the owner chain (C16) ------------------------------------------------------------------
+
+    async def test_an_ask_remembers_the_turn_a_person_started(
+        self, harness: MailboxHarness
+    ) -> None:
+        queue = _queue(harness)
+        direct = await queue.ask("from the root", turn_id="root-turn", request_key="tc-1")
+        nested = await queue.ask(
+            "from a callee",
+            turn_id="peer-callee-turn",
+            request_key="tc-2",
+            root_turn_id="root-turn",
+        )
+
+        claimed = [await queue.claim(), await queue.claim()]
+
+        assert [c.correlation_id for c in claimed] == [direct, nested]
+        assert [c.root_turn_id for c in claimed] == ["root-turn", "root-turn"], (
+            "a direct ask hangs from its own asking turn, a nested one from the root it was given"
+        )
 
 
 async def _never_exists(correlation_id: str, generation: int) -> bool:

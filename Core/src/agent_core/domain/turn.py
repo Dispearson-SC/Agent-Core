@@ -220,6 +220,24 @@ class TurnResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PeerOwner:
+    """The chain that owns a peer turn (C16, D46): which ask started it and from where.
+
+    `root_turn_id` is the turn a person started and the whole tree of asks hangs from (so a
+    callee's own approval can be shown under the conversation the person is in, however deep the
+    chain). `asker_turn_id` is the turn that made this ask (the root itself for a direct ask),
+    `asker` the profile it ran under (None when the row never recorded one) and `call` the
+    correlation id of the ask. Plain strings: it travels in a pickled workflow input and into
+    SQL, and it is all code-derived from the claimed row, never from a model.
+    """
+
+    root_turn_id: str
+    asker_turn_id: str
+    asker: str | None
+    call: str
+
+
+@dataclass(frozen=True, slots=True)
 class TurnRequest:
     """Everything needed to start a turn. The three identifying fields deliberately have
     no defaults: a caller that forgets the profile or the identity should fail at
@@ -264,6 +282,10 @@ class TurnRequest:
     profile_id: str
     input: UserInput
     hop: int = 0
+    # C16 (D46). Who owns this turn when another agent started it to answer an ask: None for a
+    # turn a person or a channel started. Set where the claimed row is in hand
+    # (`peer_turn_request`), never by a model.
+    owner: PeerOwner | None = None
 
 
 @dataclass(frozen=True, slots=True)
