@@ -54,6 +54,10 @@ def new_answer_token() -> str:
 # answer (Pi's tool-output cap). The stored row keeps the answer verbatim.
 DEFAULT_MAX_ANSWER_CHARS: Final[int] = 50_000
 
+# C18 (D47). Default of `PeerPolicy.max_context_chars`: how much of the asker's conversation a
+# `summary` or `full` peer is told (about a thousand tokens).
+DEFAULT_MAX_CONTEXT_CHARS: Final[int] = 4_000
+
 # C11 (D40). Defaults of `PeerPolicy.max_parallel_asks` and `max_concurrent_asks`: Pi's numbers. How
 # many peer asks one model step may make, and how many of one asking turn run at the same time.
 DEFAULT_MAX_PARALLEL_ASKS: Final[int] = 8
@@ -260,6 +264,9 @@ class PeerPolicy:
     # (`continue_session`), so a follow-up sees the prior exchange. Off by default; per asking
     # profile; part of the content hash.
     allow_continuation: bool = False
+    # C18 (D47). With `visibility` `summary` or `full`, the most characters of the asking
+    # conversation a peer is told. Part of the content hash.
+    max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS
 
     def may_ask(self, agent_id: AgentId) -> bool:
         """Whether this profile may address `agent_id`. Empty `peers` means nobody.

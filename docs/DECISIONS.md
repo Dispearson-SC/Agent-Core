@@ -1831,3 +1831,40 @@ no inbox lists, so the case looked stuck with nothing to approve.
 - **Not done:** the existing inbox view still collapses sessions by `session_id` alone, so two tenants
   using the same session id would share a row (pre-existing; the tenant predicate on `page` holds).
 
+## D47 · Agent-comms v2: context visibility (C18)
+
+`PeerPolicy.visibility` (`none | summary | full`) was declared in F9 and consulted by nobody: the
+port's own comment promised "redact per `policy.visibility`" and the question always went alone.
+
+- **Applied on the asking side, where the conversation is.** `none` (default) is unchanged byte for
+  byte. `summary` appends the Core summariser's text (`ModelSummariser`, the one the context ladder
+  uses) over the asker's messages; `full` appends the messages themselves, the newest whole messages
+  that fit, with a marker when older ones were dropped. Both are cut to `peers.max_context_chars`
+  (new, default 4000, a positive whole number, part of the content hash).
+- **Read as the USER audience.** The peer is an agent, not an operator: it is told what the person and
+  the agent SAID (user prompts and agent text), never tool calls, tool returns, system prompts,
+  reasoning or policy rows. That is also the narrowest projection that exists and it is tenant-scoped
+  in SQL, so no new query was written (`TranscriptReader.page`). Rows in the old `{"text": ...}`
+  shape are read too.
+- **Inside the untrusted wrapper.** The text is fenced with `wrap_peer_answer` (the one boundary,
+  forged delimiters neutralised) after a lead-in in our own voice outside the fence: it is the asker's
+  data about what was said, not instructions. The conversation holds what a person typed, so it is as
+  untrusted as a tool result.
+- **A step of its own.** `_step_peer_context` runs once per model step that asks a peer and its text
+  goes to every ask of the step. A step because the summary is a model call and the question is part
+  of the ask's id (`peer_ask_id`): a replay must hand `_step_ask_peers` the same text. No step for a
+  turn that asks nobody.
+- **The failure direction is "tell less".** An empty conversation, `visibility: none`, a deployment
+  with no source, a failed read, `summary` with no summariser and `summary` when the Core summariser
+  fell back to its marked verbatim extract (its model was unreachable) all send the bare question: that
+  extract is right for compaction and would be `full` under another name for a peer. A failed read is
+  logged.
+- **The shipped `support_triage` profile already said `visibility: summary`** ("the peer is told WHY
+  it is being asked, not the whole conversation"); it was inert until now and is not any more. Set
+  `none` there to keep the old behaviour. `billing_specialist` says `none`.
+- **Replay shape: `agent-core-turns.7` -> `.8`, ONCE for the C9/C12/C16/C18 batch.** Only C18 adds a
+  step. Stranded `.7` turns: OPERATIONS "Deploying peer context". Nothing deployed under `.3`-`.8`.
+- **Not done:** the asker choosing per ask how much to share; a callee-side cap on what it accepts;
+  A2A carrying the context as a message part instead of question text (it travels in the text, so it
+  crosses the wire unchanged).
+

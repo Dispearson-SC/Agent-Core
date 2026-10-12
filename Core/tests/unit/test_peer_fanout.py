@@ -589,5 +589,15 @@ def test_the_fan_out_step_moved_the_pinned_application_version_to_seven() -> Non
     another step sequence and is stranded on purpose (drain first, OPERATIONS.md)."""
     from agent_core import composition
 
-    assert composition.PINNED_DBOS_APPLICATION_VERSION == "agent-core-turns.7"
+    assert int(composition.PINNED_DBOS_APPLICATION_VERSION.rsplit(".", 1)[1]) >= 7
     assert hasattr(turn_workflow, "_step_peer_fan_out")
+
+
+def test_the_peer_context_step_moved_the_pinned_application_version_to_eight() -> None:
+    """D47 (C18): a round that asks a peer records `_step_peer_context` before the ask step, so a
+    turn suspended under .7 replays into another step sequence and is stranded on purpose (drain
+    first, OPERATIONS.md). C9, C12 and C16 added no step: one bump for the batch."""
+    from agent_core import composition
+
+    assert composition.PINNED_DBOS_APPLICATION_VERSION == "agent-core-turns.8"
+    assert hasattr(turn_workflow, "_step_peer_context")

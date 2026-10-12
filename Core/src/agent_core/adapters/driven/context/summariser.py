@@ -91,6 +91,9 @@ by the conversation, which is the only way this stays affordable at turn 200."""
 _ELISION = "\n[...omitted from the middle of the material...]\n"
 _TRUNCATED = " [...truncated]"
 _DEGRADED = "[summariser unavailable - verbatim extract, not a summary]\n"
+DEGRADED_MARKER = _DEGRADED.rstrip("\n")
+"""What a summary starts with when the model could not be reached and `_extractive_fallback` stood
+in for it. Public for a reader that must not treat that text as a summary (C18)."""
 
 _INSTRUCTION = (
     "You compact a running conversation so an assistant can continue it with less "

@@ -537,6 +537,10 @@ def _build_peer_policy(data: object) -> PeerPolicy:
             mapping.get("max_concurrent_asks", defaults.max_concurrent_asks),
             where="peers.max_concurrent_asks",
         ),
+        max_context_chars=_positive_int(
+            mapping.get("max_context_chars", defaults.max_context_chars),
+            where="peers.max_context_chars",
+        ),
         allow_continuation=_strict_bool(
             mapping.get("allow_continuation", defaults.allow_continuation),
             where="peers.allow_continuation",

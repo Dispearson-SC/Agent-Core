@@ -176,6 +176,7 @@ from agent_core.adapters.driven.human.gateway import ChannelHumanGateway
 from agent_core.adapters.driven.knowledge_pg.admin import PgKnowledgeAdmin
 from agent_core.adapters.driven.llm_litellm.gateway import LiteLLMGateway
 from agent_core.adapters.driven.media_fs.store import FilesystemMediaStore
+from agent_core.adapters.driven.peers.asker_context import TranscriptAskerContext
 from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
 from agent_core.adapters.driven.peers.typed_answer import check_answer_schema
 from agent_core.adapters.driven.persistence_pg.attempt_ledger import PgAttemptLedger
@@ -491,7 +492,7 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # `_step_read_peer_answer` returns the callee's failure flag too, so a turn suspended under .6 would
 # replay into a different step sequence. In-flight .6 turns are stranded on purpose (drain first,
 # OPERATIONS.md). Nothing was deployed under .3-.6, so for this branch it is a formality.
-PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.7"
+PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.8"
 
 # C5 (D32). The default of `Settings.max_turn_attempts` is `DEFAULT_MAX_TURN_ATTEMPTS`, defined once
 # in `turn_workflow` (where the budget is enforced) and imported above; D33 removed the second copy.
@@ -1746,7 +1747,15 @@ def bind_turn_workflow(container: Container) -> None:
             channels=container.channels,
             human_gateway=container.human_gateway,
             resume_turn=container.resume_turn,
-            peers=PeerSeat(mailbox=container.mailbox, profiles=container.profiles),
+            peers=PeerSeat(
+                mailbox=container.mailbox,
+                profiles=container.profiles,
+                # C18. What `peers.visibility: summary | full` reads: the asker's conversation as
+                # its USER sees it, and the SAME summariser the context ladder compacts with.
+                context=TranscriptAskerContext(
+                    container.transcripts, ModelSummariser(container.model)
+                ),
+            ),
             # C5. The poison-turn budget: the ledger lives in the application database, and the
             # limit is `Settings.max_turn_attempts`.
             attempts=attempt_ledger_for(container.domain_pool),

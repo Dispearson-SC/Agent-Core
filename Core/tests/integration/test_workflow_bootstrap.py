@@ -124,6 +124,21 @@ def test_the_container_builds_a_resume_turn_and_binds_it_to_the_workflow() -> No
     )
 
 
+@pytest.mark.silent
+def test_the_container_binds_the_conversation_source_peers_read_for_visibility() -> None:
+    """C18. `peers.visibility: summary | full` reads the asker's conversation through the seat;
+    an unbound seat is a profile that promises context and silently sends none."""
+    from agent_core.adapters.driven.peers.asker_context import TranscriptAskerContext
+
+    composition.build_container(composition.Settings())
+
+    bound = turn_workflow._dependencies
+    assert bound is not None and bound.peers is not None
+    assert isinstance(bound.peers.context, TranscriptAskerContext), (
+        "bind_turn_workflow builds the PeerSeat without a conversation source"
+    )
+
+
 @pytest.mark.phase("F3")
 @pytest.mark.silent
 def test_a_production_wired_process_reaches_the_real_resume_use_case() -> None:

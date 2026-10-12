@@ -5,7 +5,7 @@ changes. Decisions behind them are in `docs/DECISIONS.md`.
 
 ## Bumping the DBOS application version
 
-`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.7`) is bumped when a
+`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.8`) is bumped when a
 change makes turns that are already in flight incompatible with the new code: a workflow step
 added, removed, renamed or reordered, or a changed workflow argument (D28 took `.1` to `.2`;
 D31 took `.2` to `.3`: the peer job gained `answer_token` and the round gained the cancel
@@ -15,7 +15,8 @@ collected and resumed once, so a turn suspended on a person under `.3` is strand
 under `.4` is stranded and the new build does not know its name, see "Deploying the UUID peer
 workflow ids"; D36 took `.5` to `.6`: the request key of a peer ask names its round and position, see
 "Deploying the ask keys"; D39 took `.6` to `.7`: a round waiting on a peer records one more step
-(the fan-out policy), see "Deploying the fan-out policy". Peer asks in
+(the fan-out policy), see "Deploying the fan-out policy"; D47 took `.7` to `.8`: a round that
+asks a peer records the context step first, see "Deploying peer context". Peer asks in
 flight on `.2` are stranded too: `stranded-turns` lists them, and
 their mailbox rows stay `delivered` until the lease reclaims them: with
 `AGENT_CORE_RETIRE_OTHER_VERSIONS=true` (D33) the lease treats a workflow left open under another
@@ -123,6 +124,19 @@ before deploying `.7` exactly as for `.6` ("Deploying the ask keys" above: `stra
 OLD build must report 0), then deploy `.7`, run `stranded-turns` again and cancel what it lists.
 Migration `0032` (`peer_messages.answer_failed`, `callee_failures`) is additive with defaults, so it
 is safe under a running `.6` build.
+
+## Deploying peer context (`.7` -> `.8`, D47)
+
+A round that asks a peer now records one more step (`_step_peer_context`, what the asking profile's
+`peers.visibility` lets its peers know of the conversation) before the ask step. A turn suspended on
+a peer under `.7` would replay into another step sequence, so it is stranded like any stale-version
+workflow: drain before deploying `.8` as for `.7` (`stranded-turns` against the OLD build must report
+0), deploy `.8`, run `stranded-turns` again and cancel what it lists. The batch also adds migrations
+`0034` (`peer_messages.peer_session_id`) and `0035` (the owner chain columns and the two transcript
+views); both are additive, but `0035` re-creates `transcript_entries` and `transcript_conversations`,
+so apply it in the same window as the `.8` build and not under a running `.7` reader you cannot
+restart. Nothing was deployed under `.3`-`.8` on this branch, so the bumps collapse into one before
+the first release.
 
 ## Peer redelivery lease
 

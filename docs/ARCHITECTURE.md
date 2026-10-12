@@ -678,6 +678,15 @@ chain, a user sees only the placeholder (#11). The inbox counts it when it decid
 conversation is suspended. The answer flows back by the existing C1 path: approving the request wakes
 the callee's workflow, which answers the asker.
 
+**What a peer is told about the conversation (C18, D47).** `peers.visibility` on the asking profile
+was declared and never applied. `none` (default) sends the question only; `summary` adds the Core
+summariser's summary of the asker's conversation; `full` adds its messages, newest kept; both cut to
+`peers.max_context_chars` (default 4000). The conversation is read as the USER audience sees it
+(what was said, never tool calls or policy rows) and travels inside the untrusted delimiters, with a
+lead-in of ours saying it is the asker's data and not instructions. It is read once per model step
+(`_step_peer_context`, recorded, so a replay asks about the same text) and appended to every ask of
+the step. Failure to read, or a deployment without a source, sends the bare question.
+
 **What one failed ask does to its siblings (C10, D39).** `peers.fan_out` on the asking profile:
 `all_settled` (default) lets every ask of a model step run to its own end; `fail_fast` cancels the
 siblings still out (the C4 cancel: row and callee workflow) as soon as one ask ends in `error`, hands

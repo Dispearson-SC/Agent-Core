@@ -84,16 +84,17 @@ def _drop() -> None:
             admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 
 
-def _profiles_with_continuation(target: Path) -> Path:
-    """The shipped profiles, with the asker opted in to continuation (the shipped one is not)."""
+def _profiles_with_continuation(target: Path, visibility: str) -> Path:
+    """The shipped profiles, with the asker opted in to continuation (the shipped one is not) and
+    with the given `peers.visibility` (the shipped asker says `summary`)."""
     shutil.copytree(_CORE / "profiles", target)
     path = target / f"{_ASKER}.yaml"
     text = path.read_text()
-    assert "\npeers:\n  enabled: true\n" in text
+    assert "\npeers:\n  enabled: true\n" in text and "\n  visibility: summary\n" in text
     path.write_text(
         text.replace(
             "\npeers:\n  enabled: true\n", "\npeers:\n  enabled: true\n  allow_continuation: true\n"
-        )
+        ).replace("\n  visibility: summary\n", f"\n  visibility: {visibility}\n")
     )
     return target
 
@@ -155,8 +156,9 @@ class _Model:
         return ModelResponse(parts=[TextPart("all done")])
 
 
+@pytest.mark.parametrize("visibility", ["none", "full"])
 def test_a_follow_up_runs_in_the_first_session_and_sees_the_first_exchange(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, visibility: str
 ) -> None:
     from dbos import DBOS
 
@@ -171,7 +173,7 @@ def test_a_follow_up_runs_in_the_first_session_and_sees_the_first_exchange(
         composition, "PydanticAgentRunner", lambda **kw: real(**kw, model_factory=factory)
     )
     app = _conninfo(_DATABASE)
-    profiles = _profiles_with_continuation(tmp_path / "profiles")
+    profiles = _profiles_with_continuation(tmp_path / "profiles", visibility)
     for name, value in {
         "AGENT_CORE_DATABASE_URL": app,
         "AGENT_CORE_AUDIT_DATABASE_URL": app,
@@ -256,7 +258,16 @@ def test_a_follow_up_runs_in_the_first_session_and_sees_the_first_exchange(
         and seen["sessions"][0] == seen["sessions"][1] == model.session_seen
     )
     first, second = model.specialist_histories
-    assert first == ["first question"], "the first exchange starts fresh"
-    assert second[-1] == "and the second one?" and "first question" in second, (
+    context_lead = "Context from the conversation of the asking agent"
+    if visibility == "none":
+        assert first == ["first question"], "the first exchange starts fresh"
+    else:
+        # C18, end to end: the asker's conversation reaches the specialist inside the untrusted
+        # fence, after the question (the shipped asker says `summary`; `full` needs no model).
+        assert first[0].startswith("first question\n\n" + context_lead)
+        assert (
+            "<untrusted-tool-output>" in first[0] and "was this customer charged twice" in first[0]
+        )
+    assert second[-1].startswith("and the second one?") and "first question" in " ".join(second), (
         f"the follow-up did not see the first exchange: {second!r}"
     )
