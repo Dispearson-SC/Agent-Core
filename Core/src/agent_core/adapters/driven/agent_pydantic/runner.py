@@ -127,6 +127,7 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 from agent_core.adapters.driven.mcp.toolsets import result_budget_for
 from agent_core.adapters.driven.peers.catalogue import build_peer_catalogue
 from agent_core.adapters.driven.peers.typed_answer import answer_problem
+from agent_core.adapters.driven.tools.background import BackgroundAgents, BackgroundOwner
 from agent_core.adapters.driven.tools.context import PeerEntry, TurnContext
 from agent_core.application.ingest_media import sniff_media
 from agent_core.domain.compaction import CompactionPolicy, ContextState
@@ -1409,6 +1410,7 @@ class PydanticAgentRunner:
         model_factory: ModelFactory = litellm_model_factory,
         clock: Callable[[], datetime] = _utc_now,
         peer_profiles: Mapping[str, AgentProfile] | None = None,
+        background_agents: BackgroundAgents | None = None,
     ) -> None:
         self._model = model
         self._policy = policy
@@ -1423,6 +1425,8 @@ class PydanticAgentRunner:
         # C14. Every loaded profile, so the `ask_peer` tool can be generated per turn from who the
         # asker may actually ask. `None` keeps the tool static.
         self._peer_profiles = peer_profiles
+        # C20. The seat the background-agent tools act through (None: they are not offered).
+        self._background_agents = background_agents
         self._agents: dict[tuple[str, str, str], Agent[Any, RunOutput]] = {}
 
     def usage_limits_for(self, profile: AgentProfile) -> UsageLimits:
@@ -1504,6 +1508,7 @@ class PydanticAgentRunner:
                     peer_catalogue=self._peer_catalogue(profile, rules),
                     allow_continuation=profile.peers.allow_continuation,
                     allow_background=profile.peers.allow_background,
+                    **self._background_deps(profile, turn_id, request.caller, request.session),
                 ),
                 usage_limits=self.usage_limits_for(profile),
             )
@@ -1649,6 +1654,7 @@ class PydanticAgentRunner:
                     peer_catalogue=self._peer_catalogue(profile, rules),
                     allow_continuation=profile.peers.allow_continuation,
                     allow_background=profile.peers.allow_background,
+                    **self._background_deps(profile, turn_id, caller, session),
                 ),
                 usage_limits=self.usage_limits_for(profile),
             )
@@ -1721,6 +1727,23 @@ class PydanticAgentRunner:
                 finished_at=self._clock(),
             ),
         )
+
+    def _background_deps(
+        self, profile: AgentProfile, turn_id: TurnId, caller: CallerIdentity, session: SessionRef
+    ) -> dict[str, Any]:
+        """The seat and the conversation the background-agent tools act on (C20, D50).
+
+        Built from the TURN (its session, its caller, its id), never from anything the model wrote,
+        and only for a profile that opted in with a seat wired: otherwise the tools are hidden.
+        """
+        if self._background_agents is None or not profile.peers.allow_background:
+            return {}
+        return {
+            "background": self._background_agents,
+            "background_owner": BackgroundOwner(
+                session=session, profile_id=profile.id, caller=caller, turn_id=str(turn_id)
+            ),
+        }
 
     def _peer_catalogue(
         self, profile: AgentProfile, rules: RuleSet

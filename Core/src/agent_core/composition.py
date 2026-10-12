@@ -202,6 +202,7 @@ from agent_core.adapters.driven.persistence_pg.transcript_repository import (
 from agent_core.adapters.driven.policy_fs.loader import apply_policy_rules, load_policy_rules
 from agent_core.adapters.driven.profiles_fs.loader import load_profile_sync
 from agent_core.adapters.driven.skills_fs.registry import FilesystemSkillRegistry
+from agent_core.adapters.driven.tools import peer_background as peer_background_tools
 from agent_core.adapters.driven.tools import peers as peer_tools
 from agent_core.adapters.driven.tools.fraud import tools as fraud_tools
 from agent_core.adapters.driven.tools.provider import (
@@ -224,6 +225,7 @@ from agent_core.adapters.driving.http.routes import (
     TurnStatus,
     TurnView,
 )
+from agent_core.adapters.driving.workflow.background_agents import WorkflowBackgroundAgents
 from agent_core.adapters.driving.workflow.turn_workflow import (
     DEFAULT_MAX_TURN_ATTEMPTS,
     PeerSeat,
@@ -328,6 +330,8 @@ _DEFAULT_ENV_FILE = _CORE_ROOT.parent / ".env"
 # `:profile`, `:tools`, `preflight` and the audit record all see it. A provider wrapper
 # would have given the same tool and shown it nowhere.
 PEER_TOOLSET: Final[str] = "peers"
+# C20 (D50). The background-agent tools, granted only to a profile with `peers.allow_background`.
+PEER_BACKGROUND_TOOLSET: Final[str] = "peer_background"
 
 # t-f11-05. THE TOOL REGISTRY THIS PROCESS SERVES.
 #
@@ -347,6 +351,7 @@ TOOL_PACKAGES: Mapping[str, ToolsetBuilder] = {
     **DEFAULT_TOOL_PACKAGES,
     "fraud": fraud_tools.build_toolset,
     PEER_TOOLSET: peer_tools.build_toolset,
+    PEER_BACKGROUND_TOOLSET: peer_background_tools.build_toolset,
 }
 
 
@@ -968,9 +973,15 @@ def _grant_peer_mechanism(profile: AgentProfile) -> AgentProfile:
     build `ask_peer` twice and `LocalToolProvider._resolve` would refuse the profile for a
     collision with itself.
     """
-    if not profile.peers.enabled or PEER_TOOLSET in profile.toolsets:
+    if not profile.peers.enabled:
         return profile
-    return replace(profile, toolsets=(*profile.toolsets, PEER_TOOLSET))
+    granted = list(profile.toolsets)
+    if PEER_TOOLSET not in granted:
+        granted.append(PEER_TOOLSET)
+    # C20. The background-agent tools ride on the same switch block: `peers.allow_background`.
+    if profile.peers.allow_background and PEER_BACKGROUND_TOOLSET not in granted:
+        granted.append(PEER_BACKGROUND_TOOLSET)
+    return replace(profile, toolsets=tuple(granted))
 
 
 def _refuse_topology_drift(profiles: Mapping[str, AgentProfile], policy_dir: Path) -> None:
@@ -1850,8 +1861,16 @@ def build_container(
     # The runner takes the SAME policy, audit and tool objects as `StartTurn`, so the
     # enforcement point in `before_tool_execute` reads the rules this container was built
     # with and the model is offered the toolset the policy narrowed.
+    # C20 (D50). The background-agent tools' seat: the container's OWN mailbox and profiles (the
+    # same pair `bind_turn_workflow` hands the workflow), so a message passes the same two-sided
+    # gate and a stop cancels through the same cascade.
     runner = PydanticAgentRunner(
-        model=model, policy=policy, audit=audit, tools=tools, peer_profiles=profiles
+        model=model,
+        policy=policy,
+        audit=audit,
+        tools=tools,
+        peer_profiles=profiles,
+        background_agents=WorkflowBackgroundAgents(mailbox, profiles),
     )
 
     channels = build_channel_registry(resolved)

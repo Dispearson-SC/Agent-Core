@@ -152,6 +152,8 @@ class Start:
         # that is killed mid-turn, once the engine is destroyed under it).
         self.a_asks_in_background = False
         self.b_hangs = False
+        # C20. B's turn waits here until the test sets it (a running child that can be messaged).
+        self.b_gate: asyncio.Event | None = None
         # Approvals A asks of its own people instead of asking B (C6): their tool call ids.
         self.a_asks_people: tuple[str, ...] = ()
         self.requests: list[TurnRequest] = []
@@ -174,6 +176,8 @@ class Start:
             )
         if request.profile_id == B and self.b_hangs:
             await asyncio.Event().wait()
+        if request.profile_id == B and self.b_gate is not None:
+            await self.b_gate.wait()
         asks = {A: B} if self.b_answers_directly else {A: B, B: C}
         if request.profile_id == A and request.input.text.startswith("[Background result]"):
             # C19. The follow-up turn that carries a background answer back: it just finishes.
@@ -341,6 +345,15 @@ async def until_step_recorded(workflow_id: str, step: str) -> None:
     while step not in await recorded_steps(workflow_id):
         if asyncio.get_running_loop().time() > deadline:
             raise AssertionError(f"timed out waiting for {step} to be recorded for {workflow_id}")
+        await asyncio.sleep(POLL)
+
+
+async def until_status(workflow_id: str) -> None:
+    """Wait until DBOS knows a workflow of this id (it may be created later, by another one)."""
+    deadline = asyncio.get_running_loop().time() + DEADLINE
+    while await status(workflow_id) is None:
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(f"timed out waiting for workflow {workflow_id} to exist")
         await asyncio.sleep(POLL)
 
 

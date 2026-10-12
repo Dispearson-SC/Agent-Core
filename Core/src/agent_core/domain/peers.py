@@ -235,6 +235,10 @@ class BackgroundAsk:
     finished_at: datetime | None = None
     # The peer session the callee runs in: what a message to it continues (C20). None if unknown.
     session: str | None = None
+    # The depth the ask travelled at (its asker's hop + 1) and the turn a person started that it
+    # hangs from: what a message to the same child carries, so no verb needs the asking turn's own.
+    hop: int = 0
+    root_turn_id: str | None = None
 
     @property
     def is_open(self) -> bool:

@@ -726,6 +726,14 @@ running turn of that conversation. `max_background_asks` (default 4) bounds how 
 has running. A background ask outlives the asking turn (`cancel_open` skips it) and ends with
 `close_conversation(session)` or by handle; A2A refuses it.
 
+**Managing background agents (C20, D50).** A profile with `peers.allow_background` is also granted
+`peer_list`, `peer_status(handle)`, `peer_message(handle, text, mode=steer|follow_up)` and
+`peer_stop(handle)`. They are ordinary tools over a seat (`WorkflowBackgroundAgents`), scoped to the
+turn's conversation (tenant and session) in SQL; a handle of another conversation reads as unknown.
+`peer_stop` runs the C4 cascade for that one ask. `peer_message` is a new background ask continuing
+the child's session through the same gate, queued behind the child's current turn: `steer` is NOT
+mid-turn steering, only a different framing of the same queued message.
+
 **Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
 and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the
 two-sided gate), the caller's policy rules and each callee profile's `description`. A denied,

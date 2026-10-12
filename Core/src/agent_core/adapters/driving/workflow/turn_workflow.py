@@ -207,6 +207,7 @@ __all__ = [
     "DurablePeerTurnStarter",
     "cancel_turn",
     "close_conversation",
+    "stop_background_ask",
     "HumanAnswer",
     "HumanPayload",
     "NotInsideAWorkflowError",
@@ -1665,6 +1666,16 @@ async def close_conversation(session: SessionRef, reason: str) -> tuple[str, ...
     """
     ended = await _require_peer_seat().mailbox.cancel_background(session, reason)
     return await _cancel_callees(ended, reason)
+
+
+async def stop_background_ask(correlation_id: str, reason: str) -> bool:
+    """Stop ONE background ask: its row, its callee workflow and what that callee asked in turn.
+    C20 / D50. True if this call ended it (False: it had already answered or been stopped).
+
+    The caller has already established that the handle belongs to its own conversation; this is the
+    cascade only, the same one `close_conversation` and a reply timeout use. Not a step.
+    """
+    return bool(await _cancel_callees((correlation_id,), reason))
 
 
 # --- C5: the poison-turn budget -----------------------------------------------------------------

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from agent_core.adapters.driven.tools.background import BackgroundAgents, BackgroundOwner
 from agent_core.domain.turn import CallerIdentity, SessionRef
 
 __all__ = ["PeerEntry", "TurnContext"]
@@ -46,3 +47,7 @@ class TurnContext:
     # C19. Whether this profile may run an ask in the background: `ask_peer` offers `background`
     # only when it is true.
     allow_background: bool = False
+    # C20. The seat the background-agent tools act through and the conversation they act on. Both
+    # None (the tools are hidden) unless the profile opted in AND the deployment wired a seat.
+    background: BackgroundAgents | None = None
+    background_owner: BackgroundOwner | None = None

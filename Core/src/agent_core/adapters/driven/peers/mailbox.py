@@ -276,7 +276,7 @@ _CANCEL_BACKGROUND_SQL = """
 # C20. The background asks of one conversation, newest first. The state is derived from the row.
 _BACKGROUND_ASKS_SQL = """
     SELECT correlation_id, target_agent_id, question, enqueued_at, state, answer_failed,
-           answered_at, cancelled_at, peer_session_id
+           answered_at, cancelled_at, peer_session_id, hop, root_turn_id
     FROM peer_messages
     WHERE from_tenant_id = %s AND from_session_id = %s AND background IS NOT NULL
     ORDER BY enqueued_at DESC, correlation_id
@@ -893,6 +893,8 @@ class PgAgentMailbox:
                 state=_background_state(str(row[4]), bool(row[5]), row[6]),
                 finished_at=row[7] if str(row[4]) == "cancelled" else row[6],
                 session=None if row[8] is None else str(row[8]),
+                hop=int(row[9]),
+                root_turn_id=None if row[10] is None else str(row[10]),
             )
             for row in rows
         )

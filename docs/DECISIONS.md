@@ -1946,3 +1946,50 @@ returns a handle at once and the answer comes back later as a new message of the
 - **Not done:** a per-ask timeout for a background child; labelling the follow-up in the user
   transcript (it is stored as the turn's input, which the user audience reads as a message);
   retrying a failed follow-up enqueue; an HTTP/console command for `close_conversation`.
+
+## D50 · Agent-comms v2: managing background agents (C20)
+
+A handle from a background ask (D49) is only useful if the conversation can do something with it.
+Four tools, the Pi example-23 set, granted with `peers.allow_background`: `peer_list()`,
+`peer_status(handle)`, `peer_message(handle, text, mode)` and `peer_stop(handle)`.
+
+- **Ordinary tools behind a seat, not deferred like `ask_peer`.** `ask_peer` suspends the turn
+  because another agent must run before there is a result. A listing is a read, and a stop or a
+  message is one idempotent write the seat reports at once, so these run inside the turn's recorded
+  model step like any tool (a replay re-runs them: a stop twice is a no-op, a message twice is one
+  message). The seat (`tools/background.py::BackgroundAgents`) is not a port, for the reason
+  `PendingInputs` is not; its implementation, `WorkflowBackgroundAgents`, lives in the workflow
+  package because a stop cancels the child's workflow and `dbos` may be imported nowhere else.
+- **Their own toolset, granted by the switch.** `composition._grant_peer_mechanism` adds the
+  `peer_background` toolset to a profile with `peers.enabled` and `peers.allow_background`; a profile
+  that never asked for background asks does not carry the names. `prepare` also hides the tools when
+  the runner has no seat or no owner for the turn. They need `ToolPolicy` rules like every tool
+  (`policy/rules.yaml`); none is shipped because no shipped profile opts in.
+- **Scoped to the owner conversation (tenant AND session id), in SQL.** The mailbox returns the
+  background asks of the turn's conversation and a handle is looked up in that list and nowhere else:
+  another conversation's handle, another tenant's and one that never existed all read "no background
+  agent with that handle", and `stop` never reaches them (tested). The owner (session, profile,
+  caller, turn id) comes from the TURN, never from an argument the model wrote.
+- **`peer_stop` is the C4 cascade for one ask** (`turn_workflow.stop_background_ask`): the row first
+  (a late answer is refused), then the callee workflow and what it asked in turn. A finished or
+  already-stopped ask answers "nothing to stop". A stopped child answers nobody: no follow-up turn.
+- **`peer_message` is a new background ask that continues the child's session; `steer` is NOT
+  mid-turn steering.** A running turn is one recorded model step and cannot be interrupted, so the
+  message is delivered the way every ask is: a turn of the child, in the child's own peer session,
+  which the queue partition (one turn per session at a time) runs after the turn in flight. That is
+  the "queued for the child's next step" the design allowed. `steer` and `follow_up` differ only in
+  the framing the child reads ("steering note ... changes how to do the work" versus "follow-up ...
+  adds to it"). It goes through the same gate as any ask: both profiles' switches and allowlists and
+  the hop limit (`authorise_hop`, with the child's own depth read off its row, since a resumed turn
+  has no hop at hand), `allow_background`, `max_background_asks` (a message takes a slot: with a cap of
+  one a message to the running child is refused until it finishes or is stopped), and the mailbox's
+  C12 ownership check. It does NOT need `allow_continuation`: the owner started the child. Its
+  request key is the tool call id, so a replayed call is one message. Its answer comes back as a
+  follow-up turn, tagged with the NEW handle. A message to a FINISHED child starts a new turn in its
+  session (a follow-up of a follow-up); to a stopped one it is refused. If the child is parked on a
+  person's approval, the message waits behind it.
+- **What the model reads is ours.** Handles, states, targets, times and its own question, never a
+  peer's words: an answer reaches the model only as the follow-up turn, inside the untrusted boundary.
+- **Replay shape: unchanged by C20** (the `.9` bump was taken by C19; these are tools, not steps).
+- **Not done:** true mid-turn steering; cancelling a queued message by its handle other than with
+  `peer_stop` on it; showing the owner conversation's background agents in the transcript API.

@@ -119,3 +119,98 @@ def test_closing_the_conversation_stops_the_child_and_no_follow_up_arrives(
     assert w.rows(_DATABASE)[seen["corr"]][1] == "cancelled"
     assert seen["callee"] == "CANCELLED"
     assert seen["follow_up"] is None, "a stopped child answers nobody"
+
+
+# --- managing a running child (C20, D50) ----------------------------------------------------------
+
+
+def _seat(world: w.World) -> Any:
+    from agent_core.adapters.driving.workflow.background_agents import WorkflowBackgroundAgents
+
+    return WorkflowBackgroundAgents(world.mailbox, w.profiles())
+
+
+def _owner() -> Any:
+    from agent_core.adapters.driven.tools.background import BackgroundOwner
+
+    request = w.request()
+    return BackgroundOwner(
+        session=request.session, profile_id=w.A, caller=request.caller, turn_id="turn-2"
+    )
+
+
+def test_a_message_to_a_running_child_runs_after_the_turn_it_is_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_core.adapters.driven.tools.background import MessageMode
+
+    world = _world(monkeypatch)
+    world.start.b_gate = asyncio.Event()
+    seen: dict[str, Any] = {}
+
+    async def process() -> None:
+        async with w.Dbos(_DATABASE):
+            await turn_workflow.enqueue_turn(w.request(), turn_id=w.ASKING_TURN)
+            await w.result_of(str(w.ASKING_TURN))
+            (corr,) = w.rows(_DATABASE)
+            assert await w.dispatch(world, w.B) is AskDisposition.STARTED
+            await w.until(lambda: world.start.starts(w.B) == 1, "B to be running")
+
+            sent = await _seat(world).message(
+                _owner(), corr, "use March", MessageMode.STEER, call_id="call-1"
+            )
+            assert sent.handle is not None, sent.refusal
+            assert await w.dispatch(world, w.B) is AskDisposition.STARTED
+            await asyncio.sleep(1.5)
+            seen["while_running"] = world.start.starts(w.B)
+
+            world.start.b_gate.set()
+            await w.until(lambda: world.start.starts(w.B) == 2, "the message to run")
+            for handle in (corr, sent.handle):
+                follow_up = background_followup_turn_id(handle)
+                await w.until_status(follow_up)
+                seen[handle] = (await w.result_of(follow_up)).result
+            seen["ids"] = (corr, sent.handle)
+
+    asyncio.run(process())
+
+    assert seen["while_running"] == 1, "the message waited for the child's turn to end"
+    first, second = [r for r in world.start.requests if r.profile_id == w.B]
+    assert second.session == first.session, "it continues the child's own session"
+    assert second.input.text.startswith("Steering note") and "use March" in second.input.text
+    corr, sent = seen["ids"]
+    assert seen[corr] is not None and seen[sent] is not None, "both answers came back"
+    follow_ups = [r for r in world.start.requests if r.input.text.startswith("[Background result]")]
+    assert {f'handle="{corr}"' in f.input.text for f in follow_ups} == {True, False}
+    assert len(follow_ups) == 2, "one follow-up per answer"
+
+
+def test_stopping_a_running_child_cancels_it_and_nothing_comes_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_core.adapters.driven.tools.background import StopResult
+
+    world = _world(monkeypatch)
+    world.start.b_hangs = True
+    seen: dict[str, Any] = {}
+
+    async def process() -> None:
+        async with w.Dbos(_DATABASE):
+            await turn_workflow.enqueue_turn(w.request(), turn_id=w.ASKING_TURN)
+            await w.result_of(str(w.ASKING_TURN))
+            (corr,) = w.rows(_DATABASE)
+            assert await w.dispatch(world, w.B) is AskDisposition.STARTED
+            await w.until(lambda: world.start.starts(w.B) == 1, "B to be running")
+            seat = _seat(world)
+            seen["stop"] = await seat.stop(_owner(), corr)
+            seen["again"] = await seat.stop(_owner(), corr)
+            await asyncio.sleep(0.5)
+            seen["callee"] = await w.status(turn_workflow.peer_workflow_id(corr))
+            seen["follow_up"] = await w.status(background_followup_turn_id(corr))
+            seen["state"] = w.rows(_DATABASE)[corr][1]
+
+    asyncio.run(process())
+
+    assert seen["stop"] is StopResult.STOPPED and seen["again"] is StopResult.NOT_RUNNING
+    assert seen["callee"] == "CANCELLED" and seen["state"] == "cancelled"
+    assert seen["follow_up"] is None

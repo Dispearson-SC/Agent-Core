@@ -656,6 +656,20 @@ class MailboxConformance:
         ]
         assert listed[0].is_open
 
+    async def test_a_listed_background_ask_carries_its_session_depth_and_root(
+        self, harness: MailboxHarness
+    ) -> None:
+        """What a message to the child needs (C20): the session it runs in, the depth it travelled
+        at and the turn a person started that it hangs from."""
+        _background(harness)
+        corr = await harness.ask("slow", root_turn_id="root-turn", background_caller=CALLER)
+
+        (listed,) = await harness.mailbox.background_asks(SESSION)
+
+        assert listed.handle == corr
+        assert listed.session == _session_of(corr)
+        assert (listed.hop, listed.root_turn_id) == (0, "root-turn")
+
     async def test_a_background_ask_goes_queued_running_answered(
         self, harness: MailboxHarness
     ) -> None:

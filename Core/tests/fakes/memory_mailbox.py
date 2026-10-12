@@ -220,6 +220,8 @@ class InMemoryAgentMailbox:
                 state=_state_of(row),
                 finished_at=row.finished_at,
                 session=row.peer_session_id,
+                hop=row.hop,
+                root_turn_id=row.root_turn_id,
             )
             for row in mine
         )
