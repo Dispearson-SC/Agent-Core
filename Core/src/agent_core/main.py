@@ -114,6 +114,7 @@ from datetime import timedelta
 from typing import Any, Protocol
 
 from agent_core.adapters.driving.cli.console import Console
+from agent_core.adapters.driving.cli.peer_cache import add_peer_cache_parser, run_peer_cache
 from agent_core.adapters.driving.cli.preflight import preflight
 from agent_core.adapters.driving.cli.stranded_turns import run_stranded_check
 from agent_core.adapters.driving.http.admin_routes import (
@@ -837,6 +838,8 @@ def _argument_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    add_peer_cache_parser(subcommands)
+
     console = subcommands.add_parser(
         "console",
         help="an operator REPL: inspect an agent, talk to it, watch its tool calls",
@@ -936,6 +939,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     if arguments.command == "peer-worker":
         run_peer_worker_process(arguments)
         return
+    if arguments.command == "peer-cache":
+        raise SystemExit(run_peer_cache(arguments, Settings.from_env()))
     if arguments.command == "stranded-turns":
         raise SystemExit(run_stranded_check(Settings.from_env()))
     serve()

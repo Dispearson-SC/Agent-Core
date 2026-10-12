@@ -667,6 +667,14 @@ no change: prose stays the default.
 keep `model`. Policy, audit and the stored profile version still name the profile as written; only
 the model the runner builds its agent from differs.
 
+**The answer cache (C25, D57).** A driven port (`AnswerCache`, Postgres adapter, migration 0039) that
+the peer round consults AFTER the gate and BEFORE it posts an ask: key = (tenant, target, audience,
+normalised question, version), audience = the asking agent plus the subject (or the roles, if the
+answering profile says its answers do not depend on who asks), version = the answering profile's
+content hash plus an operator data version. Off unless the deployment and the answering profile both
+opt in; only `ok` answers are stored; a hit resolves the deferred call at once with a `cached="true"`
+envelope and never reaches the mailbox.
+
 **Follow-up asks (C12, D45).** `ask_peer(target, question, continue_session?)`, offered only to a
 profile with `peers.allow_continuation: true`. The `session` of an earlier result is the handle: the
 specialist's next turn is filed in that same session, so it sees the exchange so far. The mailbox

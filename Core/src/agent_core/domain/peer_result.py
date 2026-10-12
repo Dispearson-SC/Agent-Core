@@ -61,6 +61,9 @@ class PeerResult:
     # C19. The handle of a background ask (its correlation id): how the owner conversation names it
     # to `peer_status`, `peer_message` and `peer_stop` (C20) and how a follow-up names its ask.
     handle: str | None = None
+    # C25. The answer came from the answer cache, not from a peer run just now. It opens no peer
+    # session (there is nothing to continue), so `session` is None on such a result.
+    cached: bool = False
 
     def render(self) -> str:
         """The tagged form the model reads. Attributes are escaped: `peer` is model-written."""
@@ -74,6 +77,8 @@ class PeerResult:
             attributes.append('truncated="true"')
         if self.data:
             attributes.append('data="json"')
+        if self.cached:
+            attributes.append('cached="true"')
         return f"<peer {' '.join(attributes)}>\n{self.text}\n</peer>"
 
 

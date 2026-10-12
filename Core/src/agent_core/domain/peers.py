@@ -33,6 +33,8 @@ from enum import StrEnum
 from typing import Final, NewType
 from uuid import UUID, uuid5
 
+from agent_core.domain.answer_cache import AnswerCacheScope
+
 AgentId = NewType("AgentId", str)
 
 # The namespace of every id DERIVED for a peer ask (C2). A constant of the source: changing it
@@ -401,6 +403,13 @@ class PeerPolicy:
     # conversation may have running at once.
     allow_background: bool = False
     max_background_asks: int = DEFAULT_MAX_BACKGROUND_ASKS
+    # C25 (D57). How long, in seconds, an `ok` answer THIS agent gives to a peer may be remembered
+    # and handed to the next identical question instead of running it again; 0 (the default) is
+    # off. It is the ANSWERING profile that opts in, because only it knows whether its answers
+    # can be reused. `answer_cache_scope` says who may share an entry: the asking subject
+    # (default) or any asker with the same roles. Both are part of the content hash.
+    answer_cache_seconds: int = 0
+    answer_cache_scope: AnswerCacheScope = AnswerCacheScope.SUBJECT
 
     def may_ask(self, agent_id: AgentId) -> bool:
         """Whether this profile may address `agent_id`. Empty `peers` means nobody.

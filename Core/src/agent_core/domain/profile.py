@@ -41,6 +41,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
+from agent_core.domain.answer_cache import MAX_TTL_SECONDS, AnswerCacheScope
 from agent_core.domain.compaction import CompactionPolicy
 from agent_core.domain.knowledge import KnowledgePolicy, RetrievalMode
 from agent_core.domain.media import MediaDelivery, MediaKind, MediaPolicy
@@ -554,7 +555,38 @@ def _build_peer_policy(data: object) -> PeerPolicy:
             mapping.get("max_background_asks", defaults.max_background_asks),
             where="peers.max_background_asks",
         ),
+        answer_cache_seconds=_cache_seconds(
+            mapping.get("answer_cache_seconds", defaults.answer_cache_seconds)
+        ),
+        answer_cache_scope=_cache_scope(
+            mapping.get("answer_cache_scope", defaults.answer_cache_scope)
+        ),
     )
+
+
+def _cache_seconds(value: object) -> int:
+    """`peers.answer_cache_seconds` (C25): 0 (off) up to a day, as a real whole number."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= MAX_TTL_SECONDS
+    ):
+        raise ProfileValidationError(
+            f"peers.answer_cache_seconds must be a whole number of seconds from 0 (off) to "
+            f"{MAX_TTL_SECONDS}, got {value!r}"
+        )
+    return value
+
+
+def _cache_scope(value: Any) -> AnswerCacheScope:
+    """`peers.answer_cache_scope` (C25): `subject` or `roles`."""
+    try:
+        return AnswerCacheScope(value)
+    except ValueError:
+        known = ", ".join(scope.value for scope in AnswerCacheScope)
+        raise ProfileValidationError(
+            f"peers.answer_cache_scope must be one of {known}, got {value!r}"
+        ) from None
 
 
 def _topology(value: object) -> Topology | None:

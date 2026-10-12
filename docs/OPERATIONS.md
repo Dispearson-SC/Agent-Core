@@ -236,6 +236,35 @@ GROUP BY t.profile_id, t.profile_version ORDER BY t.profile_id, t.profile_versio
 A resumed turn (one that waited for a person) continues on the main model, so a tiered answer that
 needed an approval is not in the fast numbers after the approval.
 
+## The peer answer cache (C25, D57)
+
+Off by default, and it takes TWO opt-ins: the deployment (`AGENT_CORE_PEER_ANSWER_CACHE=true`) and
+the answering profile (`peers.answer_cache_seconds: <1-86400>`, with `peers.answer_cache_scope:
+subject | roles`, default `subject`). With both, an `ok` answer from that profile is remembered in
+`peer_answer_cache` (migration `0039`, additive) and handed to the same asker for the same question
+until it expires, without running the peer. The envelope says `cached="true"` and has no `session`.
+
+What is and is not cached: a foreground ask with no follow-up and no conversation context (so not
+with `peers.visibility` other than `none`); never an error, a timeout, a refusal, a cancellation or
+a typed answer that broke its schema; never a background ask. The policy gate (allowlists, hops,
+per-peer rules, approvals) runs BEFORE the lookup, so a peer an asker may no longer ask stays refused.
+
+Ways an entry stops being served: its TTL; the answering profile changing (its content hash is part
+of the key); `AGENT_CORE_PEER_CACHE_DATA_VERSION` changing (set it to a label for the data load and
+change it after the next one); or an explicit purge:
+
+```
+python -m agent_core peer-cache purge --tenant <tenant> [--target <agent>]
+```
+
+It prints how many entries went (exit 2 if the database cannot be reached). The table holds a digest
+of the key and the callee's wrapped answer, never the question. Expired rows are removed by the next
+write; nothing else needs scheduling. A cache that cannot be read or written costs a miss, logged
+at WARNING (`the peer answer cache could not be read/written`), never a turn.
+
+To see the effect: a cache hit has no peer run, so the asking turn has no `peer_messages` row for it
+and the peer has no `started` event; compare the asks per minute with the C24 query above.
+
 ## Peer redelivery lease
 
 The peer worker claims an ask (`delivered`) and then enqueues the callee workflow of the ask

@@ -180,6 +180,7 @@ from agent_core.adapters.driven.human.gateway import ChannelHumanGateway
 from agent_core.adapters.driven.knowledge_pg.admin import PgKnowledgeAdmin
 from agent_core.adapters.driven.llm_litellm.gateway import LiteLLMGateway
 from agent_core.adapters.driven.media_fs.store import FilesystemMediaStore
+from agent_core.adapters.driven.peers.answer_cache import PgAnswerCache
 from agent_core.adapters.driven.peers.asker_context import TranscriptAskerContext
 from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
 from agent_core.adapters.driven.peers.task_graph import PgTaskGraphReader
@@ -656,6 +657,12 @@ class Settings:
     # DBOS offers no liveness signal for it. The operator switches it on once the old executors
     # are gone (OPERATIONS.md). `AGENT_CORE_RETIRE_OTHER_VERSIONS`, true/false/1/0.
     retire_other_versions: bool = False
+    # C25 (D57). The peer answer cache is OFF unless this is set (`AGENT_CORE_PEER_ANSWER_CACHE`,
+    # true/false/1/0); even then only answering profiles with `peers.answer_cache_seconds` above
+    # 0 are cached. `AGENT_CORE_PEER_CACHE_DATA_VERSION` is an operator-set label that is part of
+    # every key: change it after a data load and every older entry becomes unreachable.
+    peer_answer_cache: bool = False
+    peer_cache_data_version: str = ""
 
     @property
     def resolved_audit_conninfo(self) -> str:
@@ -726,6 +733,10 @@ class Settings:
                 env.get("AGENT_CORE_PEER_MAX_REDELIVERIES")
             ),
             max_turn_attempts=_parse_max_turn_attempts(env.get("AGENT_CORE_MAX_TURN_ATTEMPTS")),
+            peer_answer_cache=_parse_flag(
+                "AGENT_CORE_PEER_ANSWER_CACHE", env.get("AGENT_CORE_PEER_ANSWER_CACHE")
+            ),
+            peer_cache_data_version=env.get("AGENT_CORE_PEER_CACHE_DATA_VERSION", "").strip(),
             retire_other_versions=_parse_flag(
                 "AGENT_CORE_RETIRE_OTHER_VERSIONS", env.get("AGENT_CORE_RETIRE_OTHER_VERSIONS")
             ),
@@ -1801,6 +1812,13 @@ def bind_turn_workflow(container: Container) -> None:
                 context=TranscriptAskerContext(
                     container.transcripts, ModelSummariser(container.model)
                 ),
+                # C25. None unless the deployment opted in; a callee profile must opt in as well.
+                answer_cache=(
+                    PgAnswerCache(PoolConnections(container.domain_pool))
+                    if container.settings.peer_answer_cache
+                    else None
+                ),
+                answer_cache_version=container.settings.peer_cache_data_version,
             ),
             # C5. The poison-turn budget: the ledger lives in the application database, and the
             # limit is `Settings.max_turn_attempts`.

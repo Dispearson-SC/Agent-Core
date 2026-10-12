@@ -2210,3 +2210,48 @@ work that needs it.
   version is enough, because turning `model_fast` on is a new profile version (OPERATIONS has the
   query).
 - **Replay shape: unchanged by C24.** Routing happens inside the existing model step.
+
+## D57 · Agent-comms v2: the peer answer cache (C25)
+
+A specialist asked the same thing again within a short while (a voice user repeating a question, an
+orchestrator retrying) paid for a whole peer turn each time. Remembering the answer makes the second
+ask a lookup. The design is conservative on purpose: wrong-but-fast is worse than slow.
+
+- **Two opt-ins, off by default.** The deployment (`AGENT_CORE_PEER_ANSWER_CACHE`) builds the
+  adapter; the ANSWERING profile (`peers.answer_cache_seconds`, 0 = off, at most a day) says its
+  answers may be reused, because only it knows. Either alone caches nothing.
+- **The key is (tenant, target, audience, normalised question, version).** The audience is the
+  asking AGENT plus the asking SUBJECT by default (`answer_cache_scope: subject`), or the asking
+  agent plus the sorted roles (`roles`) for a specialist whose answers do not depend on the person.
+  The default keeps "my balance" from being served to somebody else of the same tenant; the price
+  is a lower hit rate across people, which the voice-repeat case does not need. The version is the
+  answering profile's content hash plus `AGENT_CORE_PEER_CACHE_DATA_VERSION`, so a changed profile
+  or a data load makes older entries unreachable instead of stale. The question is normalised
+  (Unicode fold, case fold, whitespace, edge punctuation) and nothing else: no fuzzy matching.
+  Rejected: semantic/embedding matching (a near-miss served as a hit is a wrong answer).
+- **The gate runs first.** The lookup sits after `authorise_hop`, the continuation, background and
+  parallel-cap checks, so a peer the asker may not ask stays refused whatever the cache holds, and
+  an ask that needs an approval still gets it (it is resolved before the workflow sees the call).
+- **What is cached.** Only an `ok` answer from a non-failed callee, wrapped as untrusted content as
+  the mailbox returned it, at most 50k characters, stored UNCAPPED and capped for each asker at
+  read time. A typed answer is checked against the schema again on a hit (a miss if it no longer
+  fits). Never: an error, a timeout, a refusal, a cancellation, a background ask (delivered later
+  as a follow-up turn), a follow-up ask (depends on the earlier exchange), an ask that carries the
+  asking conversation (`peers.visibility` other than `none`: the question no longer identifies the
+  answer).
+- **A hit resolves the deferred call at once** with the usual `<peer>` envelope marked
+  `cached="true"` and no `session` (there is nothing to continue). It is recorded in the same
+  step result as a refusal or a background start, so replay is unchanged; the step result gained two
+  fields that are read tolerantly (`getattr`), so a workflow waiting on peers across the deploy
+  replays its old record. **No application-version bump** (`.10` stays).
+- **Postgres, because peers run in other processes.** An in-process cache would miss across the
+  serve and peer-worker processes and its invalidation would be a lie. `peer_answer_cache` holds a
+  digest of the key (not the question), the tenant and target for invalidation, the wrapped answer
+  and `expires_at` from the database clock; a write also removes expired rows. Fail-open: any
+  cache error is a miss or a skipped store, logged.
+- **Invalidation hooks.** The TTL, the profile hash, the data version label, and
+  `python -m agent_core peer-cache purge --tenant T [--target A]` (port verb
+  `invalidate(tenant, target?)`; a tenant is always required). Rejected: an HTTP admin route (the
+  admin surface is a separate identity design, not touched here).
+- **Not done:** per-entry hit counters or a metrics export (the hit shows as the absence of a peer
+  run), a size cap on the table beyond the TTL purge, caching across different asking agents.

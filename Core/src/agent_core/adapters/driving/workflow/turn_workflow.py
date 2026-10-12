@@ -162,6 +162,13 @@ from agent_core.adapters.driving.peers.worker import new_peer_session
 from agent_core.application.compact_context import CompactContext
 from agent_core.application.resume_turn import ResolvedTool, ResumeTurn
 from agent_core.application.start_turn import StartTurn
+from agent_core.domain.answer_cache import (
+    MAX_CACHED_CHARS,
+    AnswerCacheKey,
+    CachedAnswer,
+    audience_for,
+    normalize_question,
+)
 from agent_core.domain.compaction import ContextState
 from agent_core.domain.events import EventKind, EventOwner, ProgressEvent, progress_event_id
 from agent_core.domain.media import MediaRef
@@ -182,7 +189,7 @@ from agent_core.domain.peers import (
     peer_session_key,
     peer_workflow_id,
 )
-from agent_core.domain.profile import AgentProfile
+from agent_core.domain.profile import AgentProfile, profile_content_hash
 from agent_core.domain.turn import (
     BackgroundReturn,
     PendingKind,
@@ -197,6 +204,7 @@ from agent_core.domain.turn import (
     UserInput,
 )
 from agent_core.ports.agent_mailbox import AgentMailbox
+from agent_core.ports.answer_cache import AnswerCache
 from agent_core.ports.event_publisher import EventPublisher
 from agent_core.ports.human_gateway import HumanGateway
 
@@ -613,6 +621,20 @@ class PeerSeat:
     # C18. Where the asker's conversation is read from when `peers.visibility` asks for it. None
     # (a deployment without one) means peers get the question only, whatever the profile says.
     context: AskerContext | None = None
+    # C25 (D57). Where remembered peer answers live, or None (the default: no cache). A callee
+    # profile still has to opt in with `peers.answer_cache_seconds`. `answer_cache_version` is the
+    # operator's data version; it is part of every key, so changing it makes older entries
+    # unreachable.
+    answer_cache: AnswerCache | None = None
+    answer_cache_version: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RememberAnswer:
+    """Where, and for how long, the answer to one ask is to be remembered once it arrives (C25)."""
+
+    key: AnswerCacheKey
+    ttl_seconds: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -640,6 +662,22 @@ class PeerDispatch:
     # envelope (the answer comes back later as a follow-up turn), so they are never awaited and
     # nothing is ever signalled to the asking turn for them.
     started: tuple[tuple[ToolCallId, str], ...] = ()
+    # C25. Asks answered from the answer cache: their deferred call resolves AT ONCE with the cached
+    # envelope and no peer runs. And, for the foreground asks that did leave, where to remember the
+    # answer when it comes back (`(correlation_id, RememberAnswer)`). Read with `_cached_results` /
+    # `_remembered`, which tolerate a dispatch recorded before these fields existed.
+    cached: tuple[tuple[ToolCallId, str], ...] = ()
+    remember: tuple[tuple[str, RememberAnswer], ...] = ()
+
+
+def _cached_results(dispatch: PeerDispatch) -> tuple[tuple[ToolCallId, str], ...]:
+    """`dispatch.cached`, or nothing for a dispatch recorded by a build that predates it (a
+    workflow waiting on peers across a deploy replays the old pickle, which has no such slot)."""
+    return getattr(dispatch, "cached", ())
+
+
+def _remembered(dispatch: PeerDispatch) -> dict[str, RememberAnswer]:
+    return dict(getattr(dispatch, "remember", ()))
 
 
 @dataclass(frozen=True)
@@ -1102,6 +1140,77 @@ async def _step_peer_context(request: TurnRequest) -> str:
         return ""
 
 
+def _cache_key(
+    seat: PeerSeat, request: TurnRequest, target: str, question: str, callee: AgentProfile
+) -> AnswerCacheKey:
+    """What identifies the answer to this ask (C25): the tenant, the target, who may share it, the
+    normalised question and the version (the callee's content hash plus the operator's data
+    version, so a changed profile or a data load makes older entries unreachable)."""
+    caller = request.caller
+    return AnswerCacheKey(
+        tenant_id=str(request.session.tenant_id),
+        target=target,
+        audience=audience_for(
+            callee.peers.answer_cache_scope, request.profile_id, caller.subject_id, caller.roles
+        ),
+        question=normalize_question(question),
+        version=(
+            f"{callee.content_hash or profile_content_hash(callee)}:{seat.answer_cache_version}"
+        ),
+    )
+
+
+async def _recall(
+    seat: PeerSeat,
+    request: TurnRequest,
+    target: str,
+    key: AnswerCacheKey,
+    callee: AgentProfile,
+) -> str | None:
+    """The `<peer>` envelope for a remembered answer, or None (a miss, or anything that makes the
+    entry unusable). A cache that cannot be read is a miss: it costs latency, never the turn."""
+    assert seat.answer_cache is not None
+    try:
+        found = await seat.answer_cache.get(key)
+    except Exception:
+        _LOG.warning("the peer answer cache could not be read; asking the peer", exc_info=True)
+        return None
+    if found is None:
+        return None
+    cap = _asking_policy(seat, request.profile_id).max_answer_chars
+    capped = cap_wrapped_answer(found.wrapped, cap)
+    data = False
+    if found.typed and not capped.truncated:
+        # The entry was a schema-checked answer. Check it again against the schema as it is NOW; one
+        # that no longer fits (or a callee that no longer declares one) is a miss, not an error.
+        schema = callee.answer_schema
+        if schema is None or answer_text_problem(schema, capped.inner) is not None:
+            return None
+        data = True
+    return PeerResult(
+        peer=target,
+        status=PeerStatus.OK,
+        text=capped.wrapped,
+        truncated=capped.truncated,
+        data=data,
+        cached=True,
+    ).render()
+
+
+async def _remember(
+    seat: PeerSeat, remember: RememberAnswer, wrapped: str, *, typed: bool
+) -> None:
+    """Store an `ok` answer under its key. Fails open: a cache that cannot be written is logged."""
+    if seat.answer_cache is None or len(wrapped) > MAX_CACHED_CHARS:
+        return
+    try:
+        await seat.answer_cache.put(
+            remember.key, CachedAnswer(wrapped, typed=typed), remember.ttl_seconds
+        )
+    except Exception:
+        _LOG.warning("the peer answer cache could not be written", exc_info=True)
+
+
 @DBOS.step()
 async def _step_ask_peers(
     turn_id: TurnId,
@@ -1170,6 +1279,8 @@ async def _step_ask_peers(
     handles: list[tuple[str, ToolCallId]] = []
     refusals: list[tuple[ToolCallId, str]] = []
     started: list[tuple[ToolCallId, str]] = []
+    cached: list[tuple[ToolCallId, str]] = []
+    remember: list[tuple[str, RememberAnswer]] = []
     # C19. Background asks the conversation already has running, read once and only if a background
     # ask is made (the step's result is recorded, so a replay does not read it again).
     running_background: int | None = None
@@ -1343,6 +1454,27 @@ async def _step_ask_peers(
                 )
                 continue
 
+        # C25. AFTER every gate above, so a refused ask never reaches the cache. Only a plain
+        # foreground ask can be answered from it: a follow-up depends on the earlier exchange, a
+        # background ask is delivered later, and an ask that carries the asker's conversation has
+        # an answer the question alone no longer identifies.
+        to_remember: RememberAnswer | None = None
+        if (
+            seat.answer_cache is not None
+            and callee_profile.peers.answer_cache_seconds > 0
+            and background is not True
+            and continue_session is None
+            and not context
+        ):
+            to_remember = RememberAnswer(
+                _cache_key(seat, request, target, question, callee_profile),
+                callee_profile.peers.answer_cache_seconds,
+            )
+            recalled = await _recall(seat, request, target, to_remember.key, callee_profile)
+            if recalled is not None:
+                cached.append((ask.tool_call_id, recalled))
+                continue
+
         next_hop = decision.next_hop
         if next_hop is None:  # pragma: no cover - an allowed HopDecision always carries it
             raise TurnWorkflowNotWiredError(
@@ -1424,9 +1556,15 @@ async def _step_ask_peers(
             )
         else:
             handles.append((correlation_id, ask.tool_call_id))
+            if to_remember is not None:
+                remember.append((correlation_id, to_remember))
 
     return PeerDispatch(
-        handles=tuple(handles), refusals=tuple(refusals), started=tuple(started)
+        handles=tuple(handles),
+        refusals=tuple(refusals),
+        started=tuple(started),
+        cached=tuple(cached),
+        remember=tuple(remember),
     )
 
 
@@ -1482,6 +1620,7 @@ async def _step_read_peer_answer(
     request: TurnRequest,
     target: str,
     continued: str | None = None,
+    remember: RememberAnswer | None = None,
 ) -> tuple[ToolCallId, str, bool]:
     """Redeem one peer's handle WITHOUT resuming the turn.
 
@@ -1498,7 +1637,9 @@ async def _step_read_peer_answer(
             f"a peer answer for turn {answer.turn_id!r} was delivered to turn {turn_id!r}. "
             "Applying it would resume this turn on an answer given to another one."
         )
-    found = await _peer_envelope(answer.correlation_id, request, target, continued)
+    found = await _peer_envelope(
+        answer.correlation_id, request, target, continued, remember=remember
+    )
     if found is None:
         raise UnusableResumeAnswerError(
             f"the turn was woken for peer handle {answer.correlation_id!r} and the mailbox "
@@ -1523,6 +1664,7 @@ async def _peer_envelope(
     target: str,
     continued: str | None = None,
     handle: str | None = None,
+    remember: RememberAnswer | None = None,
 ) -> tuple[str, bool] | None:
     """A stored peer answer as `(the <peer> envelope, the callee failed)`, or None when none is
     stored (C8).
@@ -1561,6 +1703,8 @@ async def _peer_envelope(
                 ).render(),
                 True,
             )
+        if remember is not None:
+            await _remember(seat, remember, wrapped, typed=True)
         return (
             PeerResult(
                 peer=target,
@@ -1572,6 +1716,8 @@ async def _peer_envelope(
             ).render(),
             False,
         )
+    if remember is not None and not failed:
+        await _remember(seat, remember, wrapped, typed=False)
     envelope = PeerResult(
         peer=target,
         status=PeerStatus.ERROR if failed else PeerStatus.OK,
@@ -2004,7 +2150,12 @@ async def _collect_round(
     Results are returned in `tool_call_id` order (`asks` arrives sorted), never in arrival
     order (CLAUDE.md non-negotiable #7).
     """
-    peer_results: dict[ToolCallId, str] = {**dict(dispatch.refusals), **dict(dispatch.started)}
+    peer_results: dict[ToolCallId, str] = {
+        **dict(dispatch.refusals),
+        **dict(dispatch.started),
+        **dict(_cached_results(dispatch)),
+    }
+    remembered = _remembered(dispatch)
     decisions: dict[ToolCallId, HumanAnswer] = {}
     awaiting: dict[str, ToolCallId] = {corr: tcid for corr, tcid in dispatch.handles}
     human_missing = {ask.tool_call_id for ask in asks if ask.kind is not PendingKind.DELEGATION}
@@ -2141,7 +2292,13 @@ async def _collect_round(
             )
         del awaiting[answer.correlation_id]
         _, wrapped, callee_failed = await _step_read_peer_answer(
-            turn_id, answer, asked_id, request, targets[asked_id], continued[asked_id]
+            turn_id,
+            answer,
+            asked_id,
+            request,
+            targets[asked_id],
+            continued[asked_id],
+            remembered.get(answer.correlation_id),
         )
         peer_results[asked_id] = wrapped
         if callee_failed and fan_out is FanOutPolicy.FAIL_FAST and awaiting:
