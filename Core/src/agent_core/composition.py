@@ -663,6 +663,11 @@ class Settings:
     # every key: change it after a data load and every older entry becomes unreachable.
     peer_answer_cache: bool = False
     peer_cache_data_version: str = ""
+    # C26 (D58). Stream the reply of a turn a person started to the event feed as it is written
+    # (`AGENT_CORE_STREAM_REPLIES`, true/false/1/0). OFF by default because it changes how the
+    # model is called (a streaming request) for every such turn; switch it on where a front-end
+    # (voice) reads `GET /turns/{id}/events`.
+    stream_replies: bool = False
 
     @property
     def resolved_audit_conninfo(self) -> str:
@@ -737,6 +742,9 @@ class Settings:
                 "AGENT_CORE_PEER_ANSWER_CACHE", env.get("AGENT_CORE_PEER_ANSWER_CACHE")
             ),
             peer_cache_data_version=env.get("AGENT_CORE_PEER_CACHE_DATA_VERSION", "").strip(),
+            stream_replies=_parse_flag(
+                "AGENT_CORE_STREAM_REPLIES", env.get("AGENT_CORE_STREAM_REPLIES")
+            ),
             retire_other_versions=_parse_flag(
                 "AGENT_CORE_RETIRE_OTHER_VERSIONS", env.get("AGENT_CORE_RETIRE_OTHER_VERSIONS")
             ),
@@ -1928,6 +1936,8 @@ def build_container(
         tools=tools,
         peer_profiles=profiles,
         background_agents=WorkflowBackgroundAgents(mailbox, profiles),
+        # C26 (D58). The reply stream rides the same publisher as the other progress events.
+        reply_events=events if resolved.stream_replies else None,
     )
 
     channels = build_channel_registry(resolved)

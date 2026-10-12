@@ -124,6 +124,7 @@ from pydantic_ai.tools import (
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 
+from agent_core.adapters.driven.agent_pydantic.reply_stream import ReplyStreamHandler
 from agent_core.adapters.driven.mcp.toolsets import result_budget_for
 from agent_core.adapters.driven.peers.catalogue import build_peer_catalogue
 from agent_core.adapters.driven.peers.typed_answer import answer_problem
@@ -151,6 +152,7 @@ from agent_core.domain.typed_answer import render_answer
 from agent_core.ports.agent_runner import ToolResolution
 from agent_core.ports.audit_sink import AuditSink
 from agent_core.ports.context_engine import ContextEngine
+from agent_core.ports.event_publisher import EventPublisher
 from agent_core.ports.knowledge_base import KnowledgeBase
 from agent_core.ports.media_store import SignedMedia
 from agent_core.ports.model_gateway import ModelGateway
@@ -1411,6 +1413,7 @@ class PydanticAgentRunner:
         clock: Callable[[], datetime] = _utc_now,
         peer_profiles: Mapping[str, AgentProfile] | None = None,
         background_agents: BackgroundAgents | None = None,
+        reply_events: EventPublisher | None = None,
     ) -> None:
         self._model = model
         self._policy = policy
@@ -1427,6 +1430,9 @@ class PydanticAgentRunner:
         self._peer_profiles = peer_profiles
         # C20. The seat the background-agent tools act through (None: they are not offered).
         self._background_agents = background_agents
+        # C26 (D58). Where the reply of a turn a PERSON started is streamed as it is written. None
+        # (the default) keeps the model call exactly as it was: no streaming, no events.
+        self._reply_events = reply_events
         self._agents: dict[tuple[str, str, str], Agent[Any, RunOutput]] = {}
 
     def usage_limits_for(self, profile: AgentProfile) -> UsageLimits:
@@ -1511,6 +1517,7 @@ class PydanticAgentRunner:
                     **self._background_deps(profile, turn_id, request.caller, request.session),
                 ),
                 usage_limits=self.usage_limits_for(profile),
+                event_stream_handler=self._reply_stream(turn_id, request),
             )
         except UsageLimitExceeded as exhausted:
             # An exhausted budget is an ORDINARY outcome, not an exception - see
@@ -1528,6 +1535,23 @@ class PydanticAgentRunner:
         # production that produces it (t-f11-29). The store writes it in `append_outcome`;
         # see `_messages_the_turn_added` for the one message that is NOT in it.
         return self._outcome(turn_id, result)
+
+    def _reply_stream(self, turn_id: TurnId, request: TurnRequest) -> ReplyStreamHandler | None:
+        """The handler that streams this turn's reply to the event feed (C26), or None.
+
+        Only for a turn a person or a channel started (`request.owner is None`): a peer's text is
+        another agent's input and is never put on the feed. A RESUMED turn is not streamed: `resume`
+        has no request, so it cannot tell a person's turn from a peer's, and a turn that waited for
+        a human is not the voice path; its text is read from the turn as before."""
+        if self._reply_events is None or request.owner is not None:
+            return None
+        return ReplyStreamHandler(
+            self._reply_events,
+            turn_id=turn_id,
+            session=request.session,
+            agent=request.profile_id,
+            clock=self._clock,
+        )
 
     async def resume(
         self,

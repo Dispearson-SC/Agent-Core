@@ -202,6 +202,24 @@ if shorter) the feed reads a snapshot, so a missed event is corrected by the nex
 than 2000 events is shown from its newest events; the snapshot says `"truncated": true` and
 `omitted_events`.
 
+### Streaming replies (C26, D58)
+
+Off by default; `AGENT_CORE_STREAM_REPLIES=true` turns it on for the process (the `serve` process and
+anything else that runs person-started turns). It changes how the model is called for those turns (a
+streaming request), so switch it on where a front-end reads the feed, and check that the provider or
+LiteLLM proxy streams. On the feed, a turn then emits `event: delta` frames
+(`data.text` = a chunk, `data.detail` = `<run>:<response>:<index>`) and every snapshot has
+`turns[].reply_text`. A client speaks `text` as chunks arrive; when a chunk's run or response
+differs from the previous one, discard what it held for that turn (the step was retried, or the
+model answered again after a tool call) and start over from `reply_text` of the next snapshot. The
+recorded answer (`GET /turns/{id}`) is the truth; the chunks are a copy.
+
+Cost: about one `turn_events` row per sentence of a reply (a chunk is at most 240 characters).
+They are trimmed with the other events (see "Progress events: looking and cleaning"); a feed that
+reconnects after trimming gets a snapshot with whatever remains. A turn that suspends for a person
+and is resumed finishes without streaming. If publishing fails, the log says `could not publish the
+reply of turn ... to the event feed` once for that run and the turn is unaffected.
+
 ### The task graph
 
 `GET /turns/<root turn id>/graph` (same headers as `GET /turns/<id>`) reads `peer_messages` for the

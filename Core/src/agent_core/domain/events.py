@@ -2,12 +2,15 @@
 
 A turn, a peer's turn and (later) a subagent's turn each publish the same four facts while they
 run, so a UI, a voice front-end or an operator can follow a conversation's tree without polling
-the database: `started`, `tool_called`, `finished`, `failed`.
+the database: `started`, `tool_called`, `finished`, `failed`. A turn a PERSON started also streams
+its reply as `delta` events (C26, D58).
 
 Every event carries the OWNER chain of the turn that made it (the root turn a person started, the
 turn that asked, the asking profile, the ask's handle) so a consumer can file it under the root
 without a lookup. Events are facts about what ALREADY happened, never instructions, and they carry
-no model text and no tool arguments: a tool's NAME, a duration and a short error class at most.
+no tool arguments: a tool's NAME, a duration and a short error class at most. The one exception to
+"no model text" is `delta`, whose chunk is the reply the turn is about to record for the person
+who is reading the feed.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from enum import StrEnum
 from typing import Final
 
 __all__ = [
+    "MAX_DELTA_CHARS",
     "MAX_LABEL_CHARS",
     "EventKind",
     "EventOwner",
@@ -42,6 +46,9 @@ class EventKind(StrEnum):
     TOOL_CALLED = "tool_called"
     FINISHED = "finished"
     FAILED = "failed"
+    # C26 (D58). A piece of the reply a person-started turn is streaming: `text` is the chunk and
+    # `detail` is `<run>:<response>:<index>` (see `ProgressEvent`). The only kind that carries text.
+    DELTA = "delta"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +72,12 @@ class ProgressEvent:
     `owner` is None for a turn a person or a channel started (it is its own root). `tool` is set on
     `tool_called` only; `elapsed_ms` on `finished` and `failed` (time since `started`); `detail` is
     a short label (the tool's policy verdict, an error class), never free text from a model.
+    `delta` (C26) is the one kind that carries model text: `text` is a chunk of the reply a PERSON'S
+    turn is streaming (never a peer's), the same words the turn later records as its answer, and
+    `detail` is `<run>:<response>:<index>`: `run` names one execution of the model step (a retried
+    step is a new run, whose text replaces the old one's), `response` which model response of the
+    run the chunk belongs to (the reply is the last one) and `index` its order within it.
+
     `owner` is also None on a `tool_called` made where the chain is not at hand (the audit hook
     holds only the turn id); the `root_turn_id` property then answers the event's own turn id, and
     the publisher files the stored row under the chain of the turn's `started` event instead.
@@ -82,6 +95,7 @@ class ProgressEvent:
     tool: str | None = None
     elapsed_ms: int | None = None
     detail: str | None = None
+    text: str | None = None
 
     @property
     def root_turn_id(self) -> str:
@@ -92,9 +106,12 @@ MAX_LABEL_CHARS: Final[int] = 200
 """Longest agent, tool, asker, call or detail label an event keeps. A label is a name or a short
 class, never prose; the bound keeps one odd value from bloating a row the feed re-reads."""
 
+MAX_DELTA_CHARS: Final[int] = 2000
+"""Longest `text` of a `delta` event. The chunker cuts far below this (`MAX_CHUNK_CHARS`)."""
 
-def _cut(value: str) -> str:
-    return value if len(value) <= MAX_LABEL_CHARS else value[: MAX_LABEL_CHARS - 1] + "…"
+
+def _cut(value: str, limit: int = MAX_LABEL_CHARS) -> str:
+    return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
 def bound_event(event: ProgressEvent) -> ProgressEvent:
@@ -106,6 +123,7 @@ def bound_event(event: ProgressEvent) -> ProgressEvent:
         agent=_cut(event.agent),
         tool=None if event.tool is None else _cut(event.tool),
         detail=None if event.detail is None else _cut(event.detail),
+        text=None if event.text is None else _cut(event.text, MAX_DELTA_CHARS),
         owner=None
         if owner is None
         else replace(
@@ -163,6 +181,9 @@ class TurnProgress:
     elapsed_ms: int | None
     tools_called: int
     last_tool: str | None
+    # C26. The reply this turn has streamed so far: the chunks of its latest model response, in
+    # order. Empty for a turn that does not stream. The recorded answer, not this, is the truth.
+    reply_text: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +228,7 @@ def fold_snapshot(
     `failed` says otherwise): hiding it would let the tree look settled while it is not. When it is
     zero such an event belongs to a turn from before events existed and is ignored."""
     turns: dict[str, TurnProgress] = {}
+    replies: dict[str, _Reply] = {}
     last = 0
     for stored in events:
         last = max(last, stored.seq)
@@ -219,18 +241,47 @@ def fold_snapshot(
             if omitted <= 0:
                 continue  # a turn from before events existed: nothing to show
             current = _placeholder(event)
-        if event.kind is EventKind.TOOL_CALLED:
+            turns[event.turn_id] = current
+        if event.kind is EventKind.DELTA:
+            replies.setdefault(event.turn_id, _Reply()).add(event)
+        elif event.kind is EventKind.TOOL_CALLED:
             turns[event.turn_id] = replace(
                 current, tools_called=current.tools_called + 1, last_tool=event.tool
             )
         else:
             turns[event.turn_id] = _finish(current, event)
+    for turn_id, reply in replies.items():
+        if turn_id in turns:
+            turns[turn_id] = replace(turns[turn_id], reply_text=reply.text())
     return FeedSnapshot(
         root_turn_id=root_turn_id,
         last_seq=last,
         turns=tuple(turns.values()),
         omitted_events=max(0, omitted),
     )
+
+
+class _Reply:
+    """The streamed reply of one turn while a snapshot is folded: the chunks of the latest
+    (run, response), by index. A chunk of a later run or response starts the text over."""
+
+    __slots__ = ("_chunks", "_which")
+
+    def __init__(self) -> None:
+        self._which: tuple[str, str] | None = None
+        self._chunks: dict[int, str] = {}
+
+    def add(self, event: ProgressEvent) -> None:
+        parts = (event.detail or "").split(":")
+        if len(parts) != 3 or not parts[2].isdigit() or event.text is None:
+            return  # not a chunk this build wrote
+        which = (parts[0], parts[1])
+        if which != self._which:
+            self._which, self._chunks = which, {}
+        self._chunks[int(parts[2])] = event.text
+
+    def text(self) -> str:
+        return "".join(self._chunks[i] for i in sorted(self._chunks))
 
 
 def _placeholder(event: ProgressEvent) -> TurnProgress:

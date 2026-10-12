@@ -161,3 +161,42 @@ def test_the_wakeup_listens_on_one_connection_and_does_not_lose_a_notification_b
 
     assert connects == 1, f"the listener reconnected {connects} times"
     assert heard_after < 2.0, "a notification published between two waits was lost"
+
+
+def test_a_streamed_reply_chunk_is_stored_with_its_text_and_folds_into_the_snapshot() -> None:
+    """C26 (D58): migration 0040 adds `text`; a delta keeps up to MAX_DELTA_CHARS of it (a label is
+    cut at 200) and the snapshot read back from Postgres carries the reply so far."""
+    from agent_core.domain.events import fold_snapshot
+
+    long_chunk = "Your order ships today and arrives tomorrow. " * 4  # 180 chars: over a label
+
+    def delta(index: int, text: str) -> ProgressEvent:
+        return ProgressEvent(
+            event_id=progress_event_id(ROOT, EventKind.DELTA, f"run1:0:{index}"),
+            kind=EventKind.DELTA,
+            tenant_id="t",
+            session_id="s",
+            turn_id=ROOT,
+            agent="agent",
+            at=datetime(2026, 10, 12, tzinfo=UTC),
+            detail=f"run1:0:{index}",
+            text=text,
+        )
+
+    async def scenario() -> Any:
+        await w.fresh_databases(_DATABASE)
+        publisher = PgEventPublisher(w.conninfo(_DATABASE))
+        reader = PgEventReader(w.conninfo(_DATABASE))
+        await publisher.publish(_event(ROOT, EventKind.STARTED))
+        await publisher.publish(delta(0, long_chunk + "x" * 100))
+        await publisher.publish(delta(1, "Bye."))
+        await publisher.publish(delta(1, "ignored: same event id"))
+        return await reader.tree("t", ROOT)
+
+    window = asyncio.run(scenario())
+
+    texts = [s.event.text for s in window.events if s.event.kind is EventKind.DELTA]
+    assert texts == [long_chunk + "x" * 100, "Bye."], "text beyond a label's 200 chars is kept"
+    snapshot = fold_snapshot(ROOT, window.events)
+    assert snapshot.turns[0].reply_text == long_chunk + "x" * 100 + "Bye."
+    assert all(s.event.text is None for s in window.events if s.event.kind is EventKind.STARTED)

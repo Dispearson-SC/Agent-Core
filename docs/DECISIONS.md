@@ -2255,3 +2255,45 @@ ask a lookup. The design is conservative on purpose: wrong-but-fast is worse tha
   admin surface is a separate identity design, not touched here).
 - **Not done:** per-entry hit counters or a metrics export (the hit shows as the absence of a peer
   run), a size cap on the table beyond the TTL purge, caching across different asking agents.
+
+## D58 · Agent-comms v2: streaming the final answer over the event feed (C26)
+
+A voice front-end should start speaking on the first sentence, not after the whole answer. The
+root turn's reply now travels over the C22 feed while the model writes it.
+
+- **A side channel; the recorded answer is the truth.** The runner passes Pydantic AI's
+  `event_stream_handler` to `agent.run`; the handler cuts the text parts of the response into
+  sentence-sized chunks (`domain/reply_chunks.py`: a chunk ends at `.`/`!`/`?`/`…` followed by space,
+  a newline or a CJK stop, never inside `3.50`; no sentence is held past 240 characters; the chunks
+  put back together are exactly the text) and publishes each as a `delta` event. What the run
+  returns, what the step records and what `GET /turns/{id}` shows are unchanged. The chunks are
+  published from INSIDE the existing model step, so **no workflow step was added or changed and
+  `PINNED_DBOS_APPLICATION_VERSION` stays `agent-core-turns.10`** (no drain note). The step can run
+  twice after a crash; each run has its own id in the event (`detail = <run>:<response>:<index>`), a
+  snapshot keeps only the latest run's latest response, and a client discards text when the run or
+  response changes.
+- **`delta` is the one event kind that carries model text.** D52 said events carry none; the
+  reasons it is acceptable here: the text is the reply the turn is about to record for the same
+  person who may read the feed (it is authorised exactly as `GET /turns/{id}`, D53), it is bounded
+  (2000 characters per event, chunks are at most 240), and it carries no tool arguments, no
+  reasoning/thinking parts and no tool output. Stored in a new nullable column, `turn_events.text`
+  (migration `0040`, additive); every other kind keeps it NULL.
+- **Only a person's turn.** `request.owner is None`. A peer's text is another agent's input and is
+  never put on the feed; a RESUMED turn is not streamed either (resume has no request, so it cannot
+  tell the two apart, and a turn that waited for a human is not the voice path). Streaming a resumed
+  turn needs the owner to reach `resume`: a port change, deferred.
+- **Snapshots carry the reply.** A subscriber that lagged or reconnected is handed `reply_text` (the
+  reply so far) in the snapshot instead of the chunks it missed, the same collapse-to-newest rule
+  as every other state (D53), so a slow voice client resumes mid-sentence correctly.
+- **Off by default (`AGENT_CORE_STREAM_REPLIES`).** It changes the model call for every
+  person-started turn from a plain request to a streaming one. A provider or proxy that does not
+  stream would fail those turns, and usage accounting through a stream depends on the provider
+  reporting it; both are deployment facts to check before switching on, not defaults to impose.
+  This is a conservative reading of the task (the spec does not say off): it can be flipped to on
+  by changing one default once a deployment has been checked.
+- **Fail-open and quiet.** A publisher that fails disables the stream for the rest of that run
+  after one log line; the turn is unaffected. No streaming at all when no publisher is wired.
+- **Text before a tool call is streamed too.** If the model writes a sentence and then calls a
+  tool, the sentence is a `delta` of response 0 and the final answer is response 1; the snapshot's
+  `reply_text` shows the last response only. A client that speaks as chunks arrive may speak the
+  preamble; the persona (not this layer) decides whether the model writes one.

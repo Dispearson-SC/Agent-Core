@@ -60,6 +60,7 @@ def snapshot_json(snapshot: FeedSnapshot) -> dict[str, Any]:
                 "elapsed_ms": t.elapsed_ms,
                 "tools_called": t.tools_called,
                 "last_tool": t.last_tool,
+                "reply_text": t.reply_text,
             }
             for t in snapshot.turns
         ],
@@ -79,6 +80,7 @@ def event_json(stored: StoredEvent) -> dict[str, Any]:
         "tool": event.tool,
         "elapsed_ms": event.elapsed_ms,
         "detail": event.detail,
+        "text": event.text,
     }
 
 

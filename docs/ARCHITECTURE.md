@@ -767,6 +767,14 @@ missed, then live events again. Every connection, including a reconnect, starts 
 the stream ends with `end` when nothing under the turn is running. Authorised exactly as
 `GET /turns/{id}` (same lookup, same 404) and scoped by the authenticated tenant in SQL.
 
+**Streaming the reply (C26, D58).** With `AGENT_CORE_STREAM_REPLIES` on, the runner attaches Pydantic
+AI's `event_stream_handler` to a turn a person or channel started and publishes the reply as `delta`
+events (sentence-sized chunks, `turn_events.text`) through the same publisher and feed as the other
+progress events: `GET /turns/{id}/events` carries `event: delta` frames and every snapshot carries
+`reply_text`, the reply so far. A side channel: the turn's recorded answer is unchanged and stays
+the source of truth; no workflow step changed, so no application-version bump. Peer turns and
+resumed turns are not streamed.
+
 **The task graph (C23, D54).** `GET /turns/{id}/graph` returns the ownership tree of a turn built from
 the mailbox rows under that root: root -> the asks it made -> what each callee asked in turn, to any
 depth, background asks flagged, each node with its state, queue wait and run time. A callee's turn id

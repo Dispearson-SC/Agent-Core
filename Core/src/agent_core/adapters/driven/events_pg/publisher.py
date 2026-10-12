@@ -35,8 +35,8 @@ _INSERT_SQL = """
     WITH ins AS (
         INSERT INTO turn_events
             (event_id, tenant_id, session_id, turn_id, root_turn_id, kind, agent,
-             asker_turn_id, asker, call, tool, elapsed_ms, detail, at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             asker_turn_id, asker, call, tool, elapsed_ms, detail, at, text)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (event_id) DO NOTHING
         RETURNING seq
     )
@@ -94,6 +94,7 @@ class PgEventPublisher:
                     event.elapsed_ms,
                     event.detail,
                     event.at,
+                    event.text,
                     NOTIFY_CHANNEL,
                 ),
             )

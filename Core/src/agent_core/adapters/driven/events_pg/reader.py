@@ -41,7 +41,7 @@ _RECONNECT_SECONDS = 1.0
 
 _COLUMNS = """
     SELECT seq, event_id, tenant_id, session_id, turn_id, root_turn_id, kind, agent,
-           asker_turn_id, asker, call, tool, elapsed_ms, detail, at
+           asker_turn_id, asker, call, tool, elapsed_ms, detail, at, text
     FROM turn_events
 """
 _AFTER_SQL = _COLUMNS + " WHERE seq > %s ORDER BY seq LIMIT %s"
@@ -81,6 +81,7 @@ def _stored(row: tuple[Any, ...]) -> StoredEvent:
             tool=None if row[11] is None else str(row[11]),
             elapsed_ms=None if row[12] is None else int(row[12]),
             detail=None if row[13] is None else str(row[13]),
+            text=None if row[15] is None else str(row[15]),
         ),
     )
 
