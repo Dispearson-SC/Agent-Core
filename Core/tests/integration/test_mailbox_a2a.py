@@ -427,3 +427,33 @@ async def test_a_cancelled_a2a_task_refuses_a_late_delivery(fixture_peer: _Fixtu
         await mailbox.answer(correlation_id, "late", answer_token=token)
     assert await mailbox.read_answer(correlation_id) is None
     assert await mailbox.cancel_open(str(turn_id), "x") == (), "already cancelled: history"
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_with_no_token_on_file_is_dropped_but_not_silently(
+    fixture_peer: _FixturePeer, caplog: pytest.LogCaptureFixture
+) -> None:
+    """D33 (R4): the A2A tokens live in process memory, so after a restart a genuine late answer
+    finds no token and is dropped (the port: an unknown id is a no-op). It must leave a trace the
+    operator can act on: a warning with the correlation id and never the token."""
+    import logging
+
+    fixture_peer.next_result = {"state": "submitted"}
+    first = await _mailbox()
+    correlation_id = await first.ask(
+        _policy_for(fixture_peer),
+        _ASSISTANT,
+        "survive a restart",
+        from_session=_session(),
+        turn_id=TurnId(str(uuid.uuid4())),
+        hop=0,
+    )
+    token = fixture_peer.received_messages[-1]["metadata"]["answer_token"]
+    restarted = await _mailbox()  # a new process: the in-memory token table is empty
+
+    with caplog.at_level(logging.WARNING, logger="agent_core.adapters.driven.peers.mailbox_a2a"):
+        await restarted.answer(correlation_id, "too late", answer_token=token)
+
+    assert await restarted.read_answer(correlation_id) is None, "nothing was written"
+    assert correlation_id in caplog.text, "the operator can tell which ask was dropped"
+    assert token not in caplog.text, "and the secret is never logged"

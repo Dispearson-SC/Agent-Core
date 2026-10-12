@@ -9,9 +9,11 @@ from typing import Any
 
 import psycopg
 import pytest
+from psycopg_pool import ConnectionPool
 
 from agent_core.adapters.driven.persistence_pg import migrations
 from agent_core.adapters.driven.persistence_pg.attempt_ledger import PgAttemptLedger
+from agent_core.composition import PoolConnections
 from tests.contract.harnesses import database_name_for
 from tests.fakes import peer_world
 from tests.fakes.attempt_ledger import InMemoryAttemptLedger
@@ -86,7 +88,24 @@ class TestInMemoryAttemptLedger(AttemptLedgerConformance):
 
 class TestPostgresAttemptLedger(AttemptLedgerConformance):
     @pytest.fixture
-    def ledger(self, pg_conninfo: str) -> Any:
+    def ledger(self, pg_conninfo: str) -> Iterator[Any]:
         with psycopg.connect(pg_conninfo, autocommit=True) as conn:
             conn.execute("DELETE FROM workflow_attempts")
-        return PgAttemptLedger(pg_conninfo)
+        with ConnectionPool(pg_conninfo, min_size=1, max_size=2) as pool:
+            yield PgAttemptLedger(PoolConnections(pool))
+
+    async def test_calls_reuse_pooled_connections_instead_of_opening_one_each(
+        self, ledger: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D33 (R4): the ledger is touched at every workflow entry and around every wait; a new
+        TCP connection and login per call is the cost this pool removes."""
+
+        def refuse(*_: Any, **__: Any) -> None:
+            raise AssertionError("the ledger opened a connection of its own")
+
+        monkeypatch.setattr(psycopg, "connect", refuse)
+
+        assert [await ledger.begin("wf") for _ in range(3)] == [1, 2, 3]
+        await ledger.park("wf")
+        await ledger.resume("wf")
+        await ledger.forget("wf")

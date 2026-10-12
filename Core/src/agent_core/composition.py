@@ -223,6 +223,7 @@ from agent_core.adapters.driving.http.routes import (
     TurnView,
 )
 from agent_core.adapters.driving.workflow.turn_workflow import (
+    DEFAULT_MAX_TURN_ATTEMPTS,
     PeerSeat,
     TurnWorkflowDependencies,
     bind_dependencies,
@@ -477,8 +478,8 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # stranded on purpose (drain first, OPERATIONS.md); the step shape did not change.
 PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.5"
 
-# C5 (D32). Default of `Settings.max_turn_attempts`.
-DEFAULT_MAX_TURN_ATTEMPTS: Final[int] = 10
+# C5 (D32). The default of `Settings.max_turn_attempts` is `DEFAULT_MAX_TURN_ATTEMPTS`, defined once
+# in `turn_workflow` (where the budget is enforced) and imported above; D33 removed the second copy.
 
 # C3 (D31). Default of `Settings.peer_lease_seconds`: five minutes.
 DEFAULT_PEER_LEASE_SECONDS: Final[int] = 300
@@ -1657,7 +1658,7 @@ def bind_turn_workflow(container: Container) -> None:
             peers=PeerSeat(mailbox=container.mailbox, profiles=container.profiles),
             # C5. The poison-turn budget: the ledger lives in the application database, and the
             # limit is `Settings.max_turn_attempts`.
-            attempts=PgAttemptLedger(container.settings.app_conninfo),
+            attempts=PgAttemptLedger(PoolConnections(container.domain_pool)),
             max_attempts=container.settings.max_turn_attempts,
         )
     )

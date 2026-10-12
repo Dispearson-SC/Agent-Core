@@ -111,3 +111,36 @@ def test_migrations_are_idempotent_on_rerun() -> None:
     assert set(applied_ids) == {
         migration.id for migration in migrations.discover_app_migrations()
     }
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_apply_all_migrations_creates_the_peer_turn_id_text_column_and_the_attempt_ledger() -> None:
+    """D33: 0029 (`peer_messages.turn_id` TEXT, kept although C1i made callee turn ids UUIDs) and
+    0030 (`workflow_attempts`) are applied on a FRESH database by the production entry point, not
+    only by the per-module appliers their own tests call."""
+    app_db = "agent_core_migrations_c1j_test"
+    with psycopg.connect(_ADMIN_CONNINFO, autocommit=True) as admin:
+        admin.execute(f'DROP DATABASE IF EXISTS "{app_db}" WITH (FORCE)')
+    asyncio.run(migrations.ensure_databases(_ADMIN_CONNINFO, app_database=app_db))
+    app_conninfo = re.sub(r"/[^/?]+(\?.*)?$", rf"/{app_db}\1", _ADMIN_CONNINFO)
+
+    asyncio.run(migrations.apply_all_migrations(app_conninfo))
+
+    with psycopg.connect(app_conninfo) as conn:
+        applied = {row[0] for row in conn.execute("SELECT id FROM schema_migrations").fetchall()}
+        columns = {
+            (str(table), str(column)): str(kind)
+            for table, column, kind in conn.execute(
+                "SELECT table_name, column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name IN "
+                "('peer_messages', 'workflow_attempts', 'transcript_entries')"
+            ).fetchall()
+        }
+    with psycopg.connect(_ADMIN_CONNINFO, autocommit=True) as admin:
+        admin.execute(f'DROP DATABASE IF EXISTS "{app_db}" WITH (FORCE)')
+
+    assert {i[:4] for i in applied} >= {"0029", "0030"}, "0029/0030 are not applied"
+    assert columns[("peer_messages", "turn_id")] == "text"
+    assert columns[("transcript_entries", "turn_id")] == "text"
+    assert columns[("workflow_attempts", "attempts")] == "integer"
+    assert columns[("workflow_attempts", "parked")] == "boolean"

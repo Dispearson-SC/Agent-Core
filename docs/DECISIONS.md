@@ -1359,3 +1359,31 @@ A2A adapter, which has no lease) and the cascade names `0..redeliveries`. Ids DB
 are cancelled harmlessly. Pinned by the shared conformance suite and by a real-DBOS scenario
 (gen 0 retired, gen 1 lost, gen 2 live: `cancel_turn` cancels gen 2).
 
+**C1j.4 · an A2A answer with no token on file is logged.** `A2AAgentMailbox` keeps the per-ask
+answer tokens in process memory (it has no table, by design). After a restart a genuine late answer
+finds no token, and the port says an unknown id is a no-op, so it was dropped without a trace. It
+still is dropped (nothing can be verified), but `answer` now logs a WARNING with the correlation
+id (an address) and never the token, and the OPERATIONS runbook says A2A tokens do not survive a
+restart: an ask in flight over A2A across a restart is lost to its asker's reply timeout. Persisting
+the tokens would add a table to the one adapter that has none and is a design change, not made here.
+
+**C1j.5 · the attempt ledger borrows pooled connections.** `PgAttemptLedger` opened a new
+connection per call (every workflow entry, park, resume and forget). It now takes the repo's
+`ConnectionFactory` seam and production passes `PoolConnections(domain_pool)`, the pool every
+other application-database adapter already uses; a pooled connection commits when its context
+exits, still one statement per transaction and never the step's. Fail-open is unchanged: a closed
+pool or a database that is down raises, the workflow body logs it and the turn runs uncounted.
+(`PgAgentMailbox` also connects per call; not part of this advisory, left as is.)
+
+**C1j.6 · migrations 0029 and 0030 are applied by the production entry point.**
+`test_apply_all_migrations_creates_the_peer_turn_id_text_column_and_the_attempt_ledger` runs
+`apply_all_migrations` on a fresh database and asserts both ids are recorded, `peer_messages.turn_id`
+and the rebuilt `transcript_entries.turn_id` are TEXT, and `workflow_attempts` has its columns. It
+is a characterization test: it passed when written (nothing was broken), so there is no RED.
+
+**C1j.7 and C1j.8 · tidy.** `DEFAULT_MAX_TURN_ATTEMPTS` is defined once, in `turn_workflow` (where
+the budget is enforced), and `composition` imports and re-exports it. Dead test helpers removed:
+`_to_the_third_agent` (test_poison_budget), `now_plus` (mailbox_conformance), `utcnow`
+(harnesses). The callee-budget test's `drive(launch_drop)` is now three named phases
+(`first_process`, `second_process`, `third_process`) like the restart tests.
+

@@ -129,6 +129,15 @@ next passes cancel those workflows and rerun the asks as described above. Turn i
 `stranded-turns` reports 0. A workflow that is already `CANCELLED` or `ERROR` behind an unanswered
 `delivered` row (an interrupted retire) is requeued without the flag.
 
+## A2A asks do not survive a restart of the asking process (D33)
+
+When peers are reached over A2A (`A2AAgentMailbox`), the secret that authenticates each peer's
+answer is held in the asking process's memory only. If that process restarts while an ask is
+open, the late answer is dropped and the process logs `dropping a delivered answer for A2A task
+<id>: no answer token on file for it` (the id, never the secret). The asker's reply timeout then
+ends the ask. Treat that warning as "an answer was lost, ask again"; it is expected only around
+restarts. The Postgres mailbox keeps its tokens on the row and has no such window.
+
 ## Cancelling a turn that is waiting on peers
 
 `turn_workflow.cancel_turn(turn_id, reason)` cancels the asking workflow, marks every open ask it

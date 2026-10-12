@@ -47,7 +47,9 @@ def _bind_with_ledger(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> w.World
             human_gateway=deps.human_gateway,
             resume_turn=deps.resume_turn,
             peers=deps.peers,
-            attempts=PgAttemptLedger(w.conninfo(_DATABASE)),
+            attempts=PgAttemptLedger(
+                lambda: psycopg.connect(w.conninfo(_DATABASE), autocommit=True)
+            ),
             max_attempts=_BUDGET,
         ),
     )
@@ -143,25 +145,28 @@ def test_a_callee_past_the_budget_answers_its_asker_with_the_fixed_failure_text(
     world.start.execute = route  # type: ignore[method-assign]
     world.start.b_answers_directly = False
 
-    async def drive(launch_drop: bool) -> None:
-        async with w.Dbos(_DATABASE, drop=launch_drop):
-            if launch_drop:
-                await turn_workflow.enqueue_turn(w.request(), turn_id=w.ASKING_TURN)
-                await w.until(lambda: w.rows(_DATABASE), "A's ask to reach the mailbox")
-                assert await w.dispatch(world, w.B) is AskDisposition.STARTED
-                await w.until(lambda: hanging.entered == 1, "B to start")
-            elif hanging.entered == 1:
-                await w.until(lambda: hanging.entered == 2, "B to be recovered")
-            else:
-                (first,) = list(w.rows(_DATABASE))
-                await w.until(
-                    lambda: w.rows(_DATABASE)[first][2] is not None, "the asker to be answered"
-                )
+    async def first_process() -> None:
+        async with w.Dbos(_DATABASE):
+            await turn_workflow.enqueue_turn(w.request(), turn_id=w.ASKING_TURN)
+            await w.until(lambda: w.rows(_DATABASE), "A's ask to reach the mailbox")
+            assert await w.dispatch(world, w.B) is AskDisposition.STARTED
+            await w.until(lambda: hanging.entered == 1, "B to start")
+
+    async def second_process() -> None:
+        async with w.Dbos(_DATABASE, drop=False):
+            await w.until(lambda: hanging.entered == 2, "B to be recovered")
+
+    async def third_process() -> None:
+        async with w.Dbos(_DATABASE, drop=False):
+            (first,) = list(w.rows(_DATABASE))
+            await w.until(
+                lambda: w.rows(_DATABASE)[first][2] is not None, "the asker to be answered"
+            )
 
     with w.dying_process(monkeypatch):
-        asyncio.run(drive(True))
-        asyncio.run(drive(False))
-    asyncio.run(drive(False))
+        asyncio.run(first_process())
+        asyncio.run(second_process())
+    asyncio.run(third_process())
 
     ((first, (_, state, answer)),) = list(w.rows(_DATABASE).items())
     assert answer == PEER_ASK_FAILED_ANSWER and state == "answered"
@@ -202,7 +207,3 @@ def test_restarting_a_turn_parked_on_a_person_never_uses_up_the_budget(
 
     assert seen["outcome"].result is not None and seen["outcome"].result.text == "a done"
     assert _attempts(str(w.ASKING_TURN)) is None, "finished: the ledger row is gone"
-
-
-async def _to_the_third_agent(world: w.World) -> tuple[str, str]:
-    return await w.run_to_the_third_agent(world)

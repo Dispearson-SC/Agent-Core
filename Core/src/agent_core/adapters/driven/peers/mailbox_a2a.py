@@ -239,8 +239,11 @@ class A2AAgentMailbox:
         C1c. The delivery must present the `answer_token` sent to the peer with the message
         (`metadata.answer_token`); otherwise `PeerAnswerRefusedError`. C1h: that refusal is for a
         task this adapter KNOWS (it sent it) and a delivery that does not hold its token. A task
-        it never sent is a stranger's delivery, a silent no-op exactly as the port says and
-        `PgAgentMailbox` does: nothing to refuse, nothing written.
+        it never sent is a stranger's delivery, a no-op exactly as the port says and
+        `PgAgentMailbox` does: nothing to refuse, nothing written. D33: it is logged (a warning
+        with the correlation id, never a token), because the token table is process memory only
+        and a restart makes a genuine late answer look the same. Persisting the tokens would
+        need a table on this otherwise table-less adapter; not done.
 
         `setdefault` makes the first delivery win, exactly like `PgAgentMailbox.answer`'s
         `answered_at IS NULL` guard: a retried delivery for one correlation id must not
@@ -252,6 +255,16 @@ class A2AAgentMailbox:
             raise PeerAnswerRefusedError(correlation_id, "the ask was cancelled")
         expected = self._tokens.get(correlation_id)
         if expected is None:
+            # An unknown id is a no-op by the port, but over A2A the tokens exist in THIS
+            # process's memory only (`_tokens`): after a restart a genuine late answer lands
+            # here too, and dropping it without a word hides a lost reply. Log the id (an
+            # address, not a secret); never the token.
+            _LOG.warning(
+                "dropping a delivered answer for A2A task %s: no answer token on file for it. "
+                "A2A tokens are kept in process memory only, so this is a stranger's delivery "
+                "or an answer to an ask made before this process started",
+                correlation_id,
+            )
             return
         if answer_token is None or not secrets.compare_digest(
             expected.encode(), answer_token.encode()
