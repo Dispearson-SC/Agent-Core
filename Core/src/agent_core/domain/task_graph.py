@@ -25,7 +25,7 @@ from agent_core.domain.peers import (
     peer_workflow_id,
 )
 
-__all__ = ["AskRecord", "TaskGraph", "TaskNode", "build_task_graph"]
+__all__ = ["AskRecord", "AskWindow", "TaskGraph", "TaskNode", "build_task_graph"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +43,15 @@ class AskRecord:
     asked_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AskWindow:
+    """What a bounded read of a tree's asks returned: the oldest `limit` rows and how many more
+    the limit left out (0 = every ask). A reader never drops silently."""
+
+    records: tuple[AskRecord, ...]
+    omitted: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +78,13 @@ class TaskNode:
 class TaskGraph:
     root: TaskNode
     unlinked: tuple[TaskNode, ...] = ()
+    omitted_asks: int = 0
+
+    @property
+    def truncated(self) -> bool:
+        """The read behind this graph left asks out: the tree is a prefix of the real one, and an
+        ask whose parent was left out is listed under `unlinked`."""
+        return self.omitted_asks > 0
 
 
 def _ms(start: datetime | None, end: datetime | None) -> int | None:
@@ -87,9 +103,12 @@ def _callee_turn_ids(record: AskRecord) -> tuple[str, ...]:
     return tuple(ids)
 
 
-def build_task_graph(root_turn_id: str, records: tuple[AskRecord, ...]) -> TaskGraph:
+def build_task_graph(
+    root_turn_id: str, records: tuple[AskRecord, ...], *, omitted: int = 0
+) -> TaskGraph:
     """The tree under `root_turn_id` from the asks recorded beneath it. Pure and total: a cycle or
-    a duplicate in the rows cannot loop (each record is placed at most once)."""
+    a duplicate in the rows cannot loop (each record is placed at most once). `omitted` is how many
+    asks the read left out; it is carried on the graph, never guessed at."""
     by_parent: dict[str, list[AskRecord]] = defaultdict(list)
     for record in records:
         by_parent[record.asking_turn_id].append(record)
@@ -132,7 +151,7 @@ def build_task_graph(root_turn_id: str, records: tuple[AskRecord, ...]) -> TaskG
         children=top,
     )
     unlinked = tuple(node(r) for r in _ordered(tuple(records)) if r.handle not in placed)
-    return TaskGraph(root=root, unlinked=unlinked)
+    return TaskGraph(root=root, unlinked=unlinked, omitted_asks=max(0, omitted))
 
 
 def _ordered(records: tuple[AskRecord, ...] | list[AskRecord]) -> list[AskRecord]:

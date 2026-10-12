@@ -72,8 +72,9 @@ def test_two_peers_and_a_nested_ask_are_read_back_as_a_three_level_tree() -> Non
 
     mine, theirs, (first, nested) = asyncio.run(scenario())
 
-    graph = build_task_graph(ROOT, mine)
-    assert theirs == () and graph.unlinked == ()
+    graph = build_task_graph(ROOT, mine.records, omitted=mine.omitted)
+    assert theirs.records == () and theirs.omitted == 0
+    assert graph.unlinked == () and not graph.truncated
     assert graph.root.depth == 3 and graph.root.agent == w.A
     by_handle = {c.handle: c for c in graph.root.children}
     direct = by_handle[first]
@@ -93,7 +94,7 @@ def test_the_migration_adds_the_root_index_and_states_follow_the_rows() -> None:
         reader = PgTaskGraphReader(w.conninfo(_DATABASE))
         return await reader.asks_under("t", ROOT)
 
-    (record,) = asyncio.run(scenario())
+    (record,) = asyncio.run(scenario()).records
 
     assert record.state is BackgroundState.CANCELLED and record.finished_at is not None
     with psycopg.connect(w.conninfo(_DATABASE)) as conn:
@@ -104,3 +105,19 @@ def test_the_migration_adds_the_root_index_and_states_follow_the_rows() -> None:
             ).fetchall()
         }
     assert "ix_peer_messages_root" in indexes
+
+
+def test_a_read_over_the_limit_keeps_the_oldest_asks_and_counts_the_rest() -> None:
+    async def scenario() -> Any:
+        await w.fresh_databases(_DATABASE)
+        mailbox = PgAgentMailbox(w.conninfo(_DATABASE))
+        for n in range(5):
+            await _ask(mailbox, w.B, w.A, ROOT, f"k{n}")
+        reader = PgTaskGraphReader(w.conninfo(_DATABASE))
+        return await reader.asks_under("t", ROOT, limit=3), await reader.asks_under("t", ROOT)
+
+    cut, whole = asyncio.run(scenario())
+
+    assert len(cut.records) == 3 and cut.omitted == 2
+    assert len(whole.records) == 5 and whole.omitted == 0
+    assert [r.handle for r in cut.records] == [r.handle for r in whole.records[:3]]

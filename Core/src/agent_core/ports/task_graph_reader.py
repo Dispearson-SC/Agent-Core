@@ -13,15 +13,14 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from agent_core.domain.task_graph import AskRecord
+from agent_core.domain.task_graph import AskWindow
 
 __all__ = ["TaskGraphReader"]
 
 
 class TaskGraphReader(Protocol):
-    async def asks_under(
-        self, tenant_id: str, root_turn_id: str, *, limit: int = 500
-    ) -> tuple[AskRecord, ...]:
+    async def asks_under(self, tenant_id: str, root_turn_id: str, *, limit: int = 500) -> AskWindow:
         """Every ask whose root turn is `root_turn_id`, direct and nested, background included,
-        oldest first, at most `limit`, for that tenant only."""
+        oldest first, at most `limit`, for that tenant only. Asks past the limit are counted in
+        `AskWindow.omitted`, never dropped silently."""
         ...

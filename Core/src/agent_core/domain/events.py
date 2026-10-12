@@ -21,6 +21,7 @@ from typing import Final
 __all__ = [
     "EventKind",
     "EventOwner",
+    "EventWindow",
     "FeedSnapshot",
     "ProgressEvent",
     "StoredEvent",
@@ -108,6 +109,15 @@ class StoredEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class EventWindow:
+    """What a bounded read of a tree returned: the NEWEST events that fit, in `seq` order, and how
+    many older ones the limit left out (0 = the whole tree). A reader never drops silently."""
+
+    events: tuple[StoredEvent, ...]
+    omitted: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class TurnProgress:
     """Where one turn of the tree stands, folded from its events."""
 
@@ -135,6 +145,13 @@ class FeedSnapshot:
     last_seq: int
     turns: tuple[TurnProgress, ...]
     open_asks: int = 0
+    omitted_events: int = 0
+
+    @property
+    def truncated(self) -> bool:
+        """The read behind this snapshot left older events out: early turns may be missing and
+        counts such as `tools_called` are lower bounds."""
+        return self.omitted_events > 0
 
     @property
     def settled(self) -> bool:
@@ -148,38 +165,63 @@ class FeedSnapshot:
         )
 
 
-def fold_snapshot(root_turn_id: str, events: tuple[StoredEvent, ...]) -> FeedSnapshot:
-    """The state of the tree after `events` (in `seq` order). Pure."""
+def fold_snapshot(
+    root_turn_id: str, events: tuple[StoredEvent, ...], *, omitted: int = 0
+) -> FeedSnapshot:
+    """The state of the tree after `events` (in `seq` order). Pure.
+
+    `omitted` is how many older events the read left out. When it is positive, an event of a turn
+    whose `started` is not in the window still shows the turn (running until a `finished` or
+    `failed` says otherwise): hiding it would let the tree look settled while it is not. When it is
+    zero such an event belongs to a turn from before events existed and is ignored."""
     turns: dict[str, TurnProgress] = {}
     last = 0
     for stored in events:
         last = max(last, stored.seq)
         event = stored.event
-        current = turns.get(event.turn_id)
         if event.kind is EventKind.STARTED:
-            owner = event.owner
-            turns[event.turn_id] = TurnProgress(
-                turn_id=event.turn_id,
-                agent=event.agent,
-                state=TurnState.RUNNING,
-                asker_turn_id=None if owner is None else owner.asker_turn_id,
-                asker=None if owner is None else owner.asker,
-                call=None if owner is None else owner.call,
-                started_at=event.at,
-                elapsed_ms=None,
-                tools_called=0,
-                last_tool=None,
-            )
-        elif current is None:
-            continue  # an event of a turn whose `started` is not in this window
-        elif event.kind is EventKind.TOOL_CALLED:
+            turns[event.turn_id] = _placeholder(event)
+            continue
+        current = turns.get(event.turn_id)
+        if current is None:
+            if omitted <= 0:
+                continue  # a turn from before events existed: nothing to show
+            current = _placeholder(event)
+        if event.kind is EventKind.TOOL_CALLED:
             turns[event.turn_id] = replace(
                 current, tools_called=current.tools_called + 1, last_tool=event.tool
             )
         else:
-            turns[event.turn_id] = replace(
-                current,
-                state=TurnState.FINISHED if event.kind is EventKind.FINISHED else TurnState.FAILED,
-                elapsed_ms=event.elapsed_ms,
-            )
-    return FeedSnapshot(root_turn_id=root_turn_id, last_seq=last, turns=tuple(turns.values()))
+            turns[event.turn_id] = _finish(current, event)
+    return FeedSnapshot(
+        root_turn_id=root_turn_id,
+        last_seq=last,
+        turns=tuple(turns.values()),
+        omitted_events=max(0, omitted),
+    )
+
+
+def _placeholder(event: ProgressEvent) -> TurnProgress:
+    """A running turn as of this event: its `started`, or (over a truncated window) the first of
+    its events that is in the window."""
+    owner = event.owner
+    return TurnProgress(
+        turn_id=event.turn_id,
+        agent=event.agent,
+        state=TurnState.RUNNING,
+        asker_turn_id=None if owner is None else owner.asker_turn_id,
+        asker=None if owner is None else owner.asker,
+        call=None if owner is None else owner.call,
+        started_at=event.at,
+        elapsed_ms=None,
+        tools_called=0,
+        last_tool=None,
+    )
+
+
+def _finish(current: TurnProgress, event: ProgressEvent) -> TurnProgress:
+    return replace(
+        current,
+        state=TurnState.FINISHED if event.kind is EventKind.FINISHED else TurnState.FAILED,
+        elapsed_ms=event.elapsed_ms,
+    )

@@ -598,8 +598,8 @@ def create_app(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No turn with that id in this tenant.",
             )
-        records = await task_graph.asks_under(str(caller.tenant_id), turn_id)
-        return graph_json(build_task_graph(turn_id, records))
+        asks = await task_graph.asks_under(str(caller.tenant_id), turn_id)
+        return graph_json(build_task_graph(turn_id, asks.records, omitted=asks.omitted))
 
     @app.post("/decisions/{correlation_id}", status_code=status.HTTP_202_ACCEPTED)
     async def post_decision(

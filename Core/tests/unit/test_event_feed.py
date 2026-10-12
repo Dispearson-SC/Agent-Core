@@ -24,6 +24,7 @@ from agent_core.application.event_feed import EventFeed, FeedKind
 from agent_core.domain.events import (
     EventKind,
     EventOwner,
+    EventWindow,
     ProgressEvent,
     StoredEvent,
     TurnState,
@@ -31,7 +32,7 @@ from agent_core.domain.events import (
     progress_event_id,
 )
 from agent_core.domain.peers import BackgroundState
-from agent_core.domain.task_graph import AskRecord
+from agent_core.domain.task_graph import AskRecord, AskWindow
 
 T0 = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 ROOT = "root-1"
@@ -65,8 +66,9 @@ def _event(
 class Store:
     """An in-memory `EventReader` + `EventWakeup`."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, tree_limit: int | None = None) -> None:
         self.rows: list[StoredEvent] = []
+        self.tree_limit = tree_limit
         self._woke = asyncio.Event()
 
     def add(self, event: ProgressEvent) -> StoredEvent:
@@ -78,14 +80,14 @@ class Store:
     async def after(self, seq: int, *, limit: int = 500) -> tuple[StoredEvent, ...]:
         return tuple(r for r in self.rows if r.seq > seq)[:limit]
 
-    async def tree(
-        self, tenant_id: str, root_turn_id: str, *, limit: int = 2000
-    ) -> tuple[StoredEvent, ...]:
-        return tuple(
+    async def tree(self, tenant_id: str, root_turn_id: str, *, limit: int = 2000) -> EventWindow:
+        mine = tuple(
             r
             for r in self.rows
             if r.event.tenant_id == tenant_id and r.event.root_turn_id == root_turn_id
-        )[:limit]
+        )
+        limit = limit if self.tree_limit is None else self.tree_limit
+        return EventWindow(mine[-limit:], omitted=max(0, len(mine) - limit))
 
     async def latest_seq(self) -> int:
         return len(self.rows)
@@ -321,12 +323,12 @@ class _Asks:
     def __init__(self, *states: BackgroundState) -> None:
         self.states = list(states)
 
-    async def asks_under(
-        self, tenant_id: str, root_turn_id: str, *, limit: int = 500
-    ) -> tuple[AskRecord, ...]:
-        return tuple(
-            AskRecord(f"h{n}", "billing", "a", root_turn_id, state, True, 0, T0)
-            for n, state in enumerate(self.states)
+    async def asks_under(self, tenant_id: str, root_turn_id: str, *, limit: int = 500) -> AskWindow:
+        return AskWindow(
+            tuple(
+                AskRecord(f"h{n}", "billing", "a", root_turn_id, state, True, 0, T0)
+                for n, state in enumerate(self.states)
+            )
         )
 
 

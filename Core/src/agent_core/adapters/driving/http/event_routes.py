@@ -10,7 +10,7 @@ that is only formatting: a `FeedItem` to the bytes of one SSE frame.
 
 FRAMES
     event: snapshot   id: <last seq>   data: {"root_turn_id", "last_seq", "settled", "open_asks",
-                                              "turns": [...]}
+                                              "truncated", "omitted_events", "turns": [...]}
     event: <kind>     id: <seq>        data: {one event}
     : keepalive                         (a comment; keeps proxies from closing a quiet stream)
     event: end                          (a snapshot showed the tree settled; the server closes)
@@ -46,6 +46,8 @@ def snapshot_json(snapshot: FeedSnapshot) -> dict[str, Any]:
         "last_seq": snapshot.last_seq,
         "settled": snapshot.settled,
         "open_asks": snapshot.open_asks,
+        "truncated": snapshot.truncated,
+        "omitted_events": snapshot.omitted_events,
         "turns": [
             {
                 "turn_id": t.turn_id,
@@ -114,5 +116,11 @@ def _node_json(node: TaskNode) -> dict[str, Any]:
 
 def graph_json(graph: TaskGraph) -> dict[str, Any]:
     """The ownership tree: the root node's fields, `children` nested to any depth, and the asks
-    whose parent could not be found under `unlinked` (C23, D54)."""
-    return {**_node_json(graph.root), "unlinked": [_node_json(n) for n in graph.unlinked]}
+    whose parent could not be found under `unlinked` (C23, D54). `truncated` and `omitted_asks` say
+    whether the read behind it hit its limit and how many asks it left out (D55)."""
+    return {
+        **_node_json(graph.root),
+        "unlinked": [_node_json(n) for n in graph.unlinked],
+        "truncated": graph.truncated,
+        "omitted_asks": graph.omitted_asks,
+    }

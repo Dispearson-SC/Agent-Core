@@ -22,7 +22,13 @@ from typing import Any
 import psycopg
 
 from agent_core.adapters.driven.events_pg.publisher import NOTIFY_CHANNEL
-from agent_core.domain.events import EventKind, EventOwner, ProgressEvent, StoredEvent
+from agent_core.domain.events import (
+    EventKind,
+    EventOwner,
+    EventWindow,
+    ProgressEvent,
+    StoredEvent,
+)
 
 __all__ = ["PgEventReader", "PgEventWakeup"]
 
@@ -34,7 +40,12 @@ _COLUMNS = """
     FROM turn_events
 """
 _AFTER_SQL = _COLUMNS + " WHERE seq > %s ORDER BY seq LIMIT %s"
-_TREE_SQL = _COLUMNS + " WHERE tenant_id = %s AND root_turn_id = %s ORDER BY seq LIMIT %s"
+# The NEWEST `limit` events of a tree plus the tree's total, so a long tree keeps its current state
+# and says how much older history it left out (D55). Returned newest first; the caller reverses.
+_TREE_SQL = (
+    _COLUMNS.replace("FROM turn_events", ", count(*) OVER () FROM turn_events")
+    + " WHERE tenant_id = %s AND root_turn_id = %s ORDER BY seq DESC LIMIT %s"
+)
 _LATEST_SQL = "SELECT COALESCE(max(seq), 0) FROM turn_events"
 
 
@@ -78,10 +89,15 @@ class PgEventReader:
     async def after(self, seq: int, *, limit: int = 500) -> tuple[StoredEvent, ...]:
         return await asyncio.to_thread(self._fetch, _AFTER_SQL, (seq, limit))
 
-    async def tree(
-        self, tenant_id: str, root_turn_id: str, *, limit: int = 2000
-    ) -> tuple[StoredEvent, ...]:
-        return await asyncio.to_thread(self._fetch, _TREE_SQL, (tenant_id, root_turn_id, limit))
+    async def tree(self, tenant_id: str, root_turn_id: str, *, limit: int = 2000) -> EventWindow:
+        return await asyncio.to_thread(self._tree, tenant_id, root_turn_id, limit)
+
+    def _tree(self, tenant_id: str, root_turn_id: str, limit: int) -> EventWindow:
+        with psycopg.connect(self._conninfo) as conn:
+            rows = conn.execute(_TREE_SQL, (tenant_id, root_turn_id, limit)).fetchall()
+        events = tuple(_stored(row) for row in reversed(rows))
+        total = 0 if not rows else int(rows[0][-1])
+        return EventWindow(events, omitted=max(0, total - len(rows)))
 
     async def latest_seq(self) -> int:
         return await asyncio.to_thread(self._latest)

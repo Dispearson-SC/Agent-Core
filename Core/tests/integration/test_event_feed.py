@@ -58,15 +58,15 @@ def test_the_tree_is_read_for_its_own_tenant_only_and_in_order() -> None:
         await publisher.publish(_event(ROOT, EventKind.STARTED, tenant="other"))
         mine = await reader.tree("t", ROOT)
         theirs = await reader.tree("other", ROOT)
-        later = await reader.after(mine[0].seq)
+        later = await reader.after(mine.events[0].seq)
         return mine, theirs, later
 
     mine, theirs, later = asyncio.run(scenario())
 
-    assert [s.event.turn_id for s in mine] == [ROOT, "peer-a"]
-    assert [s.event.tenant_id for s in theirs] == ["other"]
-    assert mine[1].event.owner == EventOwner(ROOT, ROOT, "asker", "call-peer-a")
-    assert mine[0].event.owner is None, "a turn a person started has no owner"
+    assert [s.event.turn_id for s in mine.events] == [ROOT, "peer-a"] and mine.omitted == 0
+    assert [s.event.tenant_id for s in theirs.events] == ["other"]
+    assert mine.events[1].event.owner == EventOwner(ROOT, ROOT, "asker", "call-peer-a")
+    assert mine.events[0].event.owner is None, "a turn a person started has no owner"
     assert [s.seq for s in later] == sorted(s.seq for s in later) and len(later) == 2
 
 
@@ -104,3 +104,22 @@ def test_a_live_event_reaches_a_subscriber_through_notify_and_a_slow_one_gets_a_
     (root_turn,) = collapsed.snapshot.turns
     assert root_turn.tools_called == 8 and root_turn.last_tool == "t-7"
     assert deepest <= 2
+
+
+def test_a_tree_over_the_limit_returns_its_newest_events_and_counts_the_older_ones() -> None:
+    async def scenario() -> tuple[Any, Any]:
+        await w.fresh_databases(_DATABASE)
+        publisher = PgEventPublisher(w.conninfo(_DATABASE))
+        reader = PgEventReader(w.conninfo(_DATABASE))
+        await publisher.publish(_event(ROOT, EventKind.STARTED))
+        for n in range(4):
+            await publisher.publish(_event(ROOT, EventKind.TOOL_CALLED, n=n, tool=f"t-{n}"))
+        await publisher.publish(_event(ROOT, EventKind.FINISHED))
+        return await reader.tree("t", ROOT, limit=3), await reader.tree("t", ROOT)
+
+    cut, whole = asyncio.run(scenario())
+
+    assert cut.omitted == 3 and len(cut.events) == 3
+    assert [s.event.kind for s in cut.events][-1] is EventKind.FINISHED, "the newest state is kept"
+    assert [s.seq for s in cut.events] == sorted(s.seq for s in cut.events), "still in seq order"
+    assert whole.omitted == 0 and len(whole.events) == 6

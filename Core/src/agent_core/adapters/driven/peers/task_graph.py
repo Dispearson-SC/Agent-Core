@@ -15,14 +15,14 @@ import asyncio
 import psycopg
 
 from agent_core.adapters.driven.peers.mailbox import background_state
-from agent_core.domain.task_graph import AskRecord
+from agent_core.domain.task_graph import AskRecord, AskWindow
 
 __all__ = ["PgTaskGraphReader"]
 
 _SQL = """
     SELECT correlation_id, target_agent_id, from_agent_id, turn_id, state, answer_failed,
            answered_at, background IS NOT NULL, redeliveries, enqueued_at, delivered_at,
-           cancelled_at
+           cancelled_at, count(*) OVER ()
     FROM peer_messages
     WHERE from_tenant_id = %s
       AND (root_turn_id = %s OR (root_turn_id IS NULL AND turn_id = %s))
@@ -37,12 +37,10 @@ class PgTaskGraphReader:
     def __init__(self, conninfo: str) -> None:
         self._conninfo = conninfo
 
-    async def asks_under(
-        self, tenant_id: str, root_turn_id: str, *, limit: int = 500
-    ) -> tuple[AskRecord, ...]:
+    async def asks_under(self, tenant_id: str, root_turn_id: str, *, limit: int = 500) -> AskWindow:
         return await asyncio.to_thread(self._read, tenant_id, root_turn_id, limit)
 
-    def _read(self, tenant_id: str, root_turn_id: str, limit: int) -> tuple[AskRecord, ...]:
+    def _read(self, tenant_id: str, root_turn_id: str, limit: int) -> AskWindow:
         with psycopg.connect(self._conninfo) as conn:
             rows = conn.execute(_SQL, (tenant_id, root_turn_id, root_turn_id, limit)).fetchall()
         records: list[AskRecord] = []
@@ -63,4 +61,5 @@ class PgTaskGraphReader:
                     finished_at=row[11] if cancelled else row[6],
                 )
             )
-        return tuple(records)
+        total = 0 if not rows else int(rows[0][12])
+        return AskWindow(tuple(records), omitted=max(0, total - len(rows)))

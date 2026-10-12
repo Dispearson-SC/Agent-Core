@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from agent_core.adapters.driving.http.routes import TurnView, create_app
 from agent_core.domain.peers import BackgroundState, peer_workflow_id
-from agent_core.domain.task_graph import AskRecord, build_task_graph
+from agent_core.domain.task_graph import AskRecord, AskWindow, build_task_graph
 from agent_core.domain.turn import CallerIdentity, TurnId
 
 T0 = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
@@ -141,11 +141,9 @@ class _Reader:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    async def asks_under(
-        self, tenant_id: str, root_turn_id: str, *, limit: int = 500
-    ) -> tuple[AskRecord, ...]:
+    async def asks_under(self, tenant_id: str, root_turn_id: str, *, limit: int = 500) -> AskWindow:
         self.calls.append((tenant_id, root_turn_id))
-        return _two_peers_and_a_nested_ask()
+        return AskWindow(_two_peers_and_a_nested_ask())
 
 
 class _Lookup:

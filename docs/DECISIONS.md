@@ -2151,3 +2151,12 @@ The review of C21-C23 approved them with advisories; this closes them.
   the tree is `queued` or `running` (`open_asks`, read through the `TaskGraphReader` port the feed
   now takes; the field is in the snapshot JSON). Cost: one extra tree read and one mailbox read per
   idle subscriber per 5 s, both indexed.
+- **A bounded read says what it left out.** `EventReader.tree` returns an `EventWindow` (the NEWEST
+  `limit` events, 2000 by default, plus `omitted`, the count of older ones); it used to keep the
+  oldest and drop the newest, which froze a long tree at its early state. `TaskGraphReader.asks_under`
+  returns an `AskWindow` (the OLDEST `limit` asks, parents before children, plus `omitted`). Both
+  counts come from `count(*) OVER ()` in the same statement. The snapshot JSON carries `truncated`
+  and `omitted_events`, the graph JSON `truncated` and `omitted_asks`. Over a truncated event
+  window a turn whose `started` was cut is still shown (running until a `finished` or `failed`
+  says otherwise), so a partial view is never reported settled; `tools_called` is then a lower
+  bound. `open_asks` counts only the asks that were read.

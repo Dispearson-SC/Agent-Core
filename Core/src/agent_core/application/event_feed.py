@@ -176,12 +176,13 @@ class EventFeed:
     async def _snapshot(self, tenant_id: str, root_turn_id: str) -> FeedSnapshot:
         """The tree as it is now: its events folded, plus how many asks under it are still open
         (a background ask outlives the turn that made it, and its callee may not have started)."""
-        snapshot = fold_snapshot(root_turn_id, await self._reader.tree(tenant_id, root_turn_id))
+        window = await self._reader.tree(tenant_id, root_turn_id)
+        snapshot = fold_snapshot(root_turn_id, window.events, omitted=window.omitted)
         if self._asks is None:
             return snapshot
-        records = await self._asks.asks_under(tenant_id, root_turn_id)
+        asks = await self._asks.asks_under(tenant_id, root_turn_id)
         return replace(
-            snapshot, open_asks=sum(1 for record in records if record.state in _OPEN_ASKS)
+            snapshot, open_asks=sum(1 for record in asks.records if record.state in _OPEN_ASKS)
         )
 
     async def follow(

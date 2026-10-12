@@ -13,7 +13,8 @@ and a test wants to answer them separately.
       caller.
     * `tree(tenant_id, root_turn_id)`: the events of ONE tree, scoped by tenant IN THE QUERY (the
       tenant predicate is the guarantee, the way it is for `TranscriptReader`). This is what a
-      snapshot is folded from.
+      snapshot is folded from. A tree over the limit is returned as its newest events with the
+      number left out (`EventWindow.omitted`); a reader never truncates silently.
     * `latest_seq()`: where "now" is, so a broker that starts late does not replay history.
 
 `EventWakeup`
@@ -26,7 +27,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from agent_core.domain.events import StoredEvent
+from agent_core.domain.events import EventWindow, StoredEvent
 
 __all__ = ["EventReader", "EventWakeup"]
 
@@ -36,10 +37,10 @@ class EventReader(Protocol):
         """Events with `seq` greater than the given one, in `seq` order, at most `limit`."""
         ...
 
-    async def tree(
-        self, tenant_id: str, root_turn_id: str, *, limit: int = 2000
-    ) -> tuple[StoredEvent, ...]:
-        """The events filed under `root_turn_id` for that tenant only, in `seq` order."""
+    async def tree(self, tenant_id: str, root_turn_id: str, *, limit: int = 2000) -> EventWindow:
+        """The events filed under `root_turn_id` for that tenant only, in `seq` order. A tree
+        larger than `limit` yields its NEWEST `limit` events and the count of older ones left
+        out."""
         ...
 
     async def latest_seq(self) -> int:
