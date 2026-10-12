@@ -315,6 +315,72 @@ def test_when_existence_cannot_be_determined_the_ask_is_left_open_for_redelivery
     assert queue.answered == [] and woken == []
 
 
+# --- C1k (R4-002): a callee that keeps dying is not rerun for ever --------------------------------
+
+
+def test_an_ask_past_its_redelivery_cap_is_closed_with_the_failure_answer_and_the_asker_woken() -> (
+    None
+):
+    """A callee that deterministically ends in ERROR is 'absent' to the lease, so it is requeued
+    every lease for ever (the poison budget restarts per generation). Past the cap the claim
+    closes the ask instead of starting another generation."""
+    queue, starter, woken = _Queue([_redelivered(4)]), _Starter(), []
+
+    async def wake(turn_id: TurnId, correlation_id: str) -> None:
+        woken.append((turn_id, correlation_id))
+
+    report = asyncio.run(
+        dispatch_next_ask(
+            queue, starter, target=AgentId("specialist"), wake=wake, max_redeliveries=3
+        )
+    )
+
+    assert report is not None and report.disposition is AskDisposition.ABANDONED
+    assert starter.started == [], "no new generation is started"
+    assert queue.answered == [("c1", PEER_ASK_FAILED_ANSWER)]
+    assert queue.tokens == ["tok-c1"]
+    assert woken == [(TurnId("asker-turn"), "c1")]
+
+
+def test_an_ask_at_its_last_allowed_redelivery_still_starts() -> None:
+    queue, starter = _Queue([_redelivered(3)]), _Starter()
+
+    report = asyncio.run(
+        dispatch_next_ask(queue, starter, target=AgentId("specialist"), max_redeliveries=3)
+    )
+
+    assert report is not None and report.disposition is AskDisposition.STARTED
+    assert starter.generations == [3]
+
+
+def test_without_a_cap_any_generation_starts() -> None:
+    queue, starter = _Queue([_redelivered(40)]), _Starter()
+
+    asyncio.run(dispatch_next_ask(queue, starter, target=AgentId("specialist")))
+
+    assert starter.generations == [40]
+
+
+def test_the_worker_loop_applies_its_redelivery_cap() -> None:
+    queue, starter, lines = _Queue([_redelivered(9)]), _Starter(), []
+    passes = iter([True, False])
+
+    asyncio.run(
+        run_peer_worker(
+            queue,
+            starter,
+            targets=[AgentId("specialist")],
+            max_redeliveries=2,
+            keep_going=lambda: next(passes),
+            write_line=lines.append,
+        )
+    )
+
+    assert starter.started == []
+    assert queue.answered == [("c1", PEER_ASK_FAILED_ANSWER)]
+    assert any("abandoned" in line for line in lines)
+
+
 # --- C3: the worker loop reclaims stale deliveries ---------------------------------------------
 
 

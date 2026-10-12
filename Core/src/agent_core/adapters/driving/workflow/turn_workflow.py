@@ -211,6 +211,7 @@ __all__ = [
     "enqueue_peer_turn",
     "enqueue_turn",
     "enqueue_turn_window",
+    "legacy_peer_workflow_id",
     "peer_workflow_id",
     "run_peer_turn_workflow",
     "run_turn_window",
@@ -1112,10 +1113,18 @@ async def _peer_workflow_ids(correlation_id: str) -> tuple[str, ...]:
     `0..redeliveries` are named, whether or not DBOS knows them: a generation whose workflow was
     lost (never started, or its enqueue not recorded) is a gap, and walking "until DBOS does not
     know one" stopped at the first gap and never reached a live later generation. Cancelling an
-    unknown id is the cheap, harmless case.
+    unknown id is the cheap, harmless case. The `.4` spelling of each generation is named too when
+    DBOS knows it (C1k, D34): a callee still running under a live `.4` executor must be reached as
+    well; no `.4` workflow exists for an ask started under `.5`, so asking first keeps that quiet.
     """
     generations = await _require_peer_seat().mailbox.redeliveries(correlation_id)
-    return tuple(peer_workflow_id(correlation_id, n) for n in range(generations + 1))
+    ids: list[str] = []
+    for generation in range(generations + 1):
+        current, legacy = _attempt_workflow_ids(correlation_id, generation)
+        ids.append(current)
+        if await DBOS.get_workflow_status_async(legacy) is not None:
+            ids.append(legacy)
+    return tuple(ids)
 
 
 async def _cancel_callees(correlation_ids: tuple[str, ...], reason: str) -> tuple[str, ...]:
@@ -1932,6 +1941,24 @@ def peer_workflow_id(correlation_id: str, generation: int = 0) -> str:
     return str(uuid.uuid5(PEER_WORKFLOW_NAMESPACE, f"{correlation_id}:{generation}"))
 
 
+def legacy_peer_workflow_id(correlation_id: str, generation: int = 0) -> str:
+    """The id a `.4` build gave the workflow of this attempt: `peer-<id>` or `peer-<id>-r<n>`. Pure.
+
+    Kept ONLY so a deploy of `.5` can still see (`DurablePeerTurnStarter.exists`), retire and
+    cascade-cancel a callee a live `.4` executor started (C1k, D34). Nothing starts a workflow
+    under this spelling any more (it cannot be persisted: D33).
+    """
+    return f"peer-{correlation_id}" if generation == 0 else f"peer-{correlation_id}-r{generation}"
+
+
+def _attempt_workflow_ids(correlation_id: str, generation: int) -> tuple[str, str]:
+    """Both spellings of one attempt's workflow id: the current one, then the `.4` one."""
+    return (
+        peer_workflow_id(correlation_id, generation),
+        legacy_peer_workflow_id(correlation_id, generation),
+    )
+
+
 @DBOS.step()
 async def _step_record_peer_reply(
     correlation_id: str, text: str, answer_token: str | None = None
@@ -2343,9 +2370,20 @@ class DurablePeerTurnStarter:
         under another application version is False too: DBOS recovers a pending workflow only for
         the version the recovering process claims, so this build will never run it. OFF (the
         default) it is True - an old executor may be running it right now.
+
+        BOTH SPELLINGS OF THE ID (C1k, D34). The attempt's current id is asked first, then the
+        `.4` id (`legacy_peer_workflow_id`): a callee a live `.4` executor is still running is
+        otherwise invisible, and the lease would requeue its ask even with the flag off.
         """
-        found = await DBOS.get_workflow_status_async(peer_workflow_id(correlation_id, generation))
-        if found is None or found.status in _DEAD_STATUSES:
+        for workflow_id in _attempt_workflow_ids(correlation_id, generation):
+            found = await DBOS.get_workflow_status_async(workflow_id)
+            if found is not None:
+                return self._will_answer(found)
+        return False
+
+    def _will_answer(self, found: Any) -> bool:
+        """Whether the workflow DBOS reported for an attempt is one that will still answer."""
+        if found.status in _DEAD_STATUSES:
             return False
         stranded = (
             self.retire_other_versions
@@ -2368,14 +2406,16 @@ class DurablePeerTurnStarter:
         comes back here (`exists` is False for it) and finishes the nested asks, which
         `cancel_open` ends idempotently.
         """
-        workflow_id = peer_workflow_id(correlation_id, generation)
-        found = await DBOS.get_workflow_status_async(workflow_id)
-        if found is None or not (found.status in _OPEN_STATUSES or found.status in _DEAD_STATUSES):
-            return
-        if found.status in _OPEN_STATUSES:
-            await DBOS.cancel_workflow_async(workflow_id)
-        nested = await _require_peer_seat().mailbox.cancel_open(workflow_id, _CANCEL_RETIRED)
-        await _cancel_callees(nested, _CANCEL_RETIRED)
+        for workflow_id in _attempt_workflow_ids(correlation_id, generation):
+            found = await DBOS.get_workflow_status_async(workflow_id)
+            if found is None:
+                continue
+            if found.status in _OPEN_STATUSES:
+                await DBOS.cancel_workflow_async(workflow_id)
+            elif found.status not in _DEAD_STATUSES:
+                continue  # finished with a result: history, left alone
+            nested = await _require_peer_seat().mailbox.cancel_open(workflow_id, _CANCEL_RETIRED)
+            await _cancel_callees(nested, _CANCEL_RETIRED)
 
     async def start(
         self,

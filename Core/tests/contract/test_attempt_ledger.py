@@ -109,3 +109,24 @@ class TestPostgresAttemptLedger(AttemptLedgerConformance):
         await ledger.park("wf")
         await ledger.resume("wf")
         await ledger.forget("wf")
+
+
+class TestLedgerUnderPoolSaturation:
+    """C1k (R3-002): the ledger shares `domain_pool` with the request path. Behind a saturated
+    pool it must give up in a moment (the workflow body then fails open), not wait out the pool's
+    default 30 s checkout timeout at every workflow entry."""
+
+    async def test_a_saturated_pool_makes_the_ledger_fail_fast(self, pg_conninfo: str) -> None:
+        import time
+
+        from agent_core.composition import attempt_ledger_for
+
+        with ConnectionPool(pg_conninfo, min_size=1, max_size=1, timeout=30) as pool:
+            with pool.connection():  # the only connection is busy with somebody else
+                ledger = attempt_ledger_for(pool)
+                started = time.monotonic()
+                with pytest.raises(Exception, match="(?i)timeout|couldn't get a connection"):
+                    await ledger.begin("wf")
+                elapsed = time.monotonic() - started
+
+        assert elapsed < 5, f"waited {elapsed:.1f}s for a connection"

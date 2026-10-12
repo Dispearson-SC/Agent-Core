@@ -798,6 +798,7 @@ def run_peer_worker_process(arguments: argparse.Namespace) -> None:
                 wake=signal_peer_answer,
                 idle_seconds=arguments.poll,
                 lease=timedelta(seconds=container.settings.peer_lease_seconds),
+                max_redeliveries=container.settings.peer_max_redeliveries,
             )
         )
     except KeyboardInterrupt:

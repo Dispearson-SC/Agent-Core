@@ -15,9 +15,10 @@ collected and resumed once, so a turn suspended on a person under `.3` is strand
 under `.4` is stranded and the new build does not know its name, see "Deploying the UUID peer
 workflow ids". Peer asks in
 flight on `.2` are stranded too: `stranded-turns` lists them, and
-their mailbox rows stay `delivered` until the lease reclaims them: since D32 the lease treats a
-workflow left open under another version as absent, cancels it and reruns the ask under the new
-build, see "Peer redelivery lease").
+their mailbox rows stay `delivered` until the lease reclaims them: with
+`AGENT_CORE_RETIRE_OTHER_VERSIONS=true` (D33) the lease treats a workflow left open under another
+version as absent, cancels it and reruns the ask under the new build; by default it leaves it alone,
+see "Peer redelivery lease").
 
 DBOS recovers a PENDING workflow only when its row names the version the recovering process
 claims. After a bump, a turn that was suspended under the old version (waiting for a person or
@@ -84,17 +85,18 @@ PY
 Before deploying `.5`, DRAIN peer asks: no `delivered` row of `peer_messages` should be unanswered
 (`SELECT correlation_id FROM peer_messages WHERE state = 'delivered';` empty). A `.4` callee still open
 under `.4` is stranded like any other stale-version workflow (`stranded-turns` lists it, cancel it
-as above); its row is NOT recognised by the lease, which only looks for the new-scheme id, so the
-lease would requeue the ask as generation + 1 and rerun the callee from the start. Cancelling the
-old `peer-<id>` workflow first avoids a duplicate run of side-effecting tools.
+as above). Since D34 the lease also looks for the old `peer-<id>[-r<n>]` name of each attempt: a `.4`
+callee still open is left alone by default and cancelled/rerun only with
+`AGENT_CORE_RETIRE_OTHER_VERSIONS=true`. Draining first (or cancelling the old workflow) still avoids
+a duplicate run of side-effecting tools.
 
 Migration `0029` (`peer_messages.turn_id` TEXT) stays: it is shipped, harmless, and still lets a
 non-UUID asking turn id be recorded. It is no longer REQUIRED by the peer workflow ids.
 
 ## Peer redelivery lease
 
-The peer worker claims an ask (`delivered`) and then enqueues the DBOS workflow
-the callee workflow of the ask (`peer_workflow_id`). If the worker dies between the two, nothing runs the ask. Every worker
+The peer worker claims an ask (`delivered`) and then enqueues the callee workflow of the ask
+(`peer_workflow_id`). If the worker dies between the two, nothing runs the ask. Every worker
 pass therefore puts back asks that are `delivered`, unanswered, older than the lease and whose
 workflow does not exist (D31, C3).
 
@@ -118,6 +120,16 @@ workflow does not exist (D31, C3).
   This needs the lease to be on (`AGENT_CORE_PEER_LEASE_SECONDS`, on by default) and a worker
   running under the NEW build; asks whose asker is also stranded still get their answer recorded
   on the row, but the asking workflow will not wake, so `stranded-turns` remains the check for it.
+
+- **Rerun cap** (D34, C1k): `AGENT_CORE_PEER_MAX_REDELIVERIES`, default `3`, `0` = never rerun. A
+  callee that keeps ending in `ERROR` or `CANCELLED` is "absent" to the lease and would be
+  requeued every lease for ever (its poison budget restarts with each new workflow id). Once
+  `redeliveries` exceeds the cap, the next claim closes the ask with the fixed failure answer, wakes
+  the asker, and the worker prints `[peer] <agent> <id> abandoned`.
+- **`.4` workflow names** (D34): during the `.4` -> `.5` rollout the lease, `retire` and the cancel
+  cascade also look for the old `peer-<id>` / `peer-<id>-r<n>` workflow of each attempt, so a callee
+  still running under a live `.4` executor is not mistaken for absent. Same rules as any other
+  version: left alone unless the flag below is on.
 
 ### Rolling deploys: `AGENT_CORE_RETIRE_OTHER_VERSIONS` (D33)
 

@@ -1387,3 +1387,44 @@ the budget is enforced), and `composition` imports and re-exports it. Dead test 
 (harnesses). The callee-budget test's `drive(launch_drop)` is now three named phases
 (`first_process`, `second_process`, `third_process`) like the restart tests.
 
+
+## D34 · Agent-comms v2: slice 9 advisories (C1k)
+
+Non-blocking advisories of the slice 9 review. No step name, step order or workflow id of an
+in-flight workflow changed, so the pinned application version stays `agent-core-turns.5`.
+
+**C1k.1 · the lease and the cascade still see `.4` workflow names (R3-001/R4-001).** The uuid5
+rename (D33) made `DurablePeerTurnStarter.exists` look up only the new id, so a callee a live `.4`
+executor was still running (`peer-<corr>`, or `peer-<corr>-r<n>`) looked absent and the lease
+requeued its ask even with `AGENT_CORE_RETIRE_OTHER_VERSIONS` off: the gate D33 added was bypassed
+exactly during the rollout it protects. `legacy_peer_workflow_id` names the old spelling;
+`exists` asks the attempt's current id first and then the legacy one, with the same rules (a
+workflow open under another version exists unless the flag is on; `CANCELLED`/`ERROR` are absent;
+`SUCCESS` exists). `retire` and the cancel cascade (`_peer_workflow_ids`) cover both spellings, and
+`cancel_open` is called with the legacy id too (the old callee's own asks were made under it).
+`legacy_peer_workflow_id` can be deleted once no `.4` workflow can exist.
+
+**C1k.2 · a callee that keeps failing is not rerun for ever (R4-002).** `exists` reads `ERROR` as
+absent (D33), and the poison budget is per workflow id, which changes with every generation, so a
+callee that fails deterministically was requeued each lease without end (`redeliveries` was
+uncapped). `AGENT_CORE_PEER_MAX_REDELIVERIES` (default 3, `0` = never rerun; a negative or
+non-numeric value stops startup) caps it. The cap is applied where the ask is claimed
+(`dispatch_next_ask(max_redeliveries=)`): a claim whose `redeliveries` exceeds the cap is closed
+with the fixed failure answer through the same `_answer_failed_ask` path as a failed start (the
+asker is woken) and reported as `AskDisposition.ABANDONED`. Chosen over capping inside
+`reclaim_stale` because the closing needs the row's answer token and asking turn, which the claim
+already carries, and the port stays unchanged; the price is one extra requeue-and-claim round trip
+for the last generation.
+
+**C1k.3 · the attempt ledger fails open quickly (R3-002).** It borrows `domain_pool`, whose
+checkout timeout is 30 s, at every workflow entry. `PoolConnections` gained an optional
+`timeout` and `attempt_ledger_for(pool)` builds the ledger with
+`ATTEMPT_LEDGER_CHECKOUT_TIMEOUT_SECONDS = 1.0`: behind a saturated pool the call raises within a
+second and the workflow body runs uncounted (C5, unchanged). A dedicated pool was rejected: one
+more pool per process for a statement per entry.
+
+**C1k.4 · tidy.** `retire` uses an early `continue` on a positive condition instead of the double
+negation; OPERATIONS.md no longer says the lease always retires other-version workflows (it is
+gated by D33) and its duplicated/garbled sentence about the workflow is fixed; the test
+`test_peer_durable_callee_postgres.py` lost its dead `seen["peer_status"]`/`seen["report"]` and
+opens the pools and DBOS inside the `try`, so a failed set-up still cleans up.

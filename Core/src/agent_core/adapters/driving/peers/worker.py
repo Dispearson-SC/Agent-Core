@@ -207,6 +207,8 @@ class AskDisposition(StrEnum):
     ANSWERED  - B finished and its answer is on the row A is waiting on.
     SUSPENDED - B is waiting on a human or another agent. Nothing was recorded; see WHAT
                 HAPPENS TO A CLAIM WHOSE TURN SUSPENDS in the module docstring.
+    ABANDONED - the ask was redelivered more often than the cap allows (C1k): it was closed with
+                the fixed failure answer and the asker woken, and no workflow was started.
     REFUSED   - B finished, but the row refused its answer: the asker cancelled the ask while B
                 ran (C4), or the token did not match (C1c). Nothing was written and nobody was
                 woken; the worker carries on (`answer_next_ask`, C1h).
@@ -221,6 +223,7 @@ class AskDisposition(StrEnum):
     ANSWERED = "answered"
     SUSPENDED = "suspended"
     REFUSED = "refused"
+    ABANDONED = "abandoned"
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,6 +526,7 @@ async def dispatch_next_ask(
     target: AgentId,
     wake: PeerAnswerSignal | None = None,
     mint_session: Callable[[TenantId, SessionRef], SessionRef] | None = None,
+    max_redeliveries: int | None = None,
 ) -> PeerTurnReport | None:
     """Claim one ask for `target` and hand its turn to a DURABLE workflow. C1 / D29.
 
@@ -539,12 +543,31 @@ async def dispatch_next_ask(
     A crash BETWEEN the claim and the start is the remaining window: the row is `delivered`
     and nothing runs. The deterministic workflow id makes a retry safe; the redelivery lease
     that performs it is C3.
+
+    `max_redeliveries` (C1k, R4-002) bounds the reruns. The lease treats a workflow that ended in
+    ERROR or CANCELLED as absent, and the poison budget restarts per workflow id, so a callee that
+    fails deterministically would otherwise be requeued every lease for ever. A claim whose
+    `redeliveries` exceeds the cap is closed with the fixed failure answer and the asker woken
+    (`AskDisposition.ABANDONED`) instead of starting another generation. `None` is unbounded.
     """
     if mint_session is not None:
         _check_minter_arity(mint_session)
     ask = await queue.claim_next(target)
     if ask is None:
         return None
+    if max_redeliveries is not None and ask.redeliveries > max_redeliveries:
+        logger.warning(
+            "peer ask %s was redelivered %d times (cap %d); closing it with the failure answer",
+            ask.correlation_id,
+            ask.redeliveries,
+            max_redeliveries,
+        )
+        await _answer_failed_ask(queue, ask, wake)
+        return PeerTurnReport(
+            correlation_id=ask.correlation_id,
+            target=ask.target,
+            disposition=AskDisposition.ABANDONED,
+        )
     try:
         session = _session_for(ask, mint_session)
         await starter.start(
@@ -738,6 +761,7 @@ async def run_peer_worker(
     keep_going: Callable[[], bool] = _forever,
     write_line: Callable[[str], None] = print,
     lease: timedelta | None = None,
+    max_redeliveries: int | None = None,
 ) -> None:
     """Drain the peer queues until told to stop. One ask per target per pass.
 
@@ -763,6 +787,7 @@ async def run_peer_worker(
     target, deliveries older than the lease whose callee workflow does not exist are put
     back on the queue (`StaleReclaimer.reclaim_stale`, asking `starter.exists`), so a claim whose
     worker died before the start is picked up again instead of waiting for the asker's timeout.
+    `max_redeliveries` caps how often (C1k): see `dispatch_next_ask`.
     """
     ordered = tuple(sorted(targets))
     if lease is not None:
@@ -783,7 +808,9 @@ async def run_peer_worker(
                     handled = True
                     write_line(f"[peer] {target} reclaimed {reclaimed}")
             if isinstance(runner, PeerTurnStarter):
-                report = await dispatch_next_ask(queue, runner, target=target, wake=wake)
+                report = await dispatch_next_ask(
+                    queue, runner, target=target, wake=wake, max_redeliveries=max_redeliveries
+                )
             else:
                 report = await answer_next_ask(queue, runner, target=target, wake=wake)
             if report is None:

@@ -254,12 +254,15 @@ from agent_core.ports.transcript_reader import TranscriptReader
 __all__ = [
     "DEFAULT_MAX_TURN_ATTEMPTS",
     "DEFAULT_PEER_LEASE_SECONDS",
+    "DEFAULT_PEER_MAX_REDELIVERIES",
     "PINNED_DBOS_APPLICATION_VERSION",
     "TOOL_PACKAGES",
     "Container",
     "DbosConfig",
     "MissingDatabaseError",
+    "ATTEMPT_LEDGER_CHECKOUT_TIMEOUT_SECONDS",
     "PoolConnections",
+    "attempt_ledger_for",
     "PoolFactory",
     "PullModeChannel",
     "Settings",
@@ -483,6 +486,8 @@ PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.5"
 
 # C3 (D31). Default of `Settings.peer_lease_seconds`: five minutes.
 DEFAULT_PEER_LEASE_SECONDS: Final[int] = 300
+# C1k (D34). Default of `Settings.peer_max_redeliveries`: three reruns of one ask.
+DEFAULT_PEER_MAX_REDELIVERIES: Final[int] = 3
 
 # The DBOS application name. It is hashed into the default version and, more importantly,
 # it is a predicate of the recovery query itself (`_sys_db.get_pending_workflows` filters
@@ -598,6 +603,12 @@ class Settings:
     # worker needs between its claim and the workflow enqueue, short enough that a lost claim
     # is retried before the asker's usual reply timeout (an hour).
     peer_lease_seconds: int = DEFAULT_PEER_LEASE_SECONDS
+    # C1k (D34). How many times the lease may put ONE ask back on the queue. Past it the worker
+    # closes the ask with the failure answer and wakes the asker: a callee that fails
+    # deterministically (its workflow ends ERROR, which the lease reads as absent) would
+    # otherwise be rerun every lease for ever. `AGENT_CORE_PEER_MAX_REDELIVERIES`, default 3;
+    # 0 means an ask is never rerun.
+    peer_max_redeliveries: int = DEFAULT_PEER_MAX_REDELIVERIES
     # C5 (D32). How many times in a row a turn or peer workflow may be entered without getting
     # past the same point before it is failed instead of retried again: the poison-turn budget.
     # `AGENT_CORE_MAX_TURN_ATTEMPTS`, default 10.
@@ -674,6 +685,9 @@ class Settings:
             # for reading `TELEGRAM_BOT` rather than inventing an `AGENT_CORE_` name.
             dbos_conductor_key=env.get("DBOS_CONDUCTOR_KEY"),
             peer_lease_seconds=_parse_lease_seconds(env.get("AGENT_CORE_PEER_LEASE_SECONDS")),
+            peer_max_redeliveries=_parse_max_redeliveries(
+                env.get("AGENT_CORE_PEER_MAX_REDELIVERIES")
+            ),
             max_turn_attempts=_parse_max_turn_attempts(env.get("AGENT_CORE_MAX_TURN_ATTEMPTS")),
             retire_other_versions=_parse_flag(
                 "AGENT_CORE_RETIRE_OTHER_VERSIONS", env.get("AGENT_CORE_RETIRE_OTHER_VERSIONS")
@@ -707,6 +721,21 @@ def _parse_lease_seconds(raw: str | None) -> int:
             f"got {raw!r}"
         )
     return seconds
+
+
+def _parse_max_redeliveries(raw: str | None) -> int:
+    """`AGENT_CORE_PEER_MAX_REDELIVERIES` as a non-negative integer; unset means the default."""
+    if raw is None:
+        return DEFAULT_PEER_MAX_REDELIVERIES
+    try:
+        cap = int(raw)
+    except ValueError:
+        cap = -1
+    if cap < 0:
+        raise ValueError(
+            f"AGENT_CORE_PEER_MAX_REDELIVERIES must be a non-negative whole number, got {raw!r}"
+        )
+    return cap
 
 
 def _parse_max_turn_attempts(raw: str | None) -> int:
@@ -816,9 +845,26 @@ class PoolConnections:
     """
 
     pool: Any
+    # Seconds to wait for a free connection; `None` keeps the pool's own default (30 s).
+    timeout: float | None = None
 
     def __call__(self) -> AbstractContextManager[Any]:
-        return self.pool.connection()  # type: ignore[no-any-return]
+        if self.timeout is None:
+            return self.pool.connection()  # type: ignore[no-any-return]
+        return self.pool.connection(timeout=self.timeout)  # type: ignore[no-any-return]
+
+
+# C1k (D34, R3-002). The attempt ledger shares `domain_pool` with the request path and is called at
+# every workflow entry. Behind a saturated pool it must give up quickly (the workflow body then
+# fails open, C5) instead of waiting out the pool's default checkout timeout each time.
+ATTEMPT_LEDGER_CHECKOUT_TIMEOUT_SECONDS: Final[float] = 1.0
+
+
+def attempt_ledger_for(pool: Any) -> PgAttemptLedger:
+    """The workflow attempt ledger over `pool`, with a short checkout timeout."""
+    return PgAttemptLedger(
+        PoolConnections(pool, timeout=ATTEMPT_LEDGER_CHECKOUT_TIMEOUT_SECONDS)
+    )
 
 
 # Injectable so the wiring can be exercised without a database. Production passes
@@ -1658,7 +1704,7 @@ def bind_turn_workflow(container: Container) -> None:
             peers=PeerSeat(mailbox=container.mailbox, profiles=container.profiles),
             # C5. The poison-turn budget: the ledger lives in the application database, and the
             # limit is `Settings.max_turn_attempts`.
-            attempts=PgAttemptLedger(PoolConnections(container.domain_pool)),
+            attempts=attempt_ledger_for(container.domain_pool),
             max_attempts=container.settings.max_turn_attempts,
         )
     )

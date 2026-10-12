@@ -616,3 +616,29 @@ def test_composition_is_the_file_that_imports_the_concrete_adapters() -> None:
         "composition.py imports no concrete adapter. It is the ONE legitimate importer "
         "of adapters/ (docs/TASKS.md#t-f0-02); an empty one makes the layer rule vacuous."
     )
+
+
+# --- C1k (R3-002): the attempt ledger must not wait out the pool's checkout timeout ------------
+
+
+def test_the_attempt_ledger_checks_out_with_a_short_timeout() -> None:
+    from contextlib import nullcontext
+
+    from agent_core.composition import (
+        ATTEMPT_LEDGER_CHECKOUT_TIMEOUT_SECONDS,
+        attempt_ledger_for,
+    )
+
+    seen: list[object] = []
+
+    class _Pool:
+        def connection(self, timeout: float | None = None) -> object:
+            seen.append(timeout)
+            return nullcontext(None)
+
+    ledger = attempt_ledger_for(_Pool())
+    with ledger._connect():  # type: ignore[attr-defined]
+        pass
+
+    assert seen == [ATTEMPT_LEDGER_CHECKOUT_TIMEOUT_SECONDS]
+    assert 0 < ATTEMPT_LEDGER_CHECKOUT_TIMEOUT_SECONDS <= 2

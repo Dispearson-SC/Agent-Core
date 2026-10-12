@@ -137,7 +137,6 @@ def test_a_durable_callee_persists_its_turn_and_answers_the_asker(
         "MINIMAX_API_KEY": "placeholder-this-run-calls-no-provider",
     }.items():
         monkeypatch.setenv(name, value)
-    _drop()
     tenant = TenantId("t-c1i")
     request = TurnRequest(
         session=SessionRef(session_id=SessionId("s-c1i"), tenant_id=tenant),
@@ -148,13 +147,10 @@ def test_a_durable_callee_persists_its_turn_and_answers_the_asker(
         input=UserInput(text="was this customer charged twice?"),
     )
     asking = TurnId(str(uuid.uuid4()))
-    container = asyncio.run(composition.start_container())
-    container.domain_pool.open()
-    container.audit_pool.open()
-    launch_dbos(container)
     seen: dict[str, Any] = {}
+    container: composition.Container | None = None
 
-    async def drive() -> None:
+    async def drive(container: composition.Container) -> None:
         queue = container.mailbox
         assert isinstance(queue, peer_worker.PeerQueue)
         handle = await turn_workflow.enqueue_turn(request, turn_id=asking)
@@ -169,22 +165,29 @@ def test_a_durable_callee_persists_its_turn_and_answers_the_asker(
                 wake=turn_workflow.signal_peer_answer,
             )
             await asyncio.sleep(0.05)
-        seen["report"] = report
+        assert report is not None, "the ask was never claimed"
         seen["outcome"] = await asyncio.wait_for(handle.get_result(), _DEADLINE)
 
+    # Everything that opens a resource is inside the `try`, so a failure in the middle of the
+    # set-up still destroys DBOS, closes the pools and drops the databases (C1k).
     try:
-        asyncio.run(drive())
+        _drop()
+        container = asyncio.run(composition.start_container())
+        container.domain_pool.open()
+        container.audit_pool.open()
+        launch_dbos(container)
+        asyncio.run(drive(container))
         with psycopg.connect(app) as conn:
             seen["turns"] = [str(r[0]) for r in conn.execute("SELECT turn_id FROM turns")]
             seen["audit"] = conn.execute(
                 "SELECT count(*) FROM audit_tool_calls WHERE caller = 'peer-agent'"
             ).fetchone()
             seen["state"] = conn.execute("SELECT state FROM peer_messages").fetchall()
-        seen["peer_status"] = None
     finally:
         DBOS.destroy()
-        container.audit_pool.close()
-        container.domain_pool.close()
+        if container is not None:
+            container.audit_pool.close()
+            container.domain_pool.close()
         _drop()
 
     assert seen["outcome"].result.text == "billing says: no double charge"
