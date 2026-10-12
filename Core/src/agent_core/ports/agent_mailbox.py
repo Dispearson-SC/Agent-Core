@@ -115,9 +115,19 @@ class AgentMailbox(Protocol):
         ...
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         """Deliver an answer back. The adapter signals the waiting workflow.
+
+        `failed` (C1l) says the text is OUR fixed failure sentence for a callee that raised or was
+        closed, not something the peer wrote. It is stored with the answer and read back by
+        `answer_failed`; the asker's `<peer status>` comes from that flag, never from comparing the
+        text, so a peer that writes the same sentence cannot pass as a failure.
 
         Idempotent per correlation id: a retried delivery must not resume a turn twice.
 
@@ -159,6 +169,15 @@ class AgentMailbox(Protocol):
         already gave up on (an adapter may return the same handle for a repeat; the shipped ones
         do not since C13) tell a dead ask from a live one without waiting for a reply that
         cannot come."""
+        ...
+
+    async def answer_failed(self, correlation_id: str) -> bool:
+        """Whether the stored answer was recorded as a callee FAILURE (`answer(failed=True)`, C1l).
+
+        False for an ordinary answer, an unanswered ask and an unknown id. The outcome is data on
+        the row (or, over A2A, the task's own `failed` state), so no reader has to recognise our
+        fixed sentences in text a peer could also have written.
+        """
         ...
 
     async def redeliveries(self, correlation_id: str) -> int:

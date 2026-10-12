@@ -105,7 +105,7 @@ class A2AAgentMailbox:
     Postgres adapter there is no synchronous driver to push into `asyncio.to_thread`.
     """
 
-    __slots__ = ("_answers", "_cancelled", "_client", "_tokens", "_turns")
+    __slots__ = ("_answers", "_cancelled", "_client", "_failed", "_tokens", "_turns")
 
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._client = client
@@ -122,6 +122,8 @@ class A2AAgentMailbox:
         # then a cancelled ask refuses a late `answer` here and the peer is not told.
         self._turns: dict[str, str] = {}
         self._cancelled: set[str] = set()
+        # C1l. Correlation ids whose delivered answer was recorded as a callee failure.
+        self._failed: set[str] = set()
 
     async def discover(self, policy: PeerPolicy) -> tuple[AgentRef, ...]:
         """Refresh `policy.peers` from each reachable peer's live agent card.
@@ -232,9 +234,17 @@ class A2AAgentMailbox:
         return correlation_id
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         """Record a delivered answer against its correlation id. Idempotent.
+
+        `failed` (C1l) is kept beside the answer in process memory like the answers themselves, and
+        read back by `answer_failed`; the first delivery decides.
 
         C1c. The delivery must present the `answer_token` sent to the peer with the message
         (`metadata.answer_token`); otherwise `PeerAnswerRefusedError`. C1h: that refusal is for a
@@ -271,6 +281,11 @@ class A2AAgentMailbox:
         ):
             raise PeerAnswerRefusedError(correlation_id, "the answer token did not match")
         self._answers[correlation_id] = answer
+        if failed:
+            self._failed.add(correlation_id)
+
+    async def answer_failed(self, correlation_id: str) -> bool:
+        return correlation_id in self._failed
 
     async def cancel(self, correlation_id: str, reason: str) -> bool:
         """Mark an unanswered task cancelled (local only, see `_cancelled`). True if it was

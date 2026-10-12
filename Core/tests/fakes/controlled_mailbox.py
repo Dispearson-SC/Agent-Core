@@ -136,9 +136,18 @@ class ControlledMailbox:
         )
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
-        await self._invoke("answer", correlation_id, answer, answer_token=answer_token)
+        extra = {"failed": True} if failed else {}  # recorded only when set: older asserts hold
+        await self._invoke("answer", correlation_id, answer, answer_token=answer_token, **extra)
+
+    async def answer_failed(self, correlation_id: str) -> bool:
+        return await self._invoke("answer_failed", correlation_id)  # type: ignore[no-any-return]
 
     async def cancel(self, correlation_id: str, reason: str) -> bool:
         return await self._invoke("cancel", correlation_id, reason)  # type: ignore[no-any-return]
@@ -167,10 +176,12 @@ class ControlledMailbox:
         lease: timedelta,
         exists: Callable[[str, int], Awaitable[bool]],
         retire: Callable[[str, int], Awaitable[None]] | None = None,
+        failed: Callable[[str, int], Awaitable[bool]] | None = None,
         now: datetime | None = None,
     ) -> tuple[str, ...]:
+        extra = {} if failed is None else {"failed": failed}  # recorded only when given
         return await self._invoke(  # type: ignore[no-any-return]
-            "reclaim_stale", target, lease=lease, exists=exists, retire=retire, now=now
+            "reclaim_stale", target, lease=lease, exists=exists, retire=retire, now=now, **extra
         )
 
     # --- machinery -----------------------------------------------------------------------------

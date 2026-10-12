@@ -200,9 +200,17 @@ class _SilentMailbox:
         return "corr-1"
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         return None
+
+    async def answer_failed(self, correlation_id: str) -> bool:
+        return False
 
     async def read_answer(self, correlation_id: str) -> str | None:
         return None
@@ -284,6 +292,7 @@ def test_protocol_exposes_no_blocking_receive() -> None:
 
     assert members == [
         "answer",
+        "answer_failed",
         "ask",
         "cancel",
         "cancel_open",
@@ -325,7 +334,7 @@ def test_protocol_exposes_no_blocking_receive() -> None:
         "without waiting, and the wait would not be durable."
     )
 
-    assert _parameters("answer") == ["correlation_id", "answer", "answer_token"]
+    assert _parameters("answer") == ["correlation_id", "answer", "answer_token", "failed"]
     answer_hints = _hints("answer")
     assert answer_hints["correlation_id"] is str
     assert answer_hints["answer"] is str
@@ -473,6 +482,9 @@ def test_a_mailbox_that_cannot_read_an_answer_back_is_not_an_agent_mailbox(
 def _stub(*, read_answer: bool) -> str:
     """A standalone mailbox module, with or without the member under test."""
     redemption = """
+    async def answer_failed(self, correlation_id: str) -> bool:
+        return False
+
     async def read_answer(self, correlation_id: str) -> str | None:
         raise NotImplementedError
 """
@@ -503,7 +515,12 @@ class StubMailbox:
         raise NotImplementedError
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         raise NotImplementedError
 
@@ -596,9 +613,17 @@ class _RecordsWhoAsked:
         return f"corr-{len(self.askers)}"
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         return None
+
+    async def answer_failed(self, correlation_id: str) -> bool:
+        return False
 
     async def read_answer(self, correlation_id: str) -> str | None:
         return None

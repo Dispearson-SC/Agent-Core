@@ -319,9 +319,9 @@ _PEER_TIMED_OUT: Final[str] = (
     "The peer {target!r} did not answer within {seconds} seconds, so no answer is coming "
     "for this ask. Tell the person it is unavailable or carry on without it."
 )
-# The result for ONE ask that was already cancelled when it was asked again: the first copy
-# timed out (C4 cancelled its row and its callee), and the mailbox names the same row for a
-# word-for-word repeat. OUR text, not wrapped.
+# The result for ONE ask that was already cancelled when its handle came back: the first copy
+# timed out (C4 cancelled its row and its callee) and an adapter that folds repeats (none shipped
+# since C13) names the same row again. OUR text, not wrapped.
 _PEER_ASK_CANCELLED: Final[str] = (
     "The peer {target!r} ask was cancelled earlier because it did not answer in time, so no "
     "answer is coming for this repeat of it. Tell the person it is unavailable or carry on "
@@ -501,7 +501,7 @@ class PeerSeat:
     WHY THE ASK IS MINTED HERE AND NOT IN THE TOOL OR IN THE RUNNER
         `adapters/driven/tools/peers.py` names the choice and leaves it open: the
         correlation id must be minted AND persisted together, by the same INSERT that
-        makes the ask idempotent per `(turn_id, target, question)`, so the call site is
+        makes the ask idempotent (per request key since C13, D36), so the call site is
         "the runner or the workflow". It is the WORKFLOW, and the deciding reason is
         replay:
 
@@ -1176,16 +1176,19 @@ async def _read_wrapped_answer(correlation_id: str) -> str | None:
 async def _peer_envelope(correlation_id: str, request: TurnRequest, target: str) -> str | None:
     """A stored peer answer as the `<peer>` envelope, or None when none is stored (C8).
 
-    Reads through `_read_wrapped_answer` (the one reader), applies the ASKER's
-    `max_answer_chars`, and classifies the fixed failure sentences the workflow itself writes as
-    `error`. Both the normal redemption and the re-ask peek call this, so they cannot disagree.
+    Reads through `_read_wrapped_answer` (the one reader) and applies the ASKER's
+    `max_answer_chars`. The status comes from the row (`AgentMailbox.answer_failed`, C1l): the
+    workflow records a failed or closed callee as DATA beside the text, so the outcome is read
+    BEFORE the cap touches the text and a peer that writes our fixed sentence stays `ok`. Both the
+    normal redemption and the re-ask peek call this, so they cannot disagree.
     """
     wrapped = await _read_wrapped_answer(correlation_id)
     if wrapped is None:
         return None
+    mailbox = _require_peer_seat().mailbox
+    failed = await mailbox.answer_failed(correlation_id)
     cap = _asking_policy(_require_peer_seat(), request.profile_id).max_answer_chars
     capped = cap_wrapped_answer(wrapped, cap)
-    failed = capped.inner in {PEER_ASK_FAILED_ANSWER, PEER_ASK_CLOSED_ANSWER}
     return PeerResult(
         peer=target,
         status=PeerStatus.ERROR if failed else PeerStatus.OK,
@@ -1201,10 +1204,11 @@ async def _step_peek_peer_answer(
 ) -> str | None:
     """The wrapped answer already stored under a handle, or None. Read-only, no resume.
 
-    For a re-ask whose handle was given up on earlier (`timed_out`): the mailbox is
-    idempotent per (target, question), so the re-ask gets the same handle back, and the
-    reply may have landed - and its wake-up been skipped - before the re-ask was made.
-    Same payload as a received answer: see `_peer_envelope`.
+    For an ask whose handle was given up on earlier (`timed_out`) and that an adapter hands back
+    again (no shipped one does since C13, D36: a repeat in a later round is a fresh ask; a mailbox
+    that folds repeats, or a replayed round, can still do it). The reply may have landed - and its
+    wake-up been skipped - before the ask was made again. Same payload as a received answer: see
+    `_peer_envelope`.
     """
     return await _peer_envelope(correlation_id, request, target)
 
@@ -1400,7 +1404,10 @@ async def _settle_poisoned_peer(job: PeerTurnJob, turn_id: str, reason: str) -> 
         peers = _require_peer_seat()
         try:
             await peers.mailbox.answer(
-                job.correlation_id, PEER_ASK_FAILED_ANSWER, answer_token=job.answer_token
+                job.correlation_id,
+                PEER_ASK_FAILED_ANSWER,
+                answer_token=job.answer_token,
+                failed=True,
             )
         except PeerAnswerRefusedError as refused:
             _LOG.warning(
@@ -1550,8 +1557,9 @@ async def _collect_round(
     human_missing = {ask.tool_call_id for ask in asks if ask.kind is not PendingKind.DELEGATION}
     targets = {ask.tool_call_id: str(ask.arguments.get(_ASK_TARGET, "")) for ask in asks}
 
-    # RE-ASK AFTER A TIMEOUT. `AgentMailbox.ask` is idempotent per (target, question) and
-    # the port has no verb to close or version a row, so a word-for-word re-ask gets the
+    # A HANDLE GIVEN OUT AGAIN AFTER A TIMEOUT. Since C13 (D36) the shipped mailboxes name an ask
+    # by its request key (round and position), so a repeat in a later round is a fresh row. An
+    # adapter that still folds repeats per (target, question), or a replayed round, hands back the
     # handle it already gave out. That handle is no longer "given up on": its reply, late
     # or not, is exactly what this ask is waiting for. The reply may already be stored (its
     # wake-up consumed and skipped by an earlier round's wait), so it is read now rather
@@ -2083,7 +2091,7 @@ def _attempt_workflow_ids(correlation_id: str, generation: int) -> tuple[str, st
 
 @DBOS.step()
 async def _step_record_peer_reply(
-    correlation_id: str, text: str, answer_token: str | None = None
+    correlation_id: str, text: str, answer_token: str | None = None, failed: bool = False
 ) -> bool:
     """Write the callee's answer on the mailbox row the asker holds a handle to.
 
@@ -2094,16 +2102,21 @@ async def _step_record_peer_reply(
     (a wrong token, or the ask was cancelled, C4): nothing was written, so the caller must not
     wake the asker. A refusal is logged, not raised: failing this workflow would not change
     what the row decided, and a cancelled ask is an expected end.
+
+    `failed` records the callee's failure as DATA on the row (C1l): the asker's `<peer>` status
+    reads it back instead of comparing the text with our fixed sentences.
     """
     try:
-        await _require_peer_seat().mailbox.answer(correlation_id, text, answer_token=answer_token)
+        await _require_peer_seat().mailbox.answer(
+            correlation_id, text, answer_token=answer_token, failed=failed
+        )
     except PeerAnswerRefusedError as refused:
         _LOG.warning("peer ask %r refused the callee's answer: %s", correlation_id, refused.reason)
         return False
     return True
 
 
-async def _close_peer_ask(job: PeerTurnJob, text: str) -> None:
+async def _close_peer_ask(job: PeerTurnJob, text: str, *, failed: bool = False) -> None:
     """Record the answer, THEN wake the asker - the order is the contract (see
     `signal_peer_answer`). A workflow that dies between the two leaves a recorded answer and
     an unwoken asker; replay resumes at the signal because the record step is already logged.
@@ -2112,7 +2125,7 @@ async def _close_peer_ask(job: PeerTurnJob, text: str) -> None:
     this database) the send fails, and failing THIS workflow would not bring it back; the
     answer is on the row either way.
     """
-    if not await _step_record_peer_reply(job.correlation_id, text, job.answer_token):
+    if not await _step_record_peer_reply(job.correlation_id, text, job.answer_token, failed):
         return
     try:
         await signal_peer_answer(job.asking_turn_id, job.correlation_id)
@@ -2156,7 +2169,7 @@ async def run_peer_turn_workflow(job: PeerTurnJob) -> TurnOutcome:
         end = await _drive_turn(job.request)
     except Exception:
         _LOG.exception("peer turn for ask %r failed", job.correlation_id)
-        await _close_peer_ask(job, PEER_ASK_FAILED_ANSWER)
+        await _close_peer_ask(job, PEER_ASK_FAILED_ANSWER, failed=True)
         await _forget_attempts()
         raise
     result = end.outcome.result
@@ -2164,8 +2177,9 @@ async def run_peer_turn_workflow(job: PeerTurnJob) -> TurnOutcome:
     # expired waiting for a person), never a comparison with the sentinel sentences: a callee's
     # genuine answer may read the same.
     # `result is None` cannot happen for a finished turn (I2) and only narrows the type.
-    text = PEER_ASK_CLOSED_ANSWER if end.closed or result is None else result.text
-    await _close_peer_ask(job, text)
+    closed = end.closed or result is None
+    text = PEER_ASK_CLOSED_ANSWER if closed or result is None else result.text
+    await _close_peer_ask(job, text, failed=closed)
     await _forget_attempts()
     return end.outcome
 
@@ -2370,8 +2384,8 @@ async def signal_peer_answer(turn_id: TurnId, correlation_id: str) -> None:
         `signal_decision` uses - and the difference is which identifier is stable on THIS
         path. A human handle is re-issued when `_step_publish` is retried, so keying on it
         would let one call be resolved twice under two handles; a peer's correlation id is
-        the opposite, minted once per `(turn_id, target, question)` by the mailbox's own
-        UNIQUE constraint, and it is the only identifier the answering side has ever seen.
+        the opposite, derived once per ask from its request key (`peer_ask_id`, C2) and held by the
+        mailbox's primary key, and it is the only identifier the answering side has ever seen.
 
     It never waits for the turn: the worker has its own turn to finish, and a worker that
     blocked until the asking agent completed would serialise the two conversations that
@@ -2513,6 +2527,20 @@ class DurablePeerTurnStarter:
             and found.app_version != DBOS.application_version
         )
         return not stranded
+
+    async def failed(self, correlation_id: str, generation: int = 0) -> bool:
+        """Whether this generation's workflow ended in the CALLEE's failure (`ERROR`). C1l, D38.
+
+        The lease asks it for a generation it judged dead, before `retire` rewrites the status. A
+        workflow that never started, was retired by a deploy (`CANCELLED`) or is still open is
+        infrastructure, not a failing callee, so only `ERROR` counts toward the redelivery cap.
+        Both spellings of the id are consulted, like `exists`.
+        """
+        for workflow_id in _attempt_workflow_ids(correlation_id, generation):
+            found = await DBOS.get_workflow_status_async(workflow_id)
+            if found is not None:
+                return bool(found.status == "ERROR")
+        return False
 
     async def retire(self, correlation_id: str, generation: int = 0) -> None:
         """Cancel a stranded workflow of this generation and the asks it made. Idempotent.

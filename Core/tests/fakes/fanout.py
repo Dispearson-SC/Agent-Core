@@ -98,6 +98,7 @@ class Mailbox:
         self.turn_of: dict[str, str] = {}
         self.redelivered: dict[str, int] = {}  # correlation id -> redeliveries (the generation)
         self.answers: dict[str, str] = {}
+        self.failed: set[str] = set()  # correlation ids closed as a callee failure (C1l)
         # C13. The real mailboxes name an ask by its request key, so a repeat in a later round is
         # a fresh ask. `fold_repeats` keeps the old per-(target, question) folding for the tests of
         # the workflow's defence against an adapter that returns a handle it already gave out.
@@ -139,15 +140,27 @@ class Mailbox:
         return tuple(ids)
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         """The answering half, first answer wins like the real row. Logged in call order.
-        `refuse_answers` makes it refuse like the real row does for a forged or cancelled one."""
+        `refuse_answers` makes it refuse like the real row does for a forged or cancelled one.
+        `failed` is the outcome as DATA (C1l): the row records it beside the text."""
         self.answer_calls.append((correlation_id, answer))
         self.answer_tokens.append(answer_token)
         if self.refuse_answers or correlation_id in self.cancelled:
             raise PeerAnswerRefusedError(correlation_id)
-        self.answers.setdefault(correlation_id, answer)
+        if correlation_id not in self.answers:
+            self.answers[correlation_id] = answer
+            if failed:
+                self.failed.add(correlation_id)
+
+    async def answer_failed(self, correlation_id: str) -> bool:
+        return correlation_id in self.failed
 
     async def read_answer(self, correlation_id: str) -> str | None:
         raw = self.answers.get(correlation_id)
@@ -267,9 +280,11 @@ def ok(corr: str, text: str) -> str:
     ).render()
 
 
-def answer(corr: str, text: str) -> Callable[[World], Any]:
+def answer(corr: str, text: str, *, failed: bool = False) -> Callable[[World], Any]:
     def run(world: World) -> Any:
         world.mailbox.answers[corr] = text
+        if failed:
+            world.mailbox.failed.add(corr)
         return turn_workflow.PeerAnswer(turn_id=TurnId("turn-1"), correlation_id=corr)
 
     return run

@@ -258,7 +258,12 @@ class PeerQueue(Protocol):
     async def claim_next(self, target: AgentId) -> PeerAsk | None: ...
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None: ...
 
 
@@ -274,8 +279,19 @@ class StaleReclaimer(Protocol):
         lease: timedelta,
         exists: Callable[[str, int], Awaitable[bool]],
         retire: Callable[[str, int], Awaitable[None]] | None = None,
+        failed: Callable[[str, int], Awaitable[bool]] | None = None,
         now: datetime | None = None,
     ) -> tuple[str, ...]: ...
+
+
+@runtime_checkable
+class CalleeFailureProbe(Protocol):
+    """The starter's verdict on a dead generation: did the callee itself FAIL? (C1l)
+
+    Separate from `PeerTurnStarter` so a starter without one stays valid; the lease then counts no
+    failure, which can only make the redelivery cap more lenient, never abandon an ask early."""
+
+    async def failed(self, correlation_id: str, generation: int = 0) -> bool: ...
 
 
 class PeerTurnRunner(Protocol):
@@ -544,22 +560,26 @@ async def dispatch_next_ask(
     and nothing runs. The deterministic workflow id makes a retry safe; the redelivery lease
     that performs it is C3.
 
-    `max_redeliveries` (C1k, R4-002) bounds the reruns. The lease treats a workflow that ended in
-    ERROR or CANCELLED as absent, and the poison budget restarts per workflow id, so a callee that
-    fails deterministically would otherwise be requeued every lease for ever. A claim whose
-    `redeliveries` exceeds the cap is closed with the fixed failure answer and the asker woken
-    (`AskDisposition.ABANDONED`) instead of starting another generation. `None` is unbounded.
+    `max_redeliveries` (C1k, R4-002) bounds the reruns of a FAILING callee. The lease treats a
+    workflow that ended in ERROR or CANCELLED as absent, and the poison budget restarts per
+    workflow id, so a callee that fails deterministically would otherwise be requeued every lease
+    for ever. A claim whose `failures` exceeds the cap is closed with the fixed failure answer and
+    the asker woken (`AskDisposition.ABANDONED`) instead of starting another generation. Since C1l
+    (D38) only a callee FAILURE counts: a worker that died between claim and start, or a workflow
+    retired by a deploy, bumps the generation (`redeliveries`) but not `failures`, so
+    infrastructure cannot abandon an ask. `None` is unbounded.
     """
     if mint_session is not None:
         _check_minter_arity(mint_session)
     ask = await queue.claim_next(target)
     if ask is None:
         return None
-    if max_redeliveries is not None and ask.redeliveries > max_redeliveries:
+    if max_redeliveries is not None and ask.failures > max_redeliveries:
         logger.warning(
-            "peer ask %s was redelivered %d times (cap %d); closing it with the failure answer",
+            "peer ask %s was redelivered after %d callee failures (cap %d); closing it with the "
+            "failure answer",
             ask.correlation_id,
-            ask.redeliveries,
+            ask.failures,
             max_redeliveries,
         )
         await _answer_failed_ask(queue, ask, wake)
@@ -719,7 +739,7 @@ async def _answer_failed_ask(queue: PeerQueue, ask: PeerAsk, wake: PeerAnswerSig
     """
     try:
         await queue.answer(
-            ask.correlation_id, PEER_ASK_FAILED_ANSWER, answer_token=ask.answer_token
+            ask.correlation_id, PEER_ASK_FAILED_ANSWER, answer_token=ask.answer_token, failed=True
         )
         if wake is not None:
             await wake(ask.turn_id, ask.correlation_id)
@@ -803,7 +823,11 @@ async def run_peer_worker(
             if lease is not None and isinstance(runner, PeerTurnStarter):
                 assert isinstance(queue, StaleReclaimer)  # checked above, for the type checker
                 for reclaimed in await queue.reclaim_stale(
-                    target, lease=lease, exists=runner.exists, retire=runner.retire
+                    target,
+                    lease=lease,
+                    exists=runner.exists,
+                    retire=runner.retire,
+                    failed=runner.failed if isinstance(runner, CalleeFailureProbe) else None,
                 ):
                     handled = True
                     write_line(f"[peer] {target} reclaimed {reclaimed}")

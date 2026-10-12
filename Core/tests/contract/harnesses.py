@@ -64,8 +64,12 @@ class PgHarness:
                 (by, correlation_id),
             )
 
-    async def reclaim(self, exists: Any, retire: Any = None) -> tuple[str, ...]:
-        return await self.mailbox.reclaim_stale(TARGET, lease=LEASE, exists=exists, retire=retire)
+    async def reclaim(
+        self, exists: Any, retire: Any = None, failed: Any = None
+    ) -> tuple[str, ...]:
+        return await self.mailbox.reclaim_stale(
+            TARGET, lease=LEASE, exists=exists, retire=retire, failed=failed
+        )
 
     def redeliveries(self, correlation_id: str) -> int:
         with psycopg.connect(self._conninfo) as conn:
@@ -160,8 +164,12 @@ class MemoryHarness:
     async def age(self, correlation_id: str, by: timedelta) -> None:
         self.inner.age(correlation_id, by)
 
-    async def reclaim(self, exists: Any, retire: Any = None) -> tuple[str, ...]:
-        return await self.mailbox.reclaim_stale(TARGET, lease=LEASE, exists=exists, retire=retire)
+    async def reclaim(
+        self, exists: Any, retire: Any = None, failed: Any = None
+    ) -> tuple[str, ...]:
+        return await self.mailbox.reclaim_stale(
+            TARGET, lease=LEASE, exists=exists, retire=retire, failed=failed
+        )
 
     def redeliveries(self, correlation_id: str) -> int:
         return int(self.inner.rows[correlation_id].redeliveries)

@@ -507,9 +507,17 @@ class _RecordingMailbox:
         return f"corr-{len(self.asks)}"
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         self._answers.setdefault(correlation_id, answer)
+
+    async def answer_failed(self, correlation_id: str) -> bool:
+        return False
 
     async def read_answer(self, correlation_id: str) -> str | None:
         raw = self._answers.get(correlation_id)

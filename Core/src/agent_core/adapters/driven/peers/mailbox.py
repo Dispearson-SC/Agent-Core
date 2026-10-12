@@ -189,7 +189,7 @@ _CLAIM_SQL = """
         LIMIT 1
     )
     RETURNING correlation_id, target_agent_id, from_session_id, from_tenant_id,
-              turn_id, hop, question, from_agent_id, answer_token, redeliveries
+              turn_id, hop, question, from_agent_id, answer_token, redeliveries, callee_failures
 """
 
 # `answered_at IS NULL` is the idempotency guard and it lives in the WHERE clause rather
@@ -202,7 +202,7 @@ _CLAIM_SQL = """
 # nothing). The guard is in the WHERE clause for the same race reason as `answered_at`.
 _ANSWER_SQL = """
     UPDATE peer_messages
-    SET answer = %s, state = 'answered', answered_at = now()
+    SET answer = %s, answer_failed = %s, state = 'answered', answered_at = now()
     WHERE correlation_id = %s AND answered_at IS NULL AND state <> 'cancelled'
       AND answer_token IS NOT DISTINCT FROM %s
 """
@@ -232,6 +232,9 @@ _CANCEL_OPEN_SQL = """
 
 _IS_CANCELLED_SQL = "SELECT state = 'cancelled' FROM peer_messages WHERE correlation_id = %s"
 _REDELIVERIES_SQL = "SELECT redeliveries FROM peer_messages WHERE correlation_id = %s"
+_ANSWER_FAILED_SQL = (
+    "SELECT answer_failed FROM peer_messages WHERE correlation_id = %s AND answered_at IS NOT NULL"
+)
 
 # C3. Candidates: delivered, unanswered, past the lease (`delivered_at + lease < now`). The
 # database's clock decides unless a test passes `now`. Oldest first, bounded so one pass never
@@ -253,7 +256,8 @@ _STALE_SQL = """
 # stale verdict.
 _REQUEUE_SQL = """
     UPDATE peer_messages
-    SET state = 'queued', delivered_at = NULL, redeliveries = redeliveries + 1
+    SET state = 'queued', delivered_at = NULL, redeliveries = redeliveries + 1,
+        callee_failures = callee_failures + %s
     WHERE correlation_id = %s AND redeliveries = %s AND state = 'delivered'
       AND answered_at IS NULL
       AND delivered_at < COALESCE(%s::timestamptz, now()) - %s
@@ -304,6 +308,10 @@ class PeerAsk:
     # C1g. How many times the lease put this ask back on the queue. It is the GENERATION of the
     # callee workflow: generation n runs `peer_workflow_id(<id>, n)`.
     redeliveries: int = 0
+    # C1l. How many of those requeues followed a callee that FAILED (a workflow that ended in
+    # ERROR). The redelivery cap counts these only: a worker crash or a retire during a deploy is
+    # infrastructure, and must not abandon the ask.
+    failures: int = 0
 
 
 def wrap_peer_answer(answer: str) -> str:
@@ -502,6 +510,7 @@ class PgAgentMailbox:
             asker=None if row[7] is None else AgentId(str(row[7])),
             answer_token=None if row[8] is None else str(row[8]),
             redeliveries=int(row[9]),
+            failures=int(row[10]),
         )
 
     async def reclaim_stale(
@@ -511,6 +520,7 @@ class PgAgentMailbox:
         lease: timedelta,
         exists: Callable[[str, int], Awaitable[bool]],
         retire: Callable[[str, int], Awaitable[None]] | None = None,
+        failed: Callable[[str, int], Awaitable[bool]] | None = None,
         now: datetime | None = None,
     ) -> tuple[str, ...]:
         """Put delivered-but-unanswered asks of `target` back on the queue. C3, C1g / D31, D32.
@@ -531,6 +541,13 @@ class PgAgentMailbox:
         Redelivery is safe either way: the new generation has a new workflow id, and the old one
         is cancelled.
 
+        `failed(correlation_id, generation)`, when given, is asked for a row judged dead, BEFORE
+        `retire` clears the evidence, and says whether that generation's workflow ended in a callee
+        FAILURE. Only then does the requeue add to the row's `callee_failures` (C1l): the
+        redelivery cap counts failures, not the worker crashes and deploy retirements that also
+        end a generation. Without it nothing is counted as a failure. A `failed` that raises
+        leaves the row alone like the other callbacks.
+
         Both callbacks are asked per candidate, outside any database transaction. If `exists`
         raises the answer is UNKNOWN and the row is left alone (unknown is not "does not exist").
         The requeue is one guarded UPDATE, so concurrent reclaimers cannot both win the same row.
@@ -543,6 +560,7 @@ class PgAgentMailbox:
             try:
                 if await exists(correlation_id, generation):
                     continue
+                callee_failed = failed is not None and await failed(correlation_id, generation)
                 if retire is not None:
                     await retire(correlation_id, generation)
             except Exception:
@@ -554,7 +572,9 @@ class PgAgentMailbox:
                     exc_info=True,
                 )
                 continue
-            if await asyncio.to_thread(self._requeue_sync, correlation_id, generation, lease, now):
+            if await asyncio.to_thread(
+                self._requeue_sync, correlation_id, generation, lease, now, callee_failed
+            ):
                 reclaimed.append(correlation_id)
         return tuple(reclaimed)
 
@@ -566,16 +586,32 @@ class PgAgentMailbox:
         return [(str(row[0]), int(row[1])) for row in rows]
 
     def _requeue_sync(
-        self, correlation_id: str, generation: int, lease: timedelta, now: datetime | None
+        self,
+        correlation_id: str,
+        generation: int,
+        lease: timedelta,
+        now: datetime | None,
+        callee_failed: bool,
     ) -> bool:
         with psycopg.connect(self._conninfo, autocommit=True) as conn:
-            row = conn.execute(_REQUEUE_SQL, (correlation_id, generation, now, lease)).fetchone()
+            row = conn.execute(
+                _REQUEUE_SQL, (int(callee_failed), correlation_id, generation, now, lease)
+            ).fetchone()
         return row is not None
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         """Record the peer's answer against its correlation id. Idempotent.
+
+        `failed` stores the outcome beside the text (C1l): the row says whether this is OUR fixed
+        failure sentence, and `answer_failed` reads it back. It is part of the first answer, like
+        the text: a retry cannot flip it.
 
         REQUIRES THE ROW'S `answer_token` (C1c). The correlation id is derived and so is an
         address, not a credential; a delivery without the token minted for this ask raises
@@ -593,11 +629,13 @@ class PgAgentMailbox:
         Recording is all this does. Waking the workflow is `DBOS.send()`, in the workflow
         layer - see NO WAITING HAPPENS HERE at the top of this module.
         """
-        await asyncio.to_thread(self._answer_sync, correlation_id, answer, answer_token)
+        await asyncio.to_thread(self._answer_sync, correlation_id, answer, answer_token, failed)
 
-    def _answer_sync(self, correlation_id: str, answer: str, answer_token: str | None) -> None:
+    def _answer_sync(
+        self, correlation_id: str, answer: str, answer_token: str | None, failed: bool
+    ) -> None:
         with psycopg.connect(self._conninfo, autocommit=True) as conn:
-            cursor = conn.execute(_ANSWER_SQL, (answer, correlation_id, answer_token))
+            cursor = conn.execute(_ANSWER_SQL, (answer, failed, correlation_id, answer_token))
             if cursor.rowcount == 1:
                 return
             row = conn.execute(_ANSWER_STATE_SQL, (correlation_id,)).fetchone()
@@ -634,6 +672,15 @@ class PgAgentMailbox:
     def _is_cancelled_sync(self, correlation_id: str) -> bool:
         with psycopg.connect(self._conninfo) as conn:
             row = conn.execute(_IS_CANCELLED_SQL, (correlation_id,)).fetchone()
+        return row is not None and bool(row[0])
+
+    async def answer_failed(self, correlation_id: str) -> bool:
+        """Whether the stored answer was recorded as a callee failure (C1l). See the port."""
+        return await asyncio.to_thread(self._answer_failed_sync, correlation_id)
+
+    def _answer_failed_sync(self, correlation_id: str) -> bool:
+        with psycopg.connect(self._conninfo) as conn:
+            row = conn.execute(_ANSWER_FAILED_SQL, (correlation_id,)).fetchone()
         return row is not None and bool(row[0])
 
     async def redeliveries(self, correlation_id: str) -> int:

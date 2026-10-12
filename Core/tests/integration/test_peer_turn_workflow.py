@@ -118,6 +118,7 @@ class _Mailbox:
     answers: dict[str, str] = field(default_factory=dict)
     answer_calls: list[tuple[str, str]] = field(default_factory=list)
     cancelled: dict[str, str] = field(default_factory=dict)
+    failed: set[str] = field(default_factory=set)
 
     async def cancel(self, correlation_id: str, reason: str) -> bool:
         if correlation_id in self.answers or correlation_id in self.cancelled:
@@ -184,12 +185,22 @@ class _Mailbox:
         self.queued.append(corr)
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         self.answer_calls.append((correlation_id, answer))
         if correlation_id in self.cancelled:
             raise PeerAnswerRefusedError(correlation_id, "the ask was cancelled")
+        if correlation_id not in self.answers and failed:
+            self.failed.add(correlation_id)
         self.answers.setdefault(correlation_id, answer)
+
+    async def answer_failed(self, correlation_id: str) -> bool:
+        return correlation_id in self.failed
 
     async def read_answer(self, correlation_id: str) -> str | None:
         raw = self.answers.get(correlation_id)

@@ -44,6 +44,8 @@ class _Row:
     answer: str | None = None
     delivered_at: datetime | None = None
     redeliveries: int = 0
+    failures: int = 0
+    answer_failed: bool = False
     cancel_reason: str | None = None
 
 
@@ -97,7 +99,12 @@ class InMemoryAgentMailbox:
         return correlation_id
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         row = self.rows.get(correlation_id)
         if row is None or row.state == "answered":
@@ -109,7 +116,12 @@ class InMemoryAgentMailbox:
         ):
             raise PeerAnswerRefusedError(correlation_id, "the answer token did not match")
         row.answer = answer
+        row.answer_failed = failed
         row.state = "answered"
+
+    async def answer_failed(self, correlation_id: str) -> bool:
+        row = self.rows.get(correlation_id)
+        return row is not None and row.state == "answered" and row.answer_failed
 
     async def cancel(self, correlation_id: str, reason: str) -> bool:
         row = self.rows.get(correlation_id)
@@ -165,6 +177,7 @@ class InMemoryAgentMailbox:
             asker=row.asker,
             answer_token=row.answer_token,
             redeliveries=row.redeliveries,
+            failures=row.failures,
         )
 
     async def reclaim_stale(
@@ -174,6 +187,7 @@ class InMemoryAgentMailbox:
         lease: timedelta,
         exists: Callable[[str, int], Awaitable[bool]],
         retire: Callable[[str, int], Awaitable[None]] | None = None,
+        failed: Callable[[str, int], Awaitable[bool]] | None = None,
         now: datetime | None = None,
     ) -> tuple[str, ...]:
         moment = self._clock() if now is None else now
@@ -194,6 +208,7 @@ class InMemoryAgentMailbox:
             try:
                 if await exists(row.correlation_id, generation):
                     continue
+                callee_failed = failed is not None and await failed(row.correlation_id, generation)
                 if retire is not None:
                     await retire(row.correlation_id, generation)
             except Exception:  # noqa: BLE001 - unknown is not "does not exist"
@@ -202,6 +217,7 @@ class InMemoryAgentMailbox:
                 row.state = "queued"
                 row.delivered_at = None
                 row.redeliveries += 1
+                row.failures += int(callee_failed)
                 reclaimed.append(row.correlation_id)
         return tuple(reclaimed)
 

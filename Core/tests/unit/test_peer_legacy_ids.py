@@ -166,3 +166,27 @@ async def test_the_cancel_cascade_names_the_legacy_ids_DBOS_knows(engine: Any) -
     ids = await tw._peer_workflow_ids("c1")
 
     assert set(ids) == {tw.peer_workflow_id("c1", 0), tw.peer_workflow_id("c1", 1), "peer-c1-r1"}
+
+
+# --- C1l: which dead generations were the callee's own failure --------------------------------
+
+
+@_sync
+async def test_only_an_errored_workflow_counts_as_a_callee_failure(
+    engine: tuple[type[_FakeDbos], _Mailbox],
+) -> None:
+    """The lease requeues a generation whose workflow is gone (never started), CANCELLED (a
+    deploy retired it) or ERROR (the callee raised). Only the last is the callee's failure and
+    only it counts toward the redelivery cap (`DurablePeerTurnStarter.failed`)."""
+    starter = tw.DurablePeerTurnStarter()
+    _put(tw.peer_workflow_id("raised", 0), "ERROR", NEW_VERSION)
+    _put(tw.peer_workflow_id("retired", 0), "CANCELLED", NEW_VERSION)
+    _put(tw.peer_workflow_id("running", 0), "PENDING", NEW_VERSION)
+    _put(tw.legacy_peer_workflow_id("old-raised", 1), "ERROR", OLD_VERSION)
+
+    assert await starter.failed("raised", 0) is True
+    assert await starter.failed("retired", 0) is False
+    assert await starter.failed("running", 0) is False
+    assert await starter.failed("never-started", 0) is False
+    assert await starter.failed("raised", 1) is False, "another generation is another workflow"
+    assert await starter.failed("old-raised", 1) is True, "the .4 spelling is consulted too"

@@ -61,7 +61,7 @@ def _ask(corr: str = "c1", hop: int = 1, token: str | None = "tok-c1") -> PeerAs
     )
 
 
-def _redelivered(times: int) -> PeerAsk:
+def _redelivered(times: int, *, failures: int = 0) -> PeerAsk:
     base = _ask()
     return PeerAsk(
         correlation_id=base.correlation_id,
@@ -73,6 +73,7 @@ def _redelivered(times: int) -> PeerAsk:
         asker=base.asker,
         answer_token=base.answer_token,
         redeliveries=times,
+        failures=failures,
     )
 
 
@@ -86,7 +87,12 @@ class _Queue:
         return self.asks.pop(0) if self.asks else None
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         self.answered.append((correlation_id, answer))
         self.tokens.append(answer_token)
@@ -103,6 +109,10 @@ class _Starter:
     exists_calls: list[str] = field(default_factory=list)
     retired: list[tuple[str, int]] = field(default_factory=list)
     generations: list[int] = field(default_factory=list)
+    failed_generations: set[tuple[str, int]] = field(default_factory=set)
+
+    async def failed(self, correlation_id: str, generation: int = 0) -> bool:
+        return (correlation_id, generation) in self.failed_generations
 
     async def exists(self, correlation_id: str, generation: int = 0) -> bool:
         self.exists_calls.append(correlation_id)
@@ -324,7 +334,7 @@ def test_an_ask_past_its_redelivery_cap_is_closed_with_the_failure_answer_and_th
     """A callee that deterministically ends in ERROR is 'absent' to the lease, so it is requeued
     every lease for ever (the poison budget restarts per generation). Past the cap the claim
     closes the ask instead of starting another generation."""
-    queue, starter, woken = _Queue([_redelivered(4)]), _Starter(), []
+    queue, starter, woken = _Queue([_redelivered(4, failures=4)]), _Starter(), []
 
     async def wake(turn_id: TurnId, correlation_id: str) -> None:
         woken.append((turn_id, correlation_id))
@@ -343,7 +353,7 @@ def test_an_ask_past_its_redelivery_cap_is_closed_with_the_failure_answer_and_th
 
 
 def test_an_ask_at_its_last_allowed_redelivery_still_starts() -> None:
-    queue, starter = _Queue([_redelivered(3)]), _Starter()
+    queue, starter = _Queue([_redelivered(3, failures=3)]), _Starter()
 
     report = asyncio.run(
         dispatch_next_ask(queue, starter, target=AgentId("specialist"), max_redeliveries=3)
@@ -351,6 +361,19 @@ def test_an_ask_at_its_last_allowed_redelivery_still_starts() -> None:
 
     assert report is not None and report.disposition is AskDisposition.STARTED
     assert starter.generations == [3]
+
+
+def test_requeues_that_were_not_callee_failures_never_use_up_the_cap() -> None:
+    """C1l. A worker that died between claim and start, or a workflow retired by a deploy, ends a
+    generation too. Only a callee FAILURE counts toward `AGENT_CORE_PEER_MAX_REDELIVERIES`."""
+    queue, starter = _Queue([_redelivered(40, failures=0)]), _Starter()
+
+    report = asyncio.run(
+        dispatch_next_ask(queue, starter, target=AgentId("specialist"), max_redeliveries=3)
+    )
+
+    assert report is not None and report.disposition is AskDisposition.STARTED
+    assert starter.generations == [40], "the generation is still the row's redeliveries"
 
 
 def test_without_a_cap_any_generation_starts() -> None:
@@ -362,7 +385,7 @@ def test_without_a_cap_any_generation_starts() -> None:
 
 
 def test_the_worker_loop_applies_its_redelivery_cap() -> None:
-    queue, starter, lines = _Queue([_redelivered(9)]), _Starter(), []
+    queue, starter, lines = _Queue([_redelivered(9, failures=9)]), _Starter(), []
     passes = iter([True, False])
 
     asyncio.run(
@@ -388,6 +411,7 @@ def test_the_worker_loop_applies_its_redelivery_cap() -> None:
 class _ReclaimingQueue(_Queue):
     reclaim_calls: list[tuple[str, timedelta]] = field(default_factory=list)
     exists_seen: list[bool] = field(default_factory=list)
+    failed_seen: list[bool] = field(default_factory=list)
 
     async def reclaim_stale(
         self,
@@ -397,9 +421,12 @@ class _ReclaimingQueue(_Queue):
         now: datetime | None = None,
         exists: Callable[[str, int], Awaitable[bool]],
         retire: Callable[[str, int], Awaitable[None]] | None = None,
+        failed: Callable[[str, int], Awaitable[bool]] | None = None,
     ) -> tuple[str, ...]:
         self.reclaim_calls.append((str(target), lease))
         self.exists_seen.append(await exists("c-stale", 2))
+        if failed is not None:
+            self.failed_seen.append(await failed("c-stale", 2))
         if retire is not None:
             await retire("c-stale", 2)
         return ("c-stale",)
@@ -426,6 +453,25 @@ def test_each_pass_reclaims_stale_deliveries_before_claiming_when_a_lease_is_set
     assert starter.retired == [("c-stale", 2)], "the starter's retire is what the lease calls"
     assert any("reclaimed c-stale" in line for line in lines)
     assert [corr for corr, _, _ in starter.started] == ["a"], "claiming still happens"
+
+
+def test_the_lease_asks_the_starter_whether_the_callee_failed() -> None:
+    """C1l. The worker hands the starter's `failed` verdict to the lease, which counts it."""
+    queue, starter = _ReclaimingQueue([]), _Starter(failed_generations={("c-stale", 2)})
+    passes = iter([True, False])
+
+    asyncio.run(
+        run_peer_worker(
+            queue,
+            starter,
+            targets=[AgentId("specialist")],
+            lease=timedelta(minutes=5),
+            keep_going=lambda: next(passes),
+            sleep=_no_sleep,
+        )
+    )
+
+    assert queue.failed_seen == [True]
 
 
 def test_without_a_lease_nothing_is_reclaimed() -> None:
@@ -470,7 +516,12 @@ class _CancelledQueue(_Queue):
     """A queue whose row was cancelled (the asker gave up) while the callee was running."""
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         raise PeerAnswerRefusedError(correlation_id, "the ask was cancelled")
 

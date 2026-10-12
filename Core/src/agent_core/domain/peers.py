@@ -84,12 +84,12 @@ class PeerAnswerRefusedError(Exception):
 def peer_ask_id(turn_id: str, request_key: str, target: str, question: str) -> str:
     """The correlation id of one ask, derived from what identifies it. Pure.
 
-    `turn_id` is the asking workflow's id, `request_key` the tool call that asked. Target and
-    question are part of the name because the mailbox is also idempotent per
-    `(turn, target, question)` (a word-for-word re-ask in a later round is the same ask, D28):
-    if a provider ever reused a tool call id for a different question the two keys must not
-    collide on the primary key. The fields are JSON-encoded as a list, so no choice of values
-    can shift characters from one field into the next.
+    `turn_id` is the asking workflow's id, `request_key` what names the ask inside the turn (since
+    C13, D36: `r<round>.s<position>.<tool call id>`, so a repeat in a later round is a fresh ask).
+    Target and question are part of the name too: if a provider ever reused a tool call id for a
+    different question the two keys must not collide on the primary key. The fields are
+    JSON-encoded as a list, so no choice of values can shift characters from one field into the
+    next.
 
     A DBOS replay of the ask step recomputes the same id and so names the same row; nothing
     here needs a random source (CLAUDE.md non-negotiable #2).

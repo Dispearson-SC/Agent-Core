@@ -91,6 +91,7 @@ class QueueHarness(MailboxHarness, Protocol):
         self,
         exists: Callable[[str, int], Awaitable[bool]],
         retire: Callable[[str, int], Awaitable[None]] | None = None,
+        failed: Callable[[str, int], Awaitable[bool]] | None = None,
     ) -> tuple[str, ...]: ...
 
     def redeliveries(self, correlation_id: str) -> int: ...
@@ -210,6 +211,33 @@ class MailboxConformance:
         inner = read[len(UNTRUSTED_OPEN) : -len(UNTRUSTED_CLOSE)]
         assert not re.search(re.escape(UNTRUSTED_CLOSE), inner, re.IGNORECASE)
         assert not re.search(re.escape(UNTRUSTED_OPEN), inner, re.IGNORECASE)
+
+    async def test_a_failed_answer_is_data_and_an_ordinary_answer_is_not(
+        self, harness: MailboxHarness
+    ) -> None:
+        """C1l. The outcome travels beside the text: the same sentence written by a peer without
+        the flag is NOT a failure, and the first answer decides (a retry cannot flip it)."""
+        sentence = "The question could not be answered: the answering agent failed."
+        failed = await harness.ask("one", request_key="tc-1")
+        spoofed = await harness.ask("two", request_key="tc-2")
+        retried = await harness.ask("three", request_key="tc-3")
+        unanswered = await harness.ask("four", request_key="tc-4")
+
+        await harness.mailbox.answer(
+            failed, sentence, answer_token=await _token(harness, failed), failed=True
+        )
+        await harness.mailbox.answer(spoofed, sentence, answer_token=await _token(harness, spoofed))
+        token = await _token(harness, retried)
+        await harness.mailbox.answer(retried, "fine", answer_token=token)
+        await harness.mailbox.answer(retried, sentence, answer_token=token, failed=True)
+
+        assert await harness.mailbox.answer_failed(failed) is True
+        assert await harness.mailbox.answer_failed(spoofed) is False
+        assert await harness.mailbox.answer_failed(retried) is False, "first answer wins"
+        assert await harness.mailbox.answer_failed(unanswered) is False
+        assert await harness.mailbox.answer_failed("never-asked") is False
+        read = await harness.mailbox.read_answer(failed)
+        assert read is not None and sentence in read, "the text is stored and read as before"
 
     # --- cancel -------------------------------------------------------------------------------
 
@@ -343,6 +371,36 @@ class MailboxConformance:
         assert await queue.reclaim(cannot_tell) == ()
         assert queue.redeliveries(unknown) == 0, "unknown is not 'does not exist'"
         assert await queue.reclaim(_never_exists) == (unknown,), "and it is retried next pass"
+
+    async def test_only_a_callee_failure_counts_toward_the_failures_of_an_ask(
+        self, harness: MailboxHarness
+    ) -> None:
+        """C1l. Every requeue is a redelivery (the callee workflow's generation), but only a
+        generation that ended in a FAILURE adds to `failures`: a worker that died between claim and
+        start, or a workflow retired by a deploy, must not use up the redelivery cap."""
+        queue = _queue(harness)
+        corr = await queue.ask("flaky", request_key="tc-1")
+        outcomes = iter([False, True, False])  # infra, failure, infra
+
+        async def failed(correlation_id: str, generation: int) -> bool:
+            return next(outcomes)
+
+        seen: list[tuple[int, int]] = []
+        for _ in range(3):
+            claimed = await queue.claim()
+            assert claimed is not None and claimed.correlation_id == corr
+            seen.append((claimed.redeliveries, claimed.failures))
+            await queue.age(corr, LEASE * 3)
+            assert await queue.reclaim(_never_exists, failed=failed) == (corr,)
+
+        last = await queue.claim()
+        assert last is not None
+        seen.append((last.redeliveries, last.failures))
+        assert seen == [(0, 0), (1, 0), (2, 1), (3, 1)]
+        await queue.age(corr, LEASE * 3)
+        assert await queue.reclaim(_never_exists) == (corr,), "no verdict given: not a failure"
+        again = await queue.claim()
+        assert again is not None and (again.redeliveries, again.failures) == (4, 1)
 
 
 async def _never_exists(correlation_id: str, generation: int) -> bool:

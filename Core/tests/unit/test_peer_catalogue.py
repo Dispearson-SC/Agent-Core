@@ -46,12 +46,10 @@ def _profile(
     profile_id: str,
     *,
     asks: tuple[str, ...] = (),
-    answers: tuple[str, ...] = (),
     description: str = "",
     enabled: bool = True,
 ) -> AgentProfile:
-    """`asks`: who this agent may ask; `answers` is only documentation of the other side."""
-    del answers
+    """`asks`: who this agent may ask. The other side's allowlist is that profile's own `asks`."""
     return AgentProfile(
         id=profile_id,
         persona=profile_id,

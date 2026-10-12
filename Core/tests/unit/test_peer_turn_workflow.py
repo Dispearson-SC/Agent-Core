@@ -106,10 +106,10 @@ def _setup(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> _Recorder:
     original = world.mailbox.answer
 
     async def answer(
-        correlation_id: str, text: str, *, answer_token: str | None = None
+        correlation_id: str, text: str, *, answer_token: str | None = None, failed: bool = False
     ) -> None:
         recorder.events.append("answer")
-        await original(correlation_id, text, answer_token=answer_token)
+        await original(correlation_id, text, answer_token=answer_token, failed=failed)
 
     monkeypatch.setattr(world.mailbox, "answer", answer)
     monkeypatch.setattr(turn_workflow, "signal_peer_answer", signal)

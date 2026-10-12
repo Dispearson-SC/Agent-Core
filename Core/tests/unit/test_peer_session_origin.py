@@ -55,7 +55,12 @@ class _Queue:
         return self.ask
 
     async def answer(
-        self, correlation_id: str, answer: str, *, answer_token: str | None = None
+        self,
+        correlation_id: str,
+        answer: str,
+        *,
+        answer_token: str | None = None,
+        failed: bool = False,
     ) -> None:
         self.answered.append((correlation_id, answer))
 

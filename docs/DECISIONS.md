@@ -1529,3 +1529,42 @@ policy forbade was still offered and then refused at call time.
 - **Follow-up outside this repo state:** the `vertical/glazed` orchestrator persona still names its
   specialists. It can drop that list once it runs on this branch and gives each specialist profile
   a `description`; this change did not touch that branch.
+
+## D38 · Agent-comms v2: slice 10 advisories (C1l)
+
+Non-blocking advisories of the slice 10 review. No workflow step name, step order or workflow id
+changed, so the pinned application version stays `agent-core-turns.6`.
+
+**C1l.1 · the outcome of a peer answer is data, not a text match.** `<peer status>` used to be
+`error` when the stored text equalled one of our two fixed failure sentences, decided AFTER the
+`max_answer_chars` cut. A peer (or a hostile page it read) could write that sentence and look like
+a failure, and a short cap cut a real failure sentence into an `ok` answer. Now the workflow records
+the failure on the row beside the text: `AgentMailbox.answer(..., failed=True)` (new keyword, default
+False) and `AgentMailbox.answer_failed(correlation_id)` (new verb) read it back; `_peer_envelope`
+asks the row BEFORE it caps the text. Written with `failed=True`: the callee workflow that raised,
+the one that closed unanswered, the poison-budget settle of a callee and the worker's failed-start
+close. Migration `0032` adds `peer_messages.answer_failed BOOLEAN NOT NULL DEFAULT false` (rows
+written before it read as ordinary answers, which is what they were unless a callee failed; the
+asker of such a row sees `ok` with the sentence, not a regression in safety). The first answer
+decides the flag, like the text. The A2A adapter keeps the flag in process memory with its answers.
+Chosen over a typed prefix inside the text (still text, still spoofable) and over classifying
+before the cap only (fixes the cut, not the spoof).
+
+**C1l.2 · only callee failures count toward `AGENT_CORE_PEER_MAX_REDELIVERIES`.** Every lease
+requeue bumped `redeliveries` and the cap read it, so a worker that died between claim and start,
+or a workflow retired during a deploy, used up the cap of an ask whose callee never failed.
+`redeliveries` stays the generation (it names the workflow id); migration `0032` adds
+`callee_failures INTEGER NOT NULL DEFAULT 0`, claimed rows carry it as `PeerAsk.failures`, and the
+cap compares `failures`. `reclaim_stale(failed=)` takes the starter's verdict on a generation it
+judged dead, asked BEFORE `retire` rewrites its status: `DurablePeerTurnStarter.failed` is true only
+for a workflow that ended `ERROR` (both id spellings). A starter without the probe
+(`CalleeFailureProbe`) counts nothing, which only makes the cap more lenient. Trade-off: an ask
+whose worker keeps dying is no longer abandoned by this cap; the asker's `reply_timeout_seconds`
+still bounds how long it waits.
+
+**C1l.3 · tidy.** `test_migrations` proves `0031` and `0032` (and their columns) are applied by
+`apply_all_migrations`; the stale `_step_peek_peer_answer` docstring and the re-ask comments now say
+that since C13 a repeat is a fresh ask (the handle-given-out-again path is the defence for an
+adapter that folds repeats); `test_uuid_peer_workflow_ids_moved_the_pinned_application_version_to_five`
+is removed (the `== .6` test and the ">= 4" test cover the same ground); the dead `answers`
+parameter of `test_peer_catalogue._profile` is gone.

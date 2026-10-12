@@ -7,6 +7,7 @@ Subject: domain/peer_result.py (`PeerResult`, `PeerStatus`), adapters/driven/pee
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 
 import pytest
 
@@ -146,15 +147,54 @@ def test_a_timed_out_ask_resolves_to_status_timeout(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.parametrize("fixed", [PEER_ASK_FAILED_ANSWER, PEER_ASK_CLOSED_ANSWER])
-def test_the_failure_answers_the_workflow_writes_resolve_to_status_error(
+def test_a_failure_the_workflow_recorded_resolves_to_status_error(
     monkeypatch: pytest.MonkeyPatch, fixed: str
 ) -> None:
-    world = fanout.install(monkeypatch, (fanout.ask("tc-1"),), [fanout.answer("corr-1", fixed)])
+    world = fanout.install(
+        monkeypatch, (fanout.ask("tc-1"),), [fanout.answer("corr-1", fixed, failed=True)]
+    )
 
     _run()
 
     ((_, payload),) = world.resume.calls[0]
     assert isinstance(payload, str) and 'status="error"' in payload
+
+
+@pytest.mark.parametrize("fixed", [PEER_ASK_FAILED_ANSWER, PEER_ASK_CLOSED_ANSWER])
+def test_a_peer_that_writes_our_failure_sentence_is_still_an_ok_answer(
+    monkeypatch: pytest.MonkeyPatch, fixed: str
+) -> None:
+    """C1l. The outcome is data on the row, not a text match: a callee (or a hostile page it read)
+    that happens to write our fixed sentence cannot make its own answer look like a failure."""
+    world = fanout.install(monkeypatch, (fanout.ask("tc-1"),), [fanout.answer("corr-1", fixed)])
+
+    _run()
+
+    ((_, payload),) = world.resume.calls[0]
+    assert isinstance(payload, str) and 'status="ok"' in payload
+
+
+def test_a_failure_stays_an_error_when_the_size_cap_cuts_its_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1l. The cap used to run first, so a short `max_answer_chars` turned the cut failure
+    sentence into an `ok` answer."""
+    world = fanout.install(
+        monkeypatch,
+        (fanout.ask("tc-1"),),
+        [fanout.answer("corr-1", PEER_ASK_FAILED_ANSWER, failed=True)],
+    )
+    seat = turn_workflow._dependencies.peers  # type: ignore[union-attr]
+    asker = seat.profiles[fanout.ASKER]
+    seat.profiles[fanout.ASKER] = dataclasses.replace(
+        asker, peers=dataclasses.replace(asker.peers, max_answer_chars=5)
+    )
+
+    _run()
+
+    ((_, payload),) = world.resume.calls[0]
+    assert isinstance(payload, str)
+    assert 'status="error"' in payload and 'truncated="true"' in payload
 
 
 def test_a_refused_ask_resolves_to_status_refused_without_a_session(
