@@ -783,6 +783,9 @@ class Console:
         for line in profile.persona.splitlines():
             self._write(f"    {line}")
         self._write(f"  model:            {profile.model}")
+        if profile.model_fast is not None:
+            steps = ", ".join(step.value for step in profile.fast_steps) or "no step kind"
+            self._write(f"  model_fast:       {profile.model_fast}  (for: {steps})")
         self._write(f"  max_iterations:   {profile.max_iterations}")
         self._write(f"  max_cost_usd:     {profile.max_cost_usd}")
         self._write(f"  toolsets:         {', '.join(profile.toolsets) or 'none'}")

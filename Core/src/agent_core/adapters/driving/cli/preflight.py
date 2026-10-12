@@ -693,7 +693,8 @@ def _credential_checks(
         {
             name
             for profile in profiles.values()
-            if (name := _credential_variable(profile.model)) is not None
+            for model_id in profile.models
+            if (name := _credential_variable(model_id)) is not None
         }
     ):
         present = credential_present(variable, environ)
@@ -762,7 +763,7 @@ def _model_checks(settings: Settings, profiles: Mapping[str, AgentProfile]) -> l
     """One check per DISTINCT model, not per profile. Two profiles on one model is one fact."""
     return [
         _model_check(model_id, settings.proxy_base_url)
-        for model_id in sorted({profile.model for profile in profiles.values()})
+        for model_id in sorted({model for profile in profiles.values() for model in profile.models})
     ]
 
 

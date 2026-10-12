@@ -661,6 +661,12 @@ another agent. The asker validates it again against the callee's schema before i
 answer that breaks the contract is `error` and is not shown, and a cut one is plain text. No schema,
 no change: prose stays the default.
 
+**Model tiering (C24, D56).** A profile may declare `model_fast` (and `fast_steps`, default
+`[peer_answer]`). `StartTurn` runs a turn another agent started to answer an ask on that model
+(`AgentProfile.for_step`); a person's own turn, a resumed turn and any profile without `model_fast`
+keep `model`. Policy, audit and the stored profile version still name the profile as written; only
+the model the runner builds its agent from differs.
+
 **Follow-up asks (C12, D45).** `ask_peer(target, question, continue_session?)`, offered only to a
 profile with `peers.allow_continuation: true`. The `session` of an earlier result is the handle: the
 specialist's next turn is filed in that same session, so it sees the exchange so far. The mailbox

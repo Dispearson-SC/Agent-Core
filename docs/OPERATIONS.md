@@ -210,6 +210,32 @@ turn_id, state, enqueued_at, delivered_at, answered_at FROM peer_messages WHERE 
 '<tenant>' AND root_turn_id = '<root>' ORDER BY enqueued_at;`. Migration `0038` (an index) is
 additive and safe under a running build.
 
+## Model tiering and its measurement (C24, D56)
+
+`model_fast: <provider/model>` on a profile sends the peer answers that agent gives (a turn another
+agent started with `ask_peer`) to a smaller model; `fast_steps: [peer_answer]` is the default and the
+only kind today. Nothing changes until a profile declares it. Declaring it changes the profile's
+content hash, so the next start registers a new profile version. The preflight checks the fast
+model's credential like the main one.
+
+Measure before and after with the C21 timings: a peer answer's `started` and `finished` events carry
+its elapsed time, and the turn row carries the profile version that ran it, so the version that
+turned `model_fast` on is the cut. Median and 95th percentile of the peer answers per profile and
+version:
+
+```sql
+SELECT t.profile_id, t.profile_version, count(*) AS answers,
+       percentile_cont(0.5)  WITHIN GROUP (ORDER BY f.elapsed_ms) AS p50_ms,
+       percentile_cont(0.95) WITHIN GROUP (ORDER BY f.elapsed_ms) AS p95_ms
+FROM turn_events f
+JOIN turns t ON t.turn_id::text = f.turn_id
+WHERE f.kind = 'finished' AND f.asker_turn_id IS NOT NULL
+GROUP BY t.profile_id, t.profile_version ORDER BY t.profile_id, t.profile_version;
+```
+
+A resumed turn (one that waited for a person) continues on the main model, so a tiered answer that
+needed an approval is not in the fast numbers after the approval.
+
 ## Peer redelivery lease
 
 The peer worker claims an ask (`delivered`) and then enqueues the callee workflow of the ask

@@ -151,3 +151,19 @@ def test_a_peer_run_publishes_started_and_finished_with_its_owner_chain(
     assert {r[2] for r in callee} == {root}, "filed under the root a person started"
     assert {(r[4], r[5], r[6]) for r in callee} == {(w.B, root, w.A)}
     assert all(cast("int", r[0]) > 0 for r in events)
+
+
+def test_the_documented_tiering_measurement_query_runs_against_the_schema() -> None:
+    """C24 (D56): the SQL in OPERATIONS.md ('Model tiering and its measurement') is valid against
+    the migrated schema and reads the columns it names."""
+    from pathlib import Path
+
+    import psycopg
+
+    text = (Path(__file__).parents[3] / "docs" / "OPERATIONS.md").read_text()
+    sql = text.split("```sql", 1)[1].split("```", 1)[0] if "Model tiering and its" in text else ""
+    assert "percentile_cont" in sql, "the measurement query is missing from OPERATIONS.md"
+
+    asyncio.run(w.fresh_databases(_DATABASE))
+    with psycopg.connect(w.conninfo(_DATABASE)) as conn:
+        assert conn.execute(sql).fetchall() == [], "an empty database has no peer answers"

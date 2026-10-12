@@ -102,6 +102,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Final
 
+from agent_core.domain.model_routing import step_kind
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     PendingKind,
@@ -244,7 +245,7 @@ class StartTurn:
         # audit write happen inside the adapter's `before_tool_execute` hook, i.e. before
         # any side effect - this class never sees individual tool calls.
         outcome = await self._runner.run(
-            turn_id, request, self._runner_profile(profile, advertised), history
+            turn_id, request, self._runner_profile(profile, advertised, request), history
         )
 
         # STEP 6b - MAKE A SUSPENSION COMMUNICABLE (t-f9-06, D17). Before the outcome is
@@ -296,22 +297,25 @@ class StartTurn:
             ) from None
 
     def _runner_profile(
-        self, profile: AgentProfile, advertised: tuple[str, ...]
+        self, profile: AgentProfile, advertised: tuple[str, ...], request: TurnRequest
     ) -> AgentProfile:
         """The profile the runner may build its agent from.
 
         THE ONE PLACE THE REMAINING SEAT LIVES. `advertised` is the policy-narrowed tool
         surface from step 3 and belongs on this call, but `AgentRunner.run` takes
         `(turn_id, request, profile, history)` and `AgentProfile` has no field that holds
-        tool names - `toolsets` names bundles. So the profile passes through untouched
-        today.
+        tool names - `toolsets` names bundles. So the profile passes through, apart from ONE
+        thing: the MODEL ROUTING of C24 (D56). A profile that declares `model_fast` runs the
+        kinds of step it lists (a peer answer) on that model, and the runner is handed that copy,
+        which differs from the stored profile in `model` alone. A resumed turn is not routed (it
+        waited for a person, so it is not the hot path) and continues on the main model.
 
         Deliberately a named method rather than an inline `self._runner.run(turn_id,
         request, profile, ...)`: the gap is then one function a reviewer can find, and
         t-f1-12 has exactly one place to change when the runner grows a seat for the
         narrowed surface.
         """
-        return profile
+        return profile.for_step(step_kind(request))
 
 
 def _communicable(outcome: TurnOutcome) -> TurnOutcome:

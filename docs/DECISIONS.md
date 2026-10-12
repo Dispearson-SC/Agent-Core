@@ -2179,3 +2179,34 @@ The review of C21-C23 approved them with advisories; this closes them.
   `apply_*_migration` test helpers (the task graph's uses it; the others can follow when touched),
   and `routes.require_readable_turn` is the one authorisation rule of `GET /turns/{id}/events` and
   `/graph`.
+
+## D56 · Agent-comms v2: model tiering per role (C24)
+
+Most of what a specialist does when another agent asks it something is mechanical: one lookup, one
+format. A smaller model does that as well for much less latency, and the main model stays for the
+work that needs it.
+
+- **Declared on the profile, routed in one seat.** `model_fast` (a model id) and `fast_steps` (the
+  kinds of step that use it, default `[peer_answer]`; the only kind today). `StartTurn._runner_profile`
+  (the one place the runner's profile was already chosen) asks `AgentProfile.for_step(step_kind(request))`
+  and the runner gets a copy whose `model` is the fast one. Everything else about the profile,
+  the content hash and the stored version included, is unchanged, so policy, audit and the version
+  of a turn still name the profile the operator wrote. The runner's agent cache is already keyed on
+  the model, so the two models do not share an agent.
+- **What a "peer answer" is.** A turn with an owner (`request.owner is not None`): another agent
+  started it to answer an ask, foreground or background. It is not "makes at most one tool call":
+  the number of calls is not known before the model runs, and switching a run's model half way
+  would break its message history. The conservative cut is the kind of turn, and an operator who
+  finds a specialist needs the main model removes `model_fast`.
+- **A person's turn is never routed.** It is the conversation the person judges the agent by.
+  Adding it later is a new `StepKind` value, not a new mechanism.
+- **A resumed turn stays on the main model** (resume has no request and no owner at hand, and a
+  turn that waited for a person is not the hot path). The history is provider-neutral, so the
+  switch is safe; the cost is that a tiered answer that needed an approval finishes on `model`.
+- **Validated at load.** `fast_steps` without `model_fast`, an unknown step kind or a blank
+  `model_fast` refuses the profile: a typo must not route nothing and look as if it did. The
+  preflight checks the fast model's credential and reachability like the main one.
+- **Measurement hook.** No new event field: C21's `finished.elapsed_ms` plus the turn row's profile
+  version is enough, because turning `model_fast` on is a new profile version (OPERATIONS has the
+  query).
+- **Replay shape: unchanged by C24.** Routing happens inside the existing model step.

@@ -44,6 +44,7 @@ from typing import Any
 from agent_core.domain.compaction import CompactionPolicy
 from agent_core.domain.knowledge import KnowledgePolicy, RetrievalMode
 from agent_core.domain.media import MediaDelivery, MediaKind, MediaPolicy
+from agent_core.domain.model_routing import StepKind
 from agent_core.domain.peers import (
     AgentId,
     AgentRef,
@@ -615,6 +616,37 @@ def _build_answer_schema(data: object) -> str | None:
         raise ProfileValidationError(f"answer_schema: {error}") from error
 
 
+def _build_model_fast(data: object) -> str | None:
+    """`model_fast` (C24): a non-blank model id, or None."""
+    if data is None:
+        return None
+    if not isinstance(data, str) or not data.strip():
+        raise ProfileValidationError("model_fast must be a non-empty model id")
+    return data.strip()
+
+
+def _build_fast_steps(data: object, model_fast: object) -> tuple[StepKind, ...]:
+    """`fast_steps` (C24): the step kinds that run on `model_fast`. Absent means every kind there
+    is (today `peer_answer`). Listing kinds with no `model_fast` is refused: it would route
+    nothing and look like it did."""
+    if data is None:
+        return (StepKind.PEER_ANSWER,)
+    if model_fast is None:
+        raise ProfileValidationError("fast_steps is set but model_fast is not")
+    if not isinstance(data, (list, tuple)):
+        raise ProfileValidationError("fast_steps must be a list of step kinds")
+    steps: list[StepKind] = []
+    for item in data:
+        try:
+            steps.append(StepKind(item))
+        except ValueError:
+            known = ", ".join(kind.value for kind in StepKind)
+            raise ProfileValidationError(
+                f"fast_steps has an unknown step kind {item!r}; known: {known}"
+            ) from None
+    return tuple(dict.fromkeys(steps))
+
+
 def _build_description(data: object) -> str:
     """The description as written, or `""`. Not blank-padded: it is shown to other agents."""
     if data is None:
@@ -687,6 +719,12 @@ class AgentProfile:
     id: str
     persona: str
     model: str
+
+    # C24 (D56). A smaller, faster model for the kinds of step in `fast_steps` (a peer answer, by
+    # default): a specialist that looks one thing up and formats it does not need the main model.
+    # None keeps every step on `model`. Part of the content hash: enabling it is a new version.
+    model_fast: str | None = None
+    fast_steps: tuple[StepKind, ...] = (StepKind.PEER_ANSWER,)
 
     toolsets: tuple[str, ...] = ()
     mcp_servers: tuple[MCPServerRef, ...] = ()
@@ -767,6 +805,8 @@ class AgentProfile:
             id=mapping["id"],
             persona=mapping["persona"],
             model=mapping["model"],
+            model_fast=_build_model_fast(mapping.get("model_fast")),
+            fast_steps=_build_fast_steps(mapping.get("fast_steps"), mapping.get("model_fast")),
             toolsets=tuple(mapping.get("toolsets", defaults.toolsets)),
             mcp_servers=tuple(
                 _build_mcp_server_ref(item) for item in mapping.get("mcp_servers", ())
@@ -816,6 +856,21 @@ class AgentProfile:
             ),
         )
         return replace(profile, content_hash=profile_content_hash(profile))
+
+    @property
+    def models(self) -> tuple[str, ...]:
+        """Every model this profile may call: `model`, then `model_fast` if it differs. What a
+        startup check must be able to reach."""
+        return tuple(dict.fromkeys(m for m in (self.model, self.model_fast) if m))
+
+    def for_step(self, step: StepKind | None) -> AgentProfile:
+        """The profile to run `step` with: this one, or (C24) a copy whose `model` is `model_fast`
+        when the profile declares one and lists this kind of step. Everything else, the content
+        hash included, is unchanged, so policy, audit and the stored version still name the
+        profile the operator wrote. Pure."""
+        if step is None or self.model_fast is None or step not in self.fast_steps:
+            return self
+        return replace(self, model=self.model_fast)
 
     def instructions_for(self, channel: str, modality: str | None) -> tuple[str, ...]:
         """The extra instructions for a turn on `channel` with `modality`, in a fixed order.
