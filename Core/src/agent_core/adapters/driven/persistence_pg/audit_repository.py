@@ -159,6 +159,8 @@ ARGUMENT_ALLOWLIST: Mapping[str, frozenset[str]] = {
     # the "we do not know" answer. It is also the half of the exchange this deployment
     # WROTE - the answer comes back untrusted and is not an argument here at all.
     "ask_peer": frozenset({"target", "question"}),
+    # C28. The same, for a spawn: WHICH agent was started, and the task by value (it IS the action).
+    "spawn_subagent": frozenset({"agent", "task"}),
 }
 
 # Per-tool fields recorded BY PRESENCE: the key is stored with `PRESENCE_RECORDED` in

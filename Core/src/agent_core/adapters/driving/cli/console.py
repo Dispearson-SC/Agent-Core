@@ -1678,6 +1678,11 @@ def _raw_delegation_ask(arguments: Mapping[str, object]) -> str:
     put exactly these two keys there. Printing "an unnamed peer" for a key that is absent
     says the record is short a fact, not that no peer was asked.
     """
+    if "agent" in arguments and "target" not in arguments:  # `spawn_subagent` (C28)
+        agent, task = arguments.get("agent"), arguments.get("task")
+        if not task:
+            return f"spawned {agent} (no task recorded)"
+        return f"spawned {agent}: {task}"
     target = arguments.get("target")
     question = arguments.get("question")
     peer = str(target) if target is not None else "an unnamed peer"

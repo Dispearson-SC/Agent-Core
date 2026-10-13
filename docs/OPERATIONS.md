@@ -5,7 +5,7 @@ changes. Decisions behind them are in `docs/DECISIONS.md`.
 
 ## Bumping the DBOS application version
 
-`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.10`) is bumped when a
+`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.11`) is bumped when a
 change makes turns that are already in flight incompatible with the new code: a workflow step
 added, removed, renamed or reordered, or a changed workflow argument (D28 took `.1` to `.2`;
 D31 took `.2` to `.3`: the peer job gained `answer_token` and the round gained the cancel
@@ -174,6 +174,31 @@ is stranded like any stale-version workflow: drain before deploying `.10` (`stra
 the OLD build must report 0), deploy, run `stranded-turns` again and cancel what it lists. Migration
 `0037` (`turn_events`) is additive and safe under a running `.9` build. Nothing was deployed under
 `.3`-`.9` on this branch, so the bumps collapse into one before the first release.
+
+## Deploying subagents (`.10` -> `.11`, D62)
+
+`PeerOwner` (the owner chain a callee turn carries) gained `kind` and `subagent_depth`, and the
+round's recorded steps gained a `kind`, so a callee or a turn suspended on peers under `.10` cannot be
+recovered by `.11`: drain before deploying (`stranded-turns` against the OLD build must report 0),
+deploy, run `stranded-turns` again and cancel what it lists. Migration `0041` (`peer_messages.kind`
+and `.subagent_depth`, both `NOT NULL` with a constant default, plus a check on `kind`) is additive
+and safe under a running `.10` build: its inserts name neither column and read as `peer`, depth 0.
+Nothing was deployed under `.3`-`.10` on this branch, so the bumps collapse into one before the
+first release.
+
+### Subagents: looking and stopping
+
+`spawn_subagent` is off until a profile says `subagents: {enabled: true, agents: [...]}` AND a policy
+rule allows the tool (`tool_pattern: spawn_subagent`, optionally narrowed with `resource: <agent id>`;
+a `deny` for an agent hides it and wins over any allow). The spawned profile must have `mode:
+subagent` (or `all`). A subagent is a row of `peer_messages` with `kind = 'subagent'`:
+`SELECT correlation_id, target_agent_id, subagent_depth, state, cancel_reason FROM peer_messages WHERE
+kind = 'subagent' ORDER BY enqueued_at;` The peer worker must poll the subagent's queue: it does for
+any profile with `mode: subagent` and for any agent a profile with `subagents.enabled` lists. The
+graph (`GET /turns/<id>/graph`) labels each node `kind: peer | subagent`. A background subagent is
+listed, checked and stopped with `peer_list`, `peer_status` and `peer_stop`; `peer_message` refuses
+it. Aborting the parent (`turn_workflow.cancel_turn`, a reply timeout, an expiry or `fail_fast`)
+cancels its subagents exactly as it cancels peers.
 
 ### Progress events: looking and cleaning
 

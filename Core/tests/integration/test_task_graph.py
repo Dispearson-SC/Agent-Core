@@ -121,3 +121,34 @@ def test_a_read_over_the_limit_keeps_the_oldest_asks_and_counts_the_rest() -> No
     assert len(cut.records) == 3 and cut.omitted == 2
     assert len(whole.records) == 5 and whole.omitted == 0
     assert [r.handle for r in cut.records] == [r.handle for r in whole.records[:3]]
+
+
+def test_a_spawned_subagent_is_read_back_with_its_kind() -> None:
+    """C28, migration 0041: the row says whether the child was asked or spawned, and the tree
+    carries it (a row from before the migration reads as a peer)."""
+    from agent_core.domain.agent_mode import DelegationKind
+
+    async def scenario() -> Any:
+        await w.fresh_databases(_DATABASE)
+        mailbox = PgAgentMailbox(w.conninfo(_DATABASE))
+        peer = await _ask(mailbox, w.B, w.A, ROOT, "k-peer")
+        sub = await mailbox.ask(
+            w.profiles()[w.A].peers,
+            AgentId(w.C),
+            "do it",
+            from_session=SESSION,
+            turn_id=TurnId(ROOT),
+            hop=0,
+            asker=AgentId(w.A),
+            request_key="k-sub",
+            root_turn_id=ROOT,
+            kind=DelegationKind.SUBAGENT,
+            subagent_depth=1,
+        )
+        reader = PgTaskGraphReader(w.conninfo(_DATABASE))
+        return peer, sub, build_task_graph(ROOT, (await reader.asks_under("t", ROOT)).records)
+
+    peer, sub, graph = asyncio.run(scenario())
+
+    kinds = {child.handle: child.kind for child in graph.root.children}
+    assert kinds == {peer: DelegationKind.PEER, sub: DelegationKind.SUBAGENT}

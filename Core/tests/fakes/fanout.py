@@ -24,6 +24,7 @@ from agent_core.adapters.driven.peers.mailbox import wrap_peer_answer
 from agent_core.adapters.driving.channels.registry import ChannelRegistry
 from agent_core.adapters.driving.peers.worker import new_peer_session
 from agent_core.adapters.driving.workflow import turn_workflow
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peer_result import PeerResult, PeerStatus
 from agent_core.domain.peers import (
     BACKGROUND_LIST_LIMIT,
@@ -39,6 +40,7 @@ from agent_core.domain.peers import (
     peer_session_key,
 )
 from agent_core.domain.profile import AgentProfile
+from agent_core.domain.subagents import SubagentPolicy
 from agent_core.domain.turn import (
     CallerIdentity,
     PendingKind,
@@ -78,6 +80,17 @@ def ask(tool_call_id: str, *, target: str = PEER, question: str = "q") -> Pendin
     )
 
 
+def spawn(tool_call_id: str, *, agent: str = PEER, task: str = "t", **extra: Any) -> PendingRequest:
+    """A deferred `spawn_subagent` call (C28). `extra`: `background`, `continue_session`."""
+    return PendingRequest(
+        kind=PendingKind.DELEGATION,
+        tool_call_id=ToolCallId(tool_call_id),
+        tool_name="spawn_subagent",
+        arguments={"agent": agent, "task": f"{task}-{tool_call_id}", **extra},
+        reason="spawning",
+    )
+
+
 def profiles() -> dict[str, AgentProfile]:
     def side(me: str, other: str) -> AgentProfile:
         return AgentProfile(
@@ -103,6 +116,10 @@ class Mailbox:
         self.answer_tokens: list[str | None] = []
         self.refuse_answers = False
         self.root_turns: list[str | None] = []  # `root_turn_id` of each ask (C16)
+        # C28. The kind and subagent depth of each ask, in ask order.
+        self.kinds: list[DelegationKind] = []
+        self.hops: list[int] = []  # the `hop` each ask travelled with
+        self.depths: list[int] = []
         self.continued: list[str | None] = []  # `continue_session` of each ask, in ask order
         self.refuse_continuation = False  # the mailbox refuses every continuation (C12)
         # C19. The return address of each ask in ask order (None = ordinary), how many background
@@ -131,6 +148,9 @@ class Mailbox:
             raise PeerContinuationRefusedError("not yours")
         if kwargs.get("background_caller") is not None and self.refuse_background:
             raise PeerBackgroundRefusedError("not here")
+        self.kinds.append(kwargs.get("kind", DelegationKind.PEER))
+        self.hops.append(kwargs.get("hop", -1))
+        self.depths.append(kwargs.get("subagent_depth", 0))
         self.continued.append(kwargs.get("continue_session"))
         self.background_callers.append(kwargs.get("background_caller"))
         self.root_turns.append(kwargs.get("root_turn_id"))
@@ -376,13 +396,17 @@ def body() -> Any:
     return inspect.unwrap(turn_workflow.run_turn_workflow)
 
 
-def ok(corr: str, text: str) -> str:
+def ok(corr: str, text: str, *, kind: DelegationKind = DelegationKind.PEER) -> str:
     """The envelope the model must be handed for `corr` answered with `text` (C8)."""
     session = new_peer_session(
         TenantId("t"), request().session, key=peer_session_key(corr)
     ).session_id
     return PeerResult(
-        peer=PEER, status=PeerStatus.OK, text=wrap_peer_answer(text), session=str(session)
+        peer=PEER,
+        status=PeerStatus.OK,
+        text=wrap_peer_answer(text),
+        session=str(session),
+        kind=kind,
     ).render()
 
 
@@ -412,6 +436,18 @@ def asker_policy(**changes: Any) -> None:
     seat.profiles[ASKER] = dataclasses.replace(
         asker, peers=dataclasses.replace(asker.peers, **changes)
     )
+
+
+def asker_subagents(**changes: Any) -> None:
+    """Change the asking profile's `SubagentPolicy` in the bound seat (after `install`). By
+    default the asker may spawn the one peer profile; pass `enabled=False` or `agents=()` to take
+    it back."""
+    seat = turn_workflow._dependencies.peers  # noqa: SLF001 - the test seam
+    assert seat is not None
+    asker = seat.profiles[ASKER]
+    values: dict[str, Any] = {"enabled": True, "agents": (AgentId(PEER),)}
+    values.update(changes)
+    seat.profiles[ASKER] = dataclasses.replace(asker, subagents=SubagentPolicy(**values))
 
 
 def callee_profile(**changes: Any) -> None:

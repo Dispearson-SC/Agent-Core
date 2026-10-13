@@ -37,6 +37,7 @@ from agent_core.adapters.driven.tools.background import (
     StopResult,
 )
 from agent_core.adapters.driving.workflow import turn_workflow
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peers import (
     BACKGROUND_LIST_LIMIT,
     AgentId,
@@ -71,6 +72,10 @@ _NOT_ALLOWED: Final[str] = "this agent is not allowed to run asks in the backgro
 _CAP: Final[str] = (
     "this conversation already has {limit} background asks running, which is the most it may have: "
     "wait for one to finish or stop one"
+)
+_SUBAGENT: Final[str] = (
+    "that background agent is a subagent, not a peer: it can be listed, checked and stopped, but "
+    "not messaged. Stop it and spawn a new one with the corrected task."
 )
 _GATE: Final[str] = "the message was refused by the peer gate: {reason}"
 _SESSION: Final[str] = "the child's session cannot be continued any more"
@@ -129,6 +134,8 @@ class WorkflowBackgroundAgents:
             return MessageResult(refusal=_NOT_FOUND)
         if child.state is BackgroundState.CANCELLED:
             return MessageResult(refusal=_STOPPED)
+        if child.kind is DelegationKind.SUBAGENT:
+            return MessageResult(refusal=_SUBAGENT)
         if await self._mailbox.is_background_followup(owner.session, owner.turn_id):
             return MessageResult(refusal=_IN_FOLLOW_UP)
         asker = self._profiles.get(owner.profile_id)

@@ -19,6 +19,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.peers import (
     BackgroundState,
     legacy_peer_workflow_id,
@@ -43,6 +44,8 @@ class AskRecord:
     asked_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    # C28. A peer that was asked or a subagent that was spawned.
+    kind: DelegationKind = DelegationKind.PEER
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +70,8 @@ class TaskNode:
     queued_ms: int | None
     run_ms: int | None
     children: tuple[TaskNode, ...] = ()
+    # C28. What the child is; None for the root (a turn a person started).
+    kind: DelegationKind | None = None
 
     @property
     def depth(self) -> int:
@@ -133,6 +138,7 @@ def build_task_graph(
             queued_ms=_ms(record.asked_at, record.started_at),
             run_ms=_ms(record.started_at, record.finished_at),
             children=children,
+            kind=record.kind,
         )
 
     top = tuple(

@@ -154,7 +154,11 @@ from uuid import uuid4
 
 from dbos import DBOS, Queue, SetEnqueueOptions, SetWorkflowID, WorkflowHandleAsync
 
-from agent_core.adapters.driven.peers.hop_limit import HopRefusal, authorise_hop
+from agent_core.adapters.driven.peers.hop_limit import (
+    HopRefusal,
+    authorise_hop,
+    authorise_spawn,
+)
 from agent_core.adapters.driven.peers.mailbox import cap_wrapped_answer, wrap_peer_answer
 from agent_core.adapters.driven.peers.typed_answer import answer_text_problem
 from agent_core.adapters.driving.channels.registry import ChannelRegistry, OutboundMessage
@@ -162,6 +166,7 @@ from agent_core.adapters.driving.peers.worker import new_peer_session
 from agent_core.application.compact_context import CompactContext
 from agent_core.application.resume_turn import ResolvedTool, ResumeTurn
 from agent_core.application.start_turn import StartTurn
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.answer_cache import (
     MAX_CACHED_CHARS,
     AnswerCacheKey,
@@ -183,6 +188,7 @@ from agent_core.domain.peers import (
     PeerBackgroundRefusedError,
     PeerContinuationRefusedError,
     PeerPolicy,
+    PeerSubagentRefusedError,
     PeerVisibility,
     background_followup_turn_id,
     legacy_peer_workflow_id,
@@ -190,6 +196,7 @@ from agent_core.domain.peers import (
     peer_workflow_id,
 )
 from agent_core.domain.profile import AgentProfile, profile_content_hash
+from agent_core.domain.subagents import SPAWN_SUBAGENT_TOOL
 from agent_core.domain.turn import (
     BackgroundReturn,
     PendingKind,
@@ -323,6 +330,10 @@ _ASK_TARGET: Final[str] = "target"
 _ASK_QUESTION: Final[str] = "question"
 _ASK_CONTINUE: Final[str] = "continue_session"
 _ASK_BACKGROUND: Final[str] = "background"
+# The same, for `spawn_subagent` (C28): its two keys are named for what they are, and the other two
+# (`continue_session`, `background`) are shared with `ask_peer`.
+_SPAWN_AGENT: Final[str] = "agent"
+_SPAWN_TASK: Final[str] = "task"
 
 # What the model is told when the gate refused, per reason. OUR text and not a peer's, so
 # it is deliberately NOT wrapped in the untrusted delimiters: nothing outside this process
@@ -330,6 +341,18 @@ _ASK_BACKGROUND: Final[str] = "background"
 _REFUSED: Final[str] = (
     "The peer ask was refused before it was sent, so {target!r} never received it and no "
     "answer is coming. Reason: {reason}."
+)
+_SPAWN_REFUSED: Final[str] = (
+    "The subagent was not started: {target!r} was never spawned and no result is coming. "
+    "Reason: {reason}."
+)
+_UNKNOWN_SUBAGENT: Final[str] = (
+    "The subagent was not started: no profile named {target!r} is loaded, so there is nothing to "
+    "spawn. Nothing was started."
+)
+_MALFORMED_SPAWN: Final[str] = (
+    "The subagent was not started: the call carried no usable agent and task, so there was "
+    "nothing to start and nobody to give it to."
 )
 _UNKNOWN_PEER: Final[str] = (
     "The peer ask was refused before it was sent: no profile named {target!r} is loaded, "
@@ -392,6 +415,10 @@ _BACKGROUND_IN_FOLLOW_UP: Final[str] = (
 _BACKGROUND_UNSUPPORTED: Final[str] = (
     "The peer ask was refused before it was sent: {target!r} cannot be asked in the background. "
     "Ask again without `background`."
+)
+_SUBAGENT_UNSUPPORTED: Final[str] = (
+    "The subagent was not started: {target!r} cannot be spawned by this deployment's mailbox. "
+    "Do the task yourself or ask a peer instead."
 )
 _BACKGROUND_STARTED: Final[str] = (
     "The ask is running in the background. Nothing has been answered yet. Its answer will arrive "
@@ -847,6 +874,19 @@ def _for_a_peer(pending: tuple[PendingRequest, ...]) -> tuple[PendingRequest, ..
     )
 
 
+def _kind_of(ask: PendingRequest) -> DelegationKind:
+    """Which tool made this delegation (C28): `spawn_subagent` or `ask_peer`. The runner is the
+    one producer of the kind of wait (`PendingKind`); this is the one reader of which delegation
+    tool it was, so a subagent and a peer share every step after the gate and differ only here."""
+    return DelegationKind.SUBAGENT if ask.tool_name == SPAWN_SUBAGENT_TOOL else DelegationKind.PEER
+
+
+def _target_of(ask: PendingRequest) -> object:
+    """The agent a delegation names (the model's own argument, so not yet known to be text)."""
+    key = _SPAWN_AGENT if _kind_of(ask) is DelegationKind.SUBAGENT else _ASK_TARGET
+    return ask.arguments.get(key)
+
+
 def _continued_session(ask: PendingRequest) -> str | None:
     """The session an ask asked to continue (C12), or None. Whether it was accepted is the
     dispatch's business: this is only read for asks that left, whose session it then is."""
@@ -892,6 +932,7 @@ def _own_peer_result(
     correlation_id: str | None = None,
     continued: str | None = None,
     handle: str | None = None,
+    kind: DelegationKind = DelegationKind.PEER,
 ) -> str:
     """An outcome WE wrote (timeout, cancelled, refused), as the tagged envelope. Not wrapped:
     nothing outside this process wrote the text. `correlation_id` is None for an ask that was
@@ -903,7 +944,7 @@ def _own_peer_result(
         else _peer_session_id(request, correlation_id, continued)
     )
     return PeerResult(
-        peer=target, status=status, text=text, session=session, handle=handle
+        peer=target, status=status, text=text, session=session, handle=handle, kind=kind
     ).render()
 
 
@@ -1298,8 +1339,10 @@ async def _step_ask_peers(
     )
 
     for position, ask in enumerate(pending):
-        target = ask.arguments.get(_ASK_TARGET)
-        question = ask.arguments.get(_ASK_QUESTION)
+        kind = _kind_of(ask)
+        is_subagent = kind is DelegationKind.SUBAGENT
+        target = _target_of(ask)
+        question = ask.arguments.get(_SPAWN_TASK if is_subagent else _ASK_QUESTION)
         continue_session = ask.arguments.get(_ASK_CONTINUE)
         background = ask.arguments.get(_ASK_BACKGROUND)
         if (
@@ -1322,7 +1365,8 @@ async def _step_ask_peers(
                         request,
                         target=target if isinstance(target, str) else "",
                         status=PeerStatus.REFUSED,
-                        text=_MALFORMED_ASK,
+                        text=_MALFORMED_SPAWN if is_subagent else _MALFORMED_ASK,
+                        kind=kind,
                     ),
                 )
             )
@@ -1341,21 +1385,45 @@ async def _step_ask_peers(
                         request,
                         target=target,
                         status=PeerStatus.REFUSED,
-                        text=_UNKNOWN_PEER.format(target=target),
+                        text=(_UNKNOWN_SUBAGENT if is_subagent else _UNKNOWN_PEER).format(
+                            target=target
+                        ),
+                        kind=kind,
                     ),
                 )
             )
             continue
 
-        decision = authorise_hop(
-            caller=caller,
-            caller_policy=caller_policy,
-            callee=AgentId(target),
-            callee_policy=callee_profile.peers,
-            hop=request.hop,
-            callee_mode=callee_profile.mode,
-        )
-        if not decision.allowed:
+        # THE GATE, per kind. A peer ask goes through both sides' allowlists, both switches, the
+        # callee's mode and the hop limit (`authorise_hop`). A spawn goes through the spawner's own
+        # switch and allowlist and the spawned agent's mode (`authorise_spawn`, C28): a subagent is
+        # not a peer, so `peers.enabled` and the peers' allowlists do not apply to it, while the
+        # caps, `fan_out`, timeouts and background rules below are shared on purpose.
+        next_depth = 0
+        if is_subagent:
+            spawn = authorise_spawn(
+                caller_policy=seat.profiles[request.profile_id].subagents,
+                callee=AgentId(target),
+                callee_mode=callee_profile.mode,
+                hop=request.hop,
+                depth=request.owner.subagent_depth if request.owner is not None else 0,
+            )
+            allowed, gate_text = spawn.allowed, _SPAWN_REFUSED.format(
+                target=target, reason=spawn.reason.value if spawn.reason else "refused"
+            )
+            next_hop, next_depth = spawn.next_hop, spawn.next_depth or 0
+        else:
+            decision = authorise_hop(
+                caller=caller,
+                caller_policy=caller_policy,
+                callee=AgentId(target),
+                callee_policy=callee_profile.peers,
+                hop=request.hop,
+                callee_mode=callee_profile.mode,
+            )
+            allowed, gate_text = decision.allowed, _refused(target, decision.reason)
+            next_hop = decision.next_hop
+        if not allowed:
             refusals.append(
                 (
                     ask.tool_call_id,
@@ -1363,7 +1431,8 @@ async def _step_ask_peers(
                         request,
                         target=target,
                         status=PeerStatus.REFUSED,
-                        text=_refused(target, decision.reason),
+                        text=gate_text,
+                        kind=kind,
                     ),
                 )
             )
@@ -1375,6 +1444,7 @@ async def _step_ask_peers(
                     ask.tool_call_id,
                     _own_peer_result(
                         request,
+                        kind=kind,
                         target=target,
                         status=PeerStatus.REFUSED,
                         text=_CONTINUATION_OFF.format(target=target),
@@ -1389,6 +1459,7 @@ async def _step_ask_peers(
                     ask.tool_call_id,
                     _own_peer_result(
                         request,
+                        kind=kind,
                         target=target,
                         status=PeerStatus.REFUSED,
                         text=_BACKGROUND_OFF.format(target=target),
@@ -1407,6 +1478,7 @@ async def _step_ask_peers(
                     ask.tool_call_id,
                     _own_peer_result(
                         request,
+                        kind=kind,
                         target=target,
                         status=PeerStatus.REFUSED,
                         text=_TOO_MANY_ASKS.format(
@@ -1428,6 +1500,7 @@ async def _step_ask_peers(
                         ask.tool_call_id,
                         _own_peer_result(
                             request,
+                            kind=kind,
                             target=target,
                             status=PeerStatus.REFUSED,
                             text=_BACKGROUND_IN_FOLLOW_UP.format(target=target),
@@ -1445,6 +1518,7 @@ async def _step_ask_peers(
                         ask.tool_call_id,
                         _own_peer_result(
                             request,
+                            kind=kind,
                             target=target,
                             status=PeerStatus.REFUSED,
                             text=_BACKGROUND_CAP.format(
@@ -1461,7 +1535,8 @@ async def _step_ask_peers(
         # an answer the question alone no longer identifies.
         to_remember: RememberAnswer | None = None
         if (
-            seat.answer_cache is not None
+            not is_subagent
+            and seat.answer_cache is not None
             and callee_profile.peers.answer_cache_seconds > 0
             and background is not True
             and continue_session is None
@@ -1476,8 +1551,7 @@ async def _step_ask_peers(
                 cached.append((ask.tool_call_id, recalled))
                 continue
 
-        next_hop = decision.next_hop
-        if next_hop is None:  # pragma: no cover - an allowed HopDecision always carries it
+        if next_hop is None:  # pragma: no cover - an allowed decision always carries it
             raise TurnWorkflowNotWiredError(
                 "the peer gate allowed a hop and handed back no count for it to travel "
                 "with. The count has to travel or A -> B -> A cannot be caught at all; "
@@ -1494,11 +1568,14 @@ async def _step_ask_peers(
         # step derives the same correlation id and cannot post (or run) a second peer turn.
         # C12: `continue_session` is the model's claim; the mailbox checks it against the rows
         # that created that session, and a claim it cannot back is a refusal, not a crash.
+        delegation: dict[str, Any] = (
+            {"kind": kind, "subagent_depth": next_depth} if is_subagent else {}
+        )
         try:
             correlation_id = await seat.mailbox.ask(
                 caller_policy,
                 AgentId(target),
-                _question_with_context(question, context),
+                question if is_subagent else _question_with_context(question, context),
                 from_session=request.session,
                 turn_id=turn_id,
                 hop=next_hop,
@@ -1513,6 +1590,9 @@ async def _step_ask_peers(
                 root_turn_id=(
                     request.owner.root_turn_id if request.owner is not None else str(turn_id)
                 ),
+                # C28. Passed only for a subagent, so a mailbox that predates them is not handed
+                # names it does not know.
+                **delegation,
             )
         except PeerContinuationRefusedError:
             refusals.append(
@@ -1520,9 +1600,24 @@ async def _step_ask_peers(
                     ask.tool_call_id,
                     _own_peer_result(
                         request,
+                        kind=kind,
                         target=target,
                         status=PeerStatus.REFUSED,
                         text=_CONTINUATION_REFUSED.format(target=target),
+                    ),
+                )
+            )
+            continue
+        except PeerSubagentRefusedError:
+            refusals.append(
+                (
+                    ask.tool_call_id,
+                    _own_peer_result(
+                        request,
+                        kind=kind,
+                        target=target,
+                        status=PeerStatus.REFUSED,
+                        text=_SUBAGENT_UNSUPPORTED.format(target=target),
                     ),
                 )
             )
@@ -1533,6 +1628,7 @@ async def _step_ask_peers(
                     ask.tool_call_id,
                     _own_peer_result(
                         request,
+                        kind=kind,
                         target=target,
                         status=PeerStatus.REFUSED,
                         text=_BACKGROUND_UNSUPPORTED.format(target=target),
@@ -1546,6 +1642,7 @@ async def _step_ask_peers(
                     ask.tool_call_id,
                     _own_peer_result(
                         request,
+                        kind=kind,
                         target=target,
                         status=PeerStatus.RUNNING,
                         text=_BACKGROUND_STARTED,
@@ -1622,6 +1719,7 @@ async def _step_read_peer_answer(
     target: str,
     continued: str | None = None,
     remember: RememberAnswer | None = None,
+    kind: DelegationKind = DelegationKind.PEER,
 ) -> tuple[ToolCallId, str, bool]:
     """Redeem one peer's handle WITHOUT resuming the turn.
 
@@ -1639,7 +1737,7 @@ async def _step_read_peer_answer(
             "Applying it would resume this turn on an answer given to another one."
         )
     found = await _peer_envelope(
-        answer.correlation_id, request, target, continued, remember=remember
+        answer.correlation_id, request, target, continued, remember=remember, kind=kind
     )
     if found is None:
         raise UnusableResumeAnswerError(
@@ -1666,6 +1764,7 @@ async def _peer_envelope(
     continued: str | None = None,
     handle: str | None = None,
     remember: RememberAnswer | None = None,
+    kind: DelegationKind = DelegationKind.PEER,
 ) -> tuple[str, bool] | None:
     """A stored peer answer as `(the <peer> envelope, the callee failed)`, or None when none is
     stored (C8).
@@ -1701,6 +1800,7 @@ async def _peer_envelope(
                     text=_TYPED_ANSWER_REFUSED,
                     session=session,
                     handle=handle,
+                    kind=kind,
                 ).render(),
                 True,
             )
@@ -1714,6 +1814,7 @@ async def _peer_envelope(
                 session=session,
                 data=True,
                 handle=handle,
+                kind=kind,
             ).render(),
             False,
         )
@@ -1726,13 +1827,18 @@ async def _peer_envelope(
         session=session,
         truncated=capped.truncated,
         handle=handle,
+        kind=kind,
     ).render()
     return envelope, failed
 
 
 @DBOS.step()
 async def _step_peek_peer_answer(
-    correlation_id: str, request: TurnRequest, target: str, continued: str | None = None
+    correlation_id: str,
+    request: TurnRequest,
+    target: str,
+    continued: str | None = None,
+    kind: DelegationKind = DelegationKind.PEER,
 ) -> str | None:
     """The wrapped answer already stored under a handle, or None. Read-only, no resume.
 
@@ -1743,7 +1849,7 @@ async def _step_peek_peer_answer(
     `_peer_envelope`. A failure found this way does not trip `fail_fast` (C10): this path is the
     defence for an adapter that folds repeats, and no shipped one does.
     """
-    found = await _peer_envelope(correlation_id, request, target, continued)
+    found = await _peer_envelope(correlation_id, request, target, continued, kind=kind)
     return None if found is None else found[0]
 
 
@@ -2081,6 +2187,7 @@ async def _cancel_siblings(
     timed_out: set[str],
     targets: dict[ToolCallId, str],
     continued: dict[ToolCallId, str | None],
+    kinds: dict[ToolCallId, DelegationKind],
 ) -> None:
     """`fail_fast` (C10): an ask of this step failed, so stop the asks still out. Body code.
 
@@ -2101,6 +2208,7 @@ async def _cancel_siblings(
             text=_PEER_SIBLING_CANCELLED.format(target=targets[tool_call_id]),
             correlation_id=corr,
             continued=continued[tool_call_id],
+            kind=kinds[tool_call_id],
         )
 
 
@@ -2160,7 +2268,8 @@ async def _collect_round(
     decisions: dict[ToolCallId, HumanAnswer] = {}
     awaiting: dict[str, ToolCallId] = {corr: tcid for corr, tcid in dispatch.handles}
     human_missing = {ask.tool_call_id for ask in asks if ask.kind is not PendingKind.DELEGATION}
-    targets = {ask.tool_call_id: str(ask.arguments.get(_ASK_TARGET, "")) for ask in asks}
+    targets = {ask.tool_call_id: str(_target_of(ask) or "") for ask in asks}
+    kinds = {ask.tool_call_id: _kind_of(ask) for ask in asks}
     continued = {ask.tool_call_id: _continued_session(ask) for ask in asks}
 
     # A HANDLE GIVEN OUT AGAIN AFTER A TIMEOUT. Since C13 (D36) the shipped mailboxes name an ask
@@ -2173,7 +2282,11 @@ async def _collect_round(
     for corr in [c for c in awaiting if c in timed_out]:
         timed_out.discard(corr)
         stored = await _step_peek_peer_answer(
-            corr, request, targets[awaiting[corr]], continued[awaiting[corr]]
+            corr,
+            request,
+            targets[awaiting[corr]],
+            continued[awaiting[corr]],
+            kinds[awaiting[corr]],
         )
         if stored is not None:
             peer_results[awaiting.pop(corr)] = stored
@@ -2187,6 +2300,7 @@ async def _collect_round(
                 text=_PEER_ASK_CANCELLED.format(target=targets[tool_call_id]),
                 correlation_id=corr,
                 continued=continued[tool_call_id],
+                kind=kinds[tool_call_id],
             )
 
     seconds = 0
@@ -2228,6 +2342,7 @@ async def _collect_round(
                     text=_PEER_TIMED_OUT.format(target=targets[tool_call_id], seconds=seconds),
                     correlation_id=corr,
                     continued=continued[tool_call_id],
+                    kind=kinds[tool_call_id],
                 )
             awaiting.clear()
             # C4: only the asks that timed out (the answered ones already left `awaiting`).
@@ -2300,11 +2415,12 @@ async def _collect_round(
             targets[asked_id],
             continued[asked_id],
             remembered.get(answer.correlation_id),
+            kinds[asked_id],
         )
         peer_results[asked_id] = wrapped
         if callee_failed and fan_out is FanOutPolicy.FAIL_FAST and awaiting:
             await _cancel_siblings(
-                request, awaiting, peer_results, timed_out, targets, continued
+                request, awaiting, peer_results, timed_out, targets, continued, kinds
             )
 
     return _TurnEnd(
@@ -2819,6 +2935,7 @@ async def _build_background_follow_up(job: PeerTurnJob) -> TurnRequest | None:
         job.request.profile_id,
         continued=str(job.request.session.session_id),
         handle=job.correlation_id,
+        kind=job.request.owner.kind if job.request.owner is not None else DelegationKind.PEER,
     )
     if found is None:
         return None

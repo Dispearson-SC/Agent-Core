@@ -194,3 +194,34 @@ def test_the_route_refuses_what_reading_the_turn_refuses() -> None:
 def test_a_process_without_a_graph_reader_says_unavailable() -> None:
     with _client(None) as client:
         assert client.get(f"/turns/{ROOT}/graph", headers=HEADERS).status_code == 503
+
+
+def test_a_spawned_subagent_is_a_child_like_any_other_and_says_what_it_is() -> None:
+    """C28: peers and subagents share one ownership tree; each node names its kind and the root
+    (a turn a person started) has none."""
+    from agent_core.adapters.driving.http.event_routes import graph_json
+    from agent_core.domain.agent_mode import DelegationKind
+
+    graph = build_task_graph(
+        ROOT,
+        (
+            _record("ask-a", "billing", ROOT, 0),
+            _record("spawn-b", "researcher", ROOT, 1, kind=DelegationKind.SUBAGENT),
+            _record(
+                "spawn-c",
+                "writer",
+                peer_workflow_id("spawn-b"),
+                2,
+                asker="researcher",
+                kind=DelegationKind.SUBAGENT,
+            ),
+        ),
+    )
+
+    assert graph.root.kind is None
+    billing, researcher = graph.root.children
+    assert (billing.kind, researcher.kind) == (DelegationKind.PEER, DelegationKind.SUBAGENT)
+    assert researcher.children[0].kind is DelegationKind.SUBAGENT
+    body = graph_json(graph)
+    assert body["kind"] is None
+    assert [c["kind"] for c in body["children"]] == ["peer", "subagent"]

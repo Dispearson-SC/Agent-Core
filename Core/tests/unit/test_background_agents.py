@@ -449,3 +449,40 @@ def test_a_profile_that_did_not_opt_in_cannot_message(monkeypatch: pytest.Monkey
         return await world.seat.message(OWNER, handle, "hello", MessageMode.STEER, call_id="c")
 
     assert run(scenario()).handle is None
+
+
+def test_a_background_subagent_is_listed_and_stopped_but_not_messaged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C28. A handle may name a subagent: it is listed and stopped like any child, but a message
+    would be an ask, and a subagent is not a peer to be asked. The refusal says so."""
+    from agent_core.domain.agent_mode import AgentMode, DelegationKind
+
+    world = _World(monkeypatch)
+    world.profiles[fanout.PEER] = dataclasses.replace(
+        world.profiles[fanout.PEER], mode=AgentMode.SUBAGENT
+    )
+
+    async def scenario() -> Any:
+        handle = await world.mailbox.ask(
+            world.profiles[fanout.ASKER].peers,
+            AgentId(fanout.PEER),
+            "long task",
+            from_session=SESSION,
+            turn_id=TurnId("turn-1"),
+            hop=0,
+            asker=AgentId(fanout.ASKER),
+            request_key="tc-1",
+            background_caller=CALLER,
+            kind=DelegationKind.SUBAGENT,
+            subagent_depth=1,
+        )
+        listed = await world.seat.list(OWNER)
+        message = await world.seat.message(OWNER, handle, "hello", MessageMode.STEER, call_id="c")
+        return handle, listed, message
+
+    handle, listed, message = run(scenario())
+
+    assert [(a.handle, a.kind) for a in listed] == [(handle, DelegationKind.SUBAGENT)]
+    assert message.handle is None and message.refusal and "subagent" in message.refusal
+    assert len(world.mailbox.rows) == 1, "nothing new was sent"

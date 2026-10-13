@@ -210,6 +210,7 @@ from agent_core.adapters.driven.profiles_fs.loader import load_profile_sync
 from agent_core.adapters.driven.skills_fs.registry import FilesystemSkillRegistry
 from agent_core.adapters.driven.tools import peer_background as peer_background_tools
 from agent_core.adapters.driven.tools import peers as peer_tools
+from agent_core.adapters.driven.tools import subagents as subagent_tools
 from agent_core.adapters.driven.tools.fraud import tools as fraud_tools
 from agent_core.adapters.driven.tools.provider import (
     DEFAULT_TOOL_PACKAGES,
@@ -342,6 +343,9 @@ _DEFAULT_ENV_FILE = _CORE_ROOT.parent / ".env"
 PEER_TOOLSET: Final[str] = "peers"
 # C20 (D50). The background-agent tools, granted only to a profile with `peers.allow_background`.
 PEER_BACKGROUND_TOOLSET: Final[str] = "peer_background"
+# C28. `subagents.enabled` resolves to the `spawn_subagent` tool, the way `peers.enabled` resolves
+# to `ask_peer`.
+SUBAGENT_TOOLSET: Final[str] = "subagents"
 
 # t-f11-05. THE TOOL REGISTRY THIS PROCESS SERVES.
 #
@@ -362,6 +366,7 @@ TOOL_PACKAGES: Mapping[str, ToolsetBuilder] = {
     "fraud": fraud_tools.build_toolset,
     PEER_TOOLSET: peer_tools.build_toolset,
     PEER_BACKGROUND_TOOLSET: peer_background_tools.build_toolset,
+    SUBAGENT_TOOLSET: subagent_tools.build_toolset,
 }
 
 
@@ -517,7 +522,12 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # `_step_progress(started)` right after its turn id and `_step_progress(finished|failed)` after the
 # turn, so a turn suspended under .9 replays into a different sequence. Stranded on purpose (drain
 # first, OPERATIONS.md). Nothing was deployed under .3-.9.
-PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.10"
+# .10 -> .11 with D62 (C28/C29, ONCE for the subagents batch): `PeerOwner` gained `kind` and
+# `subagent_depth`, both pickled into the peer workflow's input and the callee's request, and the
+# round's recorded steps (`_step_read_peer_answer`, `_step_peek_peer_answer`) gained a `kind`. A
+# peer workflow recovered under .11 from a .10 input would read attributes that pickle never had.
+# Stranded on purpose (drain first, OPERATIONS.md). Nothing was deployed under .3-.10.
+PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.11"
 
 # C5 (D32). The default of `Settings.max_turn_attempts` is `DEFAULT_MAX_TURN_ATTEMPTS`, defined once
 # in `turn_workflow` (where the budget is enforced) and imported above; D33 removed the second copy.
@@ -1005,12 +1015,16 @@ def _grant_peer_mechanism(profile: AgentProfile) -> AgentProfile:
     build `ask_peer` twice and `LocalToolProvider._resolve` would refuse the profile for a
     collision with itself.
     """
-    if not profile.peers.enabled:
+    if not profile.peers.enabled and not profile.subagents.enabled:
         return profile
     granted = list(profile.toolsets)
-    if PEER_TOOLSET not in granted:
+    if profile.peers.enabled and PEER_TOOLSET not in granted:
         granted.append(PEER_TOOLSET)
-    # C20. The background-agent tools ride on the same switch block: `peers.allow_background`.
+    # C28. `subagents.enabled` is its own switch, the same way: `spawn_subagent` resolves from it.
+    if profile.subagents.enabled and SUBAGENT_TOOLSET not in granted:
+        granted.append(SUBAGENT_TOOLSET)
+    # C20. The background-agent tools ride on the same switch block: `peers.allow_background`. A
+    # background SUBAGENT is managed with the same handle tools, so either switch brings them.
     if profile.peers.allow_background and PEER_BACKGROUND_TOOLSET not in granted:
         granted.append(PEER_BACKGROUND_TOOLSET)
     return replace(profile, toolsets=tuple(granted))

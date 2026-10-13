@@ -126,16 +126,21 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from agent_core.adapters.driven.agent_pydantic.reply_stream import ReplyStreamHandler
 from agent_core.adapters.driven.mcp.toolsets import result_budget_for
-from agent_core.adapters.driven.peers.catalogue import build_peer_catalogue
+from agent_core.adapters.driven.peers.catalogue import (
+    build_peer_catalogue,
+    build_subagent_catalogue,
+)
 from agent_core.adapters.driven.peers.typed_answer import answer_problem
 from agent_core.adapters.driven.tools.background import BackgroundAgents, BackgroundOwner
 from agent_core.adapters.driven.tools.context import PeerEntry, TurnContext
 from agent_core.application.ingest_media import sniff_media
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.compaction import CompactionPolicy, ContextState
 from agent_core.domain.knowledge import KnowledgeHit, TenantKnowledgePolicy
 from agent_core.domain.media import MediaDelivery, MediaKind
 from agent_core.domain.policy import Effect, PolicyDecision, RuleSet
 from agent_core.domain.profile import AgentProfile, profile_content_hash
+from agent_core.domain.subagents import SPAWN_SUBAGENT_TOOL
 from agent_core.domain.turn import (
     CallerIdentity,
     PendingKind,
@@ -1104,7 +1109,9 @@ def _deferred_results(
 # readers to one writer. A second agent-executed mechanism adds a row to
 # `_DELEGATED_TOOL_NAMES` and every consumer downstream keeps asking `kind`.
 ASK_PEER_TOOL_NAME: Final[str] = "ask_peer"
-_DELEGATED_TOOL_NAMES: Final[frozenset[str]] = frozenset({ASK_PEER_TOOL_NAME})
+_DELEGATED_TOOL_NAMES: Final[frozenset[str]] = frozenset(
+    {ASK_PEER_TOOL_NAME, SPAWN_SUBAGENT_TOOL}
+)
 
 # What a person is told about an approval that arrived with no metadata of its own - a
 # tool body raising a bare `ApprovalRequired`, which is the one shape that carries no
@@ -1177,6 +1184,10 @@ def _pending_reason(
                 return reason
             return f"{_APPROVAL_REASON} Tool: {call.tool_name}."
         case PendingKind.DELEGATION:
+            if call.tool_name == SPAWN_SUBAGENT_TOOL:
+                agent = metadata.get("agent", "a subagent")
+                task = metadata.get("task", "")
+                return f"Spawned {agent}: {task}".rstrip(": ").rstrip()
             target = metadata.get("target", "another agent")
             question = metadata.get("question", "")
             return f"Asked {target}: {question}".rstrip(": ").rstrip()
@@ -1512,6 +1523,8 @@ class PydanticAgentRunner:
                     session=request.session,
                     agent_id=request.profile_id,
                     peer_catalogue=self._peer_catalogue(profile, rules),
+                    subagent_catalogue=self._subagent_catalogue(profile, rules),
+                    can_spawn=self._can_spawn(request),
                     allow_continuation=profile.peers.allow_continuation,
                     allow_background=profile.peers.allow_background,
                     **self._background_deps(profile, turn_id, request.caller, request.session),
@@ -1676,6 +1689,7 @@ class PydanticAgentRunner:
                     session=session,
                     agent_id=profile.id,
                     peer_catalogue=self._peer_catalogue(profile, rules),
+                    subagent_catalogue=self._subagent_catalogue(profile, rules),
                     allow_continuation=profile.peers.allow_continuation,
                     allow_background=profile.peers.allow_background,
                     **self._background_deps(profile, turn_id, caller, session),
@@ -1788,6 +1802,37 @@ class PydanticAgentRunner:
                 self._policy.decide(rules, "ask_peer", {"target": target}).effect is not Effect.DENY
             ),
         )
+
+    def _subagent_catalogue(
+        self, profile: AgentProfile, rules: RuleSet
+    ) -> tuple[PeerEntry, ...] | None:
+        """The agents `spawn_subagent` may name this turn (C28), or None when no directory is wired.
+
+        The same per-target rule as the peers' menu: a DENY for `spawn_subagent` with
+        `{"agent": id}` hides that agent, and DENY wins over any allow (the policy reduces by
+        effect precedence). A NEEDS_APPROVAL one stays: a person just has to agree.
+        """
+        if self._peer_profiles is None:
+            return None
+        return build_subagent_catalogue(
+            profile,
+            self._peer_profiles,
+            permits=lambda agent: (
+                self._policy.decide(rules, SPAWN_SUBAGENT_TOOL, {"agent": agent}).effect
+                is not Effect.DENY
+            ),
+        )
+
+    @staticmethod
+    def _can_spawn(request: TurnRequest) -> bool:
+        """Whether this turn is offered `spawn_subagent` at all: not when it IS a subagent.
+
+        This is the restricted toolset of a subagent (its profile's tools minus `spawn_subagent`).
+        It is the menu only; the workflow's gate is what enforces the rule (C29 makes both
+        depth-aware).
+        """
+        owner = request.owner
+        return owner is None or owner.kind is not DelegationKind.SUBAGENT
 
     def _per_turn_toolsets(
         self, caller: CallerIdentity, profile: AgentProfile

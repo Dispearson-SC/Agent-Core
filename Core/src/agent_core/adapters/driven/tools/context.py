@@ -51,3 +51,8 @@ class TurnContext:
     # None (the tools are hidden) unless the profile opted in AND the deployment wired a seat.
     background: BackgroundAgents | None = None
     background_owner: BackgroundOwner | None = None
+    # C28. The agents `spawn_subagent` may name THIS turn (None = not computed, the static tool;
+    # empty = nobody, the tool is hidden) and whether this turn may spawn at all (false for a
+    # subagent that is already as deep as its chain may go: it gets the restricted toolset).
+    subagent_catalogue: tuple[PeerEntry, ...] | None = None
+    can_spawn: bool = True

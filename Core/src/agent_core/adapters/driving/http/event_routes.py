@@ -109,6 +109,7 @@ def _node_json(node: TaskNode) -> dict[str, Any]:
         "handle": node.handle,
         "state": None if node.state is None else node.state.value,
         "background": node.background,
+        "kind": None if node.kind is None else node.kind.value,
         "asked_at": None if node.asked_at is None else node.asked_at.isoformat(),
         "queued_ms": node.queued_ms,
         "run_ms": node.run_ms,

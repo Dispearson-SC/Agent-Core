@@ -669,6 +669,16 @@ spawns `subagent`/`all`. Asking a `primary` or a `subagent` is a `refused` envel
 A turn another agent started, and the follow-up that brings a background answer home, are not channel
 starts.
 
+**Subagents (C28, D62).** `spawn_subagent(agent, task, background?, continue_session?)` starts a
+profile as a child of the current turn, on the same machinery as a peer ask: a deferred delegation,
+a `peer_messages` row (`kind = 'subagent'`, `subagent_depth`), a durable child workflow, the same
+collect round (one resume for the whole step), caps, `fan_out`, timeouts, cancel cascade, background
+rules, progress events and the C8 envelope (with `kind="subagent"`). Its gate is its own: the
+spawner's `subagents.enabled` and `subagents.agents` allowlist and the spawned profile's `mode`; C15
+policy rules narrow by `resource` (the `agent`) and `deny` wins. The subagent sees its task and
+nothing of the conversation, runs with its own profile's tools, and is not offered `spawn_subagent`
+unless the depth limit allows (C29). The ownership tree labels each child `peer` or `subagent`.
+
 **Model tiering (C24, D56).** A profile may declare `model_fast` (and `fast_steps`, default
 `[peer_answer]`). `StartTurn` runs a turn another agent started to answer an ask on that model
 (`AgentProfile.for_step`); a person's own turn, a resumed turn and any profile without `model_fast`

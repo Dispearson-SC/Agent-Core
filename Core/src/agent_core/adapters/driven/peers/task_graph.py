@@ -14,6 +14,7 @@ import asyncio
 
 from agent_core.adapters.driven.events_pg.connections import EventConnections
 from agent_core.adapters.driven.peers.mailbox import background_state
+from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.task_graph import AskRecord, AskWindow
 
 __all__ = ["PgTaskGraphReader"]
@@ -21,7 +22,7 @@ __all__ = ["PgTaskGraphReader"]
 _SQL = """
     SELECT correlation_id, target_agent_id, from_agent_id, turn_id, state, answer_failed,
            answered_at, background IS NOT NULL, redeliveries, enqueued_at, delivered_at,
-           cancelled_at, count(*) OVER ()
+           cancelled_at, count(*) OVER (), kind
     FROM peer_messages
     WHERE from_tenant_id = %s
       AND (root_turn_id = %s OR (root_turn_id IS NULL AND turn_id = %s))
@@ -63,6 +64,7 @@ class PgTaskGraphReader:
                     asked_at=row[9],
                     started_at=row[10],
                     finished_at=row[11] if cancelled else row[6],
+                    kind=DelegationKind(str(row[13])),
                 )
             )
         total = 0 if not rows else int(rows[0][12])

@@ -117,3 +117,13 @@ def test_the_worker_polls_a_subagent_that_a_spawner_may_spawn_and_one_declared_a
     polled = answerable_targets(profiles)
 
     assert polled == (AgentId("asked"), AgentId("declared"), AgentId("listed"))
+
+
+def test_the_console_renders_a_spawn_as_a_spawn() -> None:
+    from agent_core.adapters.driving.cli.console import _raw_delegation_ask
+
+    assert _raw_delegation_ask({"agent": "researcher", "task": "find it"}) == (
+        "spawned researcher: find it"
+    )
+    assert _raw_delegation_ask({"target": "billing", "question": "q"}) == "asked billing: q"
+    assert _raw_delegation_ask({"agent": "researcher"}) == "spawned researcher (no task recorded)"

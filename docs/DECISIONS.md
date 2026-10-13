@@ -2362,3 +2362,48 @@ back to `all` would silently widen who may reach the agent). The mode is part of
   entry point and askable, that is `all`.
 - **Not done here:** the A2A boundary (an inbound A2A task to a `primary`) is a transport adapter that
   does not exist in this codebase as an inbound server, so there is nothing to refuse there yet.
+
+## D62 - Subagents (C28)
+
+`spawn_subagent(agent, task, background?, continue_session?)` starts a profile as a CHILD of the
+current turn. It is the second delegation tool, not a second mechanism.
+
+- **Shared machinery, one gate of its own.** The call is a deferred `DELEGATION` like `ask_peer`; the
+  workflow's `_step_ask_peers` handles both, so the mailbox row, the idempotent request key, the
+  parallel and concurrent caps, `fan_out` (`fail_fast`), the reply timeout, the cancel cascade, the
+  background rules (opt-in, cap, a follow-up turn refuses further background), continuation, the
+  progress events and the C8 envelope are the peers' own. The child runs as a durable child workflow
+  of the parent (`peer_workflow_id`), so two spawns in a step run in parallel and the parent resumes
+  ONCE; aborting the parent cancels both (the same `cancel_turn`, expiry and timeout paths). Only the
+  gate differs (`authorise_spawn`): the spawner's `subagents.enabled`, the spawner's
+  `subagents.agents` allowlist (empty means nobody) and the spawned agent's `mode`
+  (`spawnable`). `peers.enabled` and the peers' allowlists do not apply to a subagent; the caps,
+  `fan_out`, timeouts and background switches are read from the SPAWNER's `peers:` block, because that
+  is where they already live and a second copy of each would drift.
+- **The row says what the child is.** Migration `0041` adds `peer_messages.kind` (`peer` | `subagent`,
+  default `peer`) and `subagent_depth` (default 0). They travel on `PeerAsk` and on `PeerOwner`
+  (`kind`, `subagent_depth`), so the worker starts the child knowing both; `AgentMailbox.ask` gained
+  `kind` and `subagent_depth` (passed only for a subagent). The A2A adapter refuses a subagent
+  (`PeerSubagentRefusedError`: a peer in another process cannot be a child this turn owns).
+- **The envelope names it.** `<peer id=".." kind="subagent" status="..">`: the same tag as a peer's,
+  with a `kind` attribute only on a subagent, so a peer's envelope is byte-for-byte unchanged.
+- **The task is the whole brief.** A peer ask can carry the asker's conversation (C18); a subagent
+  receives its task and nothing else, and its result is untrusted content like any peer answer.
+- **No answer cache.** A subagent is a worker for one task, not a specialist whose answers repeat.
+- **Policy is C15's.** `spawn_subagent` rules narrow by `resource` (the `agent` argument, via
+  `RESOURCE_ARGUMENTS`), `deny` wins, `needs_approval` routes to the human approval, and a denied
+  agent is absent from the tool's menu (a per-turn enum, like the peers').
+- **The restricted toolset.** A turn that is itself a subagent is not offered `spawn_subagent`
+  (C29 makes that depth-aware); the profile's other tools are its own. Its toolset is its own
+  profile's, not the parent's.
+- **Messaging a running subagent is refused.** `peer_message` would be an ask, and a subagent is not a
+  peer to be asked. Stop it (`peer_stop`) and spawn again with the corrected task. Conservative; it can
+  be relaxed once there is a use for it.
+- **The peer worker polls subagent queues** (`answerable_targets`): any profile with `mode: subagent`
+  and any agent a profile with `subagents.enabled` lists, besides `peers.enabled` ones.
+- **`PINNED_DBOS_APPLICATION_VERSION` is `agent-core-turns.11`** (once for C28 and C29): `PeerOwner`
+  gained fields that are pickled into the peer workflow input, and the round's recorded steps gained a
+  `kind`. OPERATIONS has the drain note.
+- **Profile key deviation, recorded.** The task text names the depth `subagent_depth` on the profile;
+  it is `subagents.depth` inside the `subagents:` block that also carries the switch and the allowlist
+  (D63).

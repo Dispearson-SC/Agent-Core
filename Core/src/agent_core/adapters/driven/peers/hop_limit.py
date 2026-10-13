@@ -61,6 +61,7 @@ from enum import StrEnum
 
 from agent_core.domain.agent_mode import AgentMode
 from agent_core.domain.peers import AgentId, PeerPolicy
+from agent_core.domain.subagents import SubagentPolicy
 
 
 class HopRefusal(StrEnum):
@@ -137,3 +138,50 @@ def authorise_hop(
         return _refuse(HopRefusal.CALLEE_DOES_NOT_ALLOW_CALLER)
 
     return HopDecision(allowed=True, next_hop=hop + 1)
+
+
+class SpawnRefusal(StrEnum):
+    """Why a spawn did not become a subagent (C28, D62). Distinct per cause, like `HopRefusal`:
+    the first is fixed in the spawner's profile, the second in the same place, the third in the
+    spawned agent's."""
+
+    CALLER_SUBAGENTS_DISABLED = "caller_subagents_disabled"
+    CALLER_DOES_NOT_ALLOW_SUBAGENT = "caller_does_not_allow_subagent"
+    CALLEE_MODE_NOT_SPAWNABLE = "callee_mode_not_spawnable"
+
+
+@dataclass(frozen=True, slots=True)
+class SpawnDecision:
+    """The verdict on a spawn, plus the depth and hop the child travels with when it is allowed.
+
+    Like `HopDecision`, the numbers exist only on an allowed decision and the reason only on a
+    refusal."""
+
+    allowed: bool
+    reason: SpawnRefusal | None = None
+    next_hop: int | None = None
+    next_depth: int | None = None
+
+
+def authorise_spawn(
+    *,
+    caller_policy: SubagentPolicy,
+    callee: AgentId,
+    callee_mode: AgentMode,
+    hop: int,
+    depth: int,
+) -> SpawnDecision:
+    """May the spawner (whose policy this is) spawn `callee`, at this `hop` and subagent `depth`?
+
+    Checks run in a fixed order so one cause is reported for one refusal: the spawner's switch,
+    the spawner's allowlist, then the spawned agent's mode. Every branch fails closed, and
+    `callee` must be in the allowlist even when its mode would allow it: a mode removes reach, it
+    never grants it. Keyword-only, for `authorise_hop`'s reason.
+    """
+    if not caller_policy.enabled:
+        return SpawnDecision(False, SpawnRefusal.CALLER_SUBAGENTS_DISABLED)
+    if not caller_policy.may_spawn(callee):
+        return SpawnDecision(False, SpawnRefusal.CALLER_DOES_NOT_ALLOW_SUBAGENT)
+    if not callee_mode.spawnable:
+        return SpawnDecision(False, SpawnRefusal.CALLEE_MODE_NOT_SPAWNABLE)
+    return SpawnDecision(True, next_hop=hop, next_depth=depth + 1)
