@@ -1,0 +1,6 @@
+# A bridge: it is never listed in AGENT_CORE_ADDONS. It activates when BOTH dependencies are enabled.
+name: sample_bridge
+version: 1.0.0
+core: ">=0.0,<1"
+depends: [sample_base, sample_extra]
+auto_install: true

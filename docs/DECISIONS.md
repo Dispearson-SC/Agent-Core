@@ -2659,3 +2659,34 @@ decision 2026-10-13) and are described by `addon.yaml`.
 - **Core's own version is `0.0.0`** (`pyproject.toml`), so a manifest written today declares
   `core: ">=0.0,<1"`; the roadmap's `>=1.0,<2` becomes meaningful when Core is versioned 1.0.
 
+
+## D71 - Addon loading and resolution (A2)
+
+- **Explicit list, with one exception that is not a scan.** `AGENT_CORE_ADDONS=a,b` (the roadmap
+  writes `ADDONS`; the `AGENT_CORE_` prefix is every other setting's) is the only way an addon is
+  enabled. A bridge (`auto_install: true`) activates when ALL its dependencies are active, and
+  never otherwise, so it cannot be listed-by-presence. To find bridges the loader reads the
+  `addon.yaml` of the OTHER directories of the addons root, only far enough to see
+  `auto_install: true`; an unlisted addon that is not a bridge is never validated, imported or
+  able to break startup. A bridge found this way is validated in full and a broken one FAILS
+  startup (staying silently off would hide it). Rejected: requiring bridges in the list (then
+  `auto_install` means nothing) and a second allow-list (two lists to keep in step).
+- **Dependencies are never enabled for you.** `top` needing an unlisted `base` fails with
+  "add it to AGENT_CORE_ADDONS"; enabling something is always a visible decision. The same applies
+  to a bridge that is listed explicitly.
+- **Order.** Dependencies first; unrelated addons keep the listed order; bridges follow in
+  activation order. A cycle is reported as its path (`a -> b -> a`).
+- **Core version.** Checked for every active addon, bridges included, against
+  `importlib.metadata.version("agent-core")` as a PEP 440 specifier (prereleases accepted, so a dev
+  build is not locked out). A bridge that would activate but does not fit fails startup.
+- **Paths a manifest points at must exist.** `profiles`, `fragments`, `migrations` (directories)
+  and `policy` (a file) are checked at load, after symlinks are resolved, so a path cannot leave the
+  addon directory.
+- **Root.** `AGENT_CORE_ADDONS_DIR`, default `<repository>/addons` (monorepo, user decision). An
+  installed wheel has no such directory; set the variable there. With nothing enabled the root is
+  not touched.
+- **Sample addons are committed** in `addons/` (`sample_base`, `sample_extra`, and the bridge
+  `sample_bridge`), the smallest worked example for the authoring guide and A8. Variants that must
+  be broken (cycles, bad manifests) are built in `tmp_path` by the tests.
+- **Entry point.** `load_addons_from_environment(env)` returns the active addons in activation
+  order. The composition root will call it in A4; nothing is registered yet.

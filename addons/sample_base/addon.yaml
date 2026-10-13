@@ -1,0 +1,17 @@
+# A minimal addon: the smallest thing that follows docs/ARCHITECTURE.md "Addons". It exists so the
+# loader, the resolver and the settings have a real directory to read in tests.
+name: sample_base
+version: 1.0.0
+core: ">=0.0,<1"
+provides:
+  fragments: fragments/
+settings:
+  greeting:
+    type: str
+    default: hello
+    description: The word the sample fragment opens with.
+  max_items:
+    type: int
+    default: 3
+    minimum: 1
+    maximum: 10
