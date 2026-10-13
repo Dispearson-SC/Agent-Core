@@ -512,3 +512,82 @@ def test_a_stalled_event_store_costs_a_bounded_queue_not_unbounded_memory() -> N
     assert "".join(e.text or "" for e in events.deltas) == "".join(
         f"Sentence {n}. " for n in range(50)
     ), "nothing was lost: overflow is coalesced"
+
+
+# --- C1r: the publish worker never outlives the stream ---
+
+
+def _stalled_events() -> _Events:
+    events = _Events()
+
+    async def stalled(event: ProgressEvent) -> None:
+        await asyncio.Event().wait()  # the store never answers
+
+    events.publish = stalled  # type: ignore[method-assign]
+    return events
+
+
+def _other_tasks() -> list[asyncio.Task[Any]]:
+    return [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+
+def test_a_failing_model_stream_leaves_no_publish_worker_behind() -> None:
+    """C1r R3/R4: the stream raises while a chunk is waiting on a stalled store. The worker is
+    cancelled and awaited before the error leaves the handler, so nothing keeps publishing the
+    text of a turn that already failed."""
+    handler = _handler(_stalled_events())
+
+    async def broken() -> AsyncIterator[Any]:
+        yield PartStartEvent(index=0, part=TextPart("One. Two"))
+        await asyncio.sleep(0)  # let the worker start on the first sentence
+        raise RuntimeError("the model broke")
+
+    async def scenario() -> list[asyncio.Task[Any]]:
+        with pytest.raises(RuntimeError, match="the model broke"):
+            await handler(None, broken())
+        return _other_tasks()
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_a_cancelled_turn_leaves_no_publish_worker_behind() -> None:
+    handler = _handler(_stalled_events())
+    started = asyncio.Event()
+
+    async def hanging() -> AsyncIterator[Any]:
+        yield PartStartEvent(index=0, part=TextPart("One. Two"))
+        started.set()
+        await asyncio.Event().wait()
+
+    async def scenario() -> list[asyncio.Task[Any]]:
+        task = asyncio.create_task(handler(None, hanging()))
+        await started.wait()
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return _other_tasks()
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_a_store_that_never_answers_is_given_up_on_after_the_flush_timeout() -> None:
+    handler = ReplyStreamHandler(
+        _stalled_events(),
+        turn_id=TurnId("turn-1"),
+        session=SESSION,
+        agent="p",
+        flush_timeout=0.05,
+    )
+
+    async def scenario() -> list[asyncio.Task[Any]]:
+        await handler(
+            None,
+            _stream(
+                PartStartEvent(index=0, part=TextPart("One. ")),
+                PartEndEvent(index=0, part=TextPart("One. ")),
+            ),
+        )
+        return _other_tasks()
+
+    assert asyncio.run(scenario()) == []

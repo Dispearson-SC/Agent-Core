@@ -39,6 +39,7 @@ import logging
 import uuid
 from collections import deque
 from collections.abc import AsyncIterable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -66,6 +67,16 @@ DEFAULT_FLUSH_TIMEOUT_SECONDS = 5.0
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+@dataclass(slots=True)
+class _Chunk:
+    """One piece of reply text waiting to be published. Mutable on purpose: overflow is merged
+    into the newest pending chunk of the same response."""
+
+    response: int
+    index: int
+    text: str
 
 
 class ReplyStreamHandler:
@@ -96,8 +107,7 @@ class ReplyStreamHandler:
         self._disabled = False
         self._max_pending = max_pending
         self._flush_timeout = flush_timeout
-        # [response, index, text]; a list so overflow can be merged into the newest entry.
-        self._pending: deque[list[Any]] = deque()
+        self._pending: deque[_Chunk] = deque()
         self._worker: asyncio.Task[None] | None = None
         self._overflow_logged = False
 
@@ -108,23 +118,27 @@ class ReplyStreamHandler:
 
     async def __call__(self, _ctx: Any, stream: AsyncIterable[AgentStreamEvent]) -> None:
         try:
-            async for event in stream:
-                if isinstance(event, PartStartEvent):
-                    if event.index == 0:  # the first part of a model response
-                        self._response += 1
-                        self._index = 0
-                    if isinstance(event.part, TextPart):
-                        self._chunker = ReplyChunker()
-                        self._enqueue(self._chunker.push(event.part.content))
-                elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
-                    self._enqueue(self._chunker.push(event.delta.content_delta))
-                elif isinstance(event, PartEndEvent) and isinstance(event.part, TextPart):
-                    self._enqueue(self._chunker.flush())
-            self._enqueue(self._chunker.flush())
-        except asyncio.CancelledError:
-            self._abandon()
-            raise
-        await self._flush()
+            await self._consume(stream)
+            await self._flush()
+        finally:
+            # However the stream ended (finished, raised, cancelled) the publish worker ends with
+            # it: cancelled AND awaited, so nothing keeps publishing the text of a finished turn.
+            await self._reap()
+
+    async def _consume(self, stream: AsyncIterable[AgentStreamEvent]) -> None:
+        async for event in stream:
+            if isinstance(event, PartStartEvent):
+                if event.index == 0:  # the first part of a model response
+                    self._response += 1
+                    self._index = 0
+                if isinstance(event.part, TextPart):
+                    self._chunker = ReplyChunker()
+                    self._enqueue(self._chunker.push(event.part.content))
+            elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
+                self._enqueue(self._chunker.push(event.delta.content_delta))
+            elif isinstance(event, PartEndEvent) and isinstance(event.part, TextPart):
+                self._enqueue(self._chunker.flush())
+        self._enqueue(self._chunker.flush())
 
     def _enqueue(self, chunks: list[str]) -> None:
         for text in chunks:
@@ -135,14 +149,14 @@ class ReplyStreamHandler:
             if len(self._pending) >= self._max_pending:
                 self._coalesce(text)
                 continue
-            self._pending.append([self._response, index, text])
+            self._pending.append(_Chunk(self._response, index, text))
             if self._worker is None or self._worker.done():
                 self._worker = asyncio.get_running_loop().create_task(self._drain())
 
     def _coalesce(self, text: str) -> None:
         newest = self._pending[-1]
-        if newest[0] == self._response and len(newest[2]) + len(text) <= MAX_DELTA_CHARS:
-            newest[2] += text
+        if newest.response == self._response and len(newest.text) + len(text) <= MAX_DELTA_CHARS:
+            newest.text += text
             return
         if not self._overflow_logged:
             self._overflow_logged = True
@@ -154,8 +168,8 @@ class ReplyStreamHandler:
 
     async def _drain(self) -> None:
         while self._pending and not self._disabled:
-            response, index, text = self._pending.popleft()
-            await self._publish(response, index, text)
+            chunk = self._pending.popleft()
+            await self._publish(chunk.response, chunk.index, chunk.text)
 
     async def _flush(self) -> None:
         worker = self._worker
@@ -176,6 +190,13 @@ class ReplyStreamHandler:
         self._pending.clear()
         if self._worker is not None and not self._worker.done():
             self._worker.cancel()
+
+    async def _reap(self) -> None:
+        """Cancel whatever is still publishing and wait until it has actually stopped."""
+        self._abandon()
+        worker, self._worker = self._worker, None
+        if worker is not None:
+            await asyncio.gather(worker, return_exceptions=True)
 
     async def _publish(self, response: int, index: int, text: str) -> None:
         discriminator = f"{self._run}:{response}:{index}"

@@ -2451,3 +2451,8 @@ current turn. It is the second delegation tool, not a second mechanism.
   subagent at its depth limit is not offered `spawn_subagent` after a person approves. The gate
   already refused the spawn; this stops offering a tool that cannot work. Port change: both fakes,
   the frozen-port stub and every `execute` fake of the resume seat gained the keyword.
+- **R3 / R4 / R2-004. The reply publish worker is always reaped.** `ReplyStreamHandler.__call__`
+  consumes the stream, flushes, and in a `finally` cancels AND awaits the worker (`_reap`), so a
+  model stream that raises, a cancelled turn and a flush timeout all leave no task publishing the
+  text of a finished turn. The pending queue holds a small `_Chunk` dataclass instead of an untyped
+  `[response, index, text]` list.
