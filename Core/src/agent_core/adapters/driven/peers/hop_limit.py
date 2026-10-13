@@ -141,9 +141,10 @@ def authorise_hop(
 
 
 class SpawnRefusal(StrEnum):
-    """Why a spawn did not become a subagent (C28, D62). Distinct per cause, like `HopRefusal`:
-    the first is fixed in the spawner's profile, the second in the same place, the third in the
-    spawned agent's."""
+    """Why a spawn did not become a subagent (C28, D62). Distinct per cause, like `HopRefusal`, and
+    listed in the order the gate checks them. The first two are fixed in the spawner's profile
+    (its switch, its allowlist); the next two in the spawned agent's (its `mode`, its
+    `accept_from`); the last two are limits both profiles bound (depth, hops)."""
 
     CALLER_SUBAGENTS_DISABLED = "caller_subagents_disabled"
     CALLER_DOES_NOT_ALLOW_SUBAGENT = "caller_does_not_allow_subagent"

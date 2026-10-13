@@ -1575,11 +1575,7 @@ async def _step_ask_peers(
         # step derives the same correlation id and cannot post (or run) a second peer turn.
         # C12: `continue_session` is the model's claim; the mailbox checks it against the rows
         # that created that session, and a claim it cannot back is a refusal, not a crash.
-        delegation: dict[str, Any] = (
-            {"kind": kind, "subagent_depth": next_depth}
-            if is_subagent
-            else ({"subagent_depth": next_depth} if next_depth else {})
-        )
+        delegation = _delegation_fields(kind, next_depth)
         try:
             correlation_id = await seat.mailbox.ask(
                 caller_policy,
@@ -1599,8 +1595,6 @@ async def _step_ask_peers(
                 root_turn_id=(
                     request.owner.root_turn_id if request.owner is not None else str(turn_id)
                 ),
-                # C28. Passed only for a subagent, so a mailbox that predates them is not handed
-                # names it does not know.
                 **delegation,
             )
         except PeerContinuationRefusedError:
@@ -1673,6 +1667,16 @@ async def _step_ask_peers(
         cached=tuple(cached),
         remember=tuple(remember),
     )
+
+
+def _delegation_fields(kind: DelegationKind, depth: int) -> dict[str, Any]:
+    """The mailbox `ask` keywords that exist only for subagents (C28, C29): `kind` and
+    `subagent_depth`. A plain peer ask at depth 0 passes neither, so a mailbox that predates them
+    is not handed names it does not know; a peer ask inside a subagent chain passes the depth
+    alone, so the chain's depth survives the peer in the middle."""
+    if kind is DelegationKind.SUBAGENT:
+        return {"kind": kind, "subagent_depth": depth}
+    return {"subagent_depth": depth} if depth else {}
 
 
 def _require_resume_turn() -> ResumeTurn:

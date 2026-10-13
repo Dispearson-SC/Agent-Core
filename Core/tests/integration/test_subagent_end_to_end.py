@@ -147,7 +147,7 @@ def test_aborting_the_parent_cancels_both_subagents(monkeypatch: pytest.MonkeyPa
             await w.until(lambda: len(start.requests) == 3, "both subagents to start")
             seen["cancelled"] = await turn_workflow.cancel_turn(w.ASKING_TURN, "operator abort")
             for name in (w.B, w.C):
-                corr = next(c for c, (_, _, _) in w.rows(_DATABASE).items() if _kind(c) == name)
+                corr = next(c for c in w.rows(_DATABASE) if _target_of(c) == name)
                 seen[name] = await w.status(turn_workflow.peer_workflow_id(corr))
             start.gate.set()
             await asyncio.sleep(0.5)
@@ -160,7 +160,8 @@ def test_aborting_the_parent_cancels_both_subagents(monkeypatch: pytest.MonkeyPa
     assert all(answer is None for _, _, answer in w.rows(_DATABASE).values())
 
 
-def _kind(correlation_id: str) -> str:
+def _target_of(correlation_id: str) -> str:
+    """The agent a mailbox row is addressed to."""
     with psycopg.connect(w.conninfo(_DATABASE)) as conn:
         row = conn.execute(
             "SELECT target_agent_id FROM peer_messages WHERE correlation_id = %s", (correlation_id,)

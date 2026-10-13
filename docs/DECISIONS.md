@@ -2471,3 +2471,8 @@ current turn. It is the second delegation tool, not a second mechanism.
   implicit transaction, where the validation would still run under the first statement's lock.
   Editing 0041 is acceptable because the branch was never deployed; a database that applied the old
   0041 holds a valid constraint and 0042 is a no-op there.
+- **Readability items (R2-001, R2-002, R2-005, R2-006), behavior unchanged.** The nested conditional
+  that built the subagent keywords of `mailbox.ask` is `_delegation_fields(kind, depth)`; the three
+  toolset grants of `_grant_peer_mechanism` are one table of (switch, toolset); the `SpawnRefusal`
+  docstring lists the causes in gate order; the end-to-end test's `_kind` (which returned a target
+  agent) is `_target_of` and its generator no longer unpacks an unused tuple.

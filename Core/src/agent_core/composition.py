@@ -1017,16 +1017,18 @@ def _grant_peer_mechanism(profile: AgentProfile) -> AgentProfile:
     """
     if not profile.peers.enabled and not profile.subagents.enabled:
         return profile
+    # (switch, toolset it grants), in the order the names are appended. `subagents.enabled` is its
+    # own switch (C28: `spawn_subagent` resolves from it). The background-agent tools (C20) ride on
+    # `peers.allow_background`; a background SUBAGENT is managed with the same handle tools.
+    grants = (
+        (profile.peers.enabled, PEER_TOOLSET),
+        (profile.subagents.enabled, SUBAGENT_TOOLSET),
+        (profile.peers.allow_background, PEER_BACKGROUND_TOOLSET),
+    )
     granted = list(profile.toolsets)
-    if profile.peers.enabled and PEER_TOOLSET not in granted:
-        granted.append(PEER_TOOLSET)
-    # C28. `subagents.enabled` is its own switch, the same way: `spawn_subagent` resolves from it.
-    if profile.subagents.enabled and SUBAGENT_TOOLSET not in granted:
-        granted.append(SUBAGENT_TOOLSET)
-    # C20. The background-agent tools ride on the same switch block: `peers.allow_background`. A
-    # background SUBAGENT is managed with the same handle tools, so either switch brings them.
-    if profile.peers.allow_background and PEER_BACKGROUND_TOOLSET not in granted:
-        granted.append(PEER_BACKGROUND_TOOLSET)
+    granted.extend(
+        toolset for switched_on, toolset in grants if switched_on and toolset not in granted
+    )
     return replace(profile, toolsets=tuple(granted))
 
 
