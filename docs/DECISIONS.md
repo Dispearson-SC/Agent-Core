@@ -2465,3 +2465,9 @@ current turn. It is the second delegation tool, not a second mechanism.
   failed snapshot reads (idle, lag or terminal-event reads) the stream yields `FeedKind.ERROR`
   (SSE `event: error`) and ends; a success resets the count. Rejected: exponential back-off, since
   the retry is already paced by the idle period (at most 5 s) and the bound is what stops it.
+- **R4. The `kind` CHECK is added without the long lock (0041 edited, 0042 added).** A plain
+  `ADD CONSTRAINT ... CHECK` scans `peer_messages` under a write-blocking lock. 0041 now adds it
+  `NOT VALID`; 0042 runs `VALIDATE CONSTRAINT`. Two migrations, not one: a migration string is one
+  implicit transaction, where the validation would still run under the first statement's lock.
+  Editing 0041 is acceptable because the branch was never deployed; a database that applied the old
+  0041 holds a valid constraint and 0042 is a no-op there.

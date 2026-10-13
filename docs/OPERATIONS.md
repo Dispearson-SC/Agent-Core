@@ -181,7 +181,8 @@ the OLD build must report 0), deploy, run `stranded-turns` again and cancel what
 round's recorded steps gained a `kind`, so a callee or a turn suspended on peers under `.10` cannot be
 recovered by `.11`: drain before deploying (`stranded-turns` against the OLD build must report 0),
 deploy, run `stranded-turns` again and cancel what it lists. Migration `0041` (`peer_messages.kind`
-and `.subagent_depth`, both `NOT NULL` with a constant default, plus a check on `kind`) is additive
+and `.subagent_depth`, both `NOT NULL` with a constant default, plus a check on `kind` added `NOT
+VALID`) and `0042` (`VALIDATE CONSTRAINT`, a lock that lets reads and writes go on) are additive
 and safe under a running `.10` build: its inserts name neither column and read as `peer`, depth 0.
 Nothing was deployed under `.3`-`.10` on this branch, so the bumps collapse into one before the
 first release.

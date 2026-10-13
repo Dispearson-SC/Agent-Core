@@ -211,3 +211,24 @@ def test_the_task_graph_migration_applier_uses_the_shared_one() -> None:
             "SELECT 1 FROM schema_migrations WHERE id = %s", (TASK_GRAPH_MIGRATION.id,)
         ).fetchone()
     assert index is not None and tracked is not None
+
+
+@pytest.mark.skipif(not _postgres_reachable(), reason="no reachable Postgres instance")
+def test_the_kind_check_is_validated_after_all_migrations() -> None:
+    """C1r R4: 0041 adds the check NOT VALID, 0042 validates it."""
+    app_db = "agent_core_migrations_c1r_test"
+    with psycopg.connect(_ADMIN_CONNINFO, autocommit=True) as admin:
+        admin.execute(f'DROP DATABASE IF EXISTS "{app_db}" WITH (FORCE)')
+    asyncio.run(migrations.ensure_databases(_ADMIN_CONNINFO, app_database=app_db))
+    app_conninfo = re.sub(r"/[^/?]+(\?.*)?$", rf"/{app_db}\1", _ADMIN_CONNINFO)
+
+    asyncio.run(migrations.apply_all_migrations(app_conninfo))
+
+    with psycopg.connect(app_conninfo) as conn:
+        rows = conn.execute(
+            "SELECT conname, convalidated FROM pg_constraint "
+            "WHERE conname = 'peer_messages_kind_check'"
+        ).fetchall()
+        applied = {r[0] for r in conn.execute("SELECT id FROM schema_migrations").fetchall()}
+    assert [(str(r[0]), bool(r[1])) for r in rows] == [("peer_messages_kind_check", True)]
+    assert {"0041_peer_messages_subagent", "0042_peer_messages_kind_validate"} <= applied
