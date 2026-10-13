@@ -112,6 +112,7 @@ from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
 
 from agent_core.adapters.driven.tools.context import TurnContext
+from agent_core.domain.tool_replay import safe_tool_metadata
 
 _AVAILABLE_PEERS = "Available peers (use the id as `target`):"
 
@@ -196,4 +197,7 @@ def build_toolset() -> FunctionToolset[None]:
     turns. A profile that wants peers imports this one in rather than redeclaring the
     function (CLAUDE.md #8: no auto-discovery, an explicit list is the security property).
     """
-    return FunctionToolset([Tool(ask_peer, prepare=_prepare_ask_peer)])
+    # C30. The body only defers (`CallDeferred`): running it again does nothing.
+    return FunctionToolset(
+        [Tool(ask_peer, prepare=_prepare_ask_peer, metadata=safe_tool_metadata())]
+    )

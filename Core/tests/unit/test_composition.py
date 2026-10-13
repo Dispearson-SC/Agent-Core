@@ -642,3 +642,14 @@ def test_the_attempt_ledger_checks_out_with_a_short_timeout() -> None:
 
     assert seen == [ATTEMPT_LEDGER_CHECKOUT_TIMEOUT_SECONDS]
     assert 0 < ATTEMPT_LEDGER_CHECKOUT_TIMEOUT_SECONDS <= 2
+
+
+def test_the_containers_runner_journals_tool_calls_on_the_domain_pool() -> None:
+    """C30: the journal is wired, over the domain pool (never the audit pool: the audit trail
+    survives a rolled-back turn, the journal is domain state)."""
+    from agent_core.adapters.driven.persistence_pg.tool_journal import PgToolJournal
+
+    composition = _composition()
+    container = composition.build_container(pool_factory=cast(Any, _RecordingPool))
+
+    assert isinstance(container.runner._tool_journal, PgToolJournal)  # noqa: SLF001

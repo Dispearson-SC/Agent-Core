@@ -43,6 +43,7 @@ from agent_core.adapters.driven.tools.background import (
 )
 from agent_core.adapters.driven.tools.context import TurnContext
 from agent_core.domain.peers import BackgroundAsk, BackgroundState
+from agent_core.domain.tool_replay import safe_tool_metadata
 
 __all__ = ["AUDIT_ALLOW", "PEER_LIST_LIMIT", "build_toolset"]
 
@@ -178,9 +179,11 @@ def build_toolset() -> FunctionToolset[None]:
     """The four tools, a fresh toolset per call (nothing shared across profiles or turns)."""
     return FunctionToolset(
         [
-            Tool(peer_list, prepare=_available),
-            Tool(peer_status, prepare=_available),
+            # C30. Reads, and a stop (stopping twice is stopping once), repeat harmlessly;
+            # `peer_message` enqueues a message, so it keeps the default (`interrupted`).
+            Tool(peer_list, prepare=_available, metadata=safe_tool_metadata()),
+            Tool(peer_status, prepare=_available, metadata=safe_tool_metadata()),
             Tool(peer_message, prepare=_available),
-            Tool(peer_stop, prepare=_available),
+            Tool(peer_stop, prepare=_available, metadata=safe_tool_metadata()),
         ]
     )

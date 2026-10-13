@@ -801,6 +801,14 @@ depth, background asks flagged, each node with its state, queue wait and run tim
 is derived from its row (`peer_workflow_id`), which is what links a nested ask to its parent. Same
 authorisation as reading the turn; an ask whose parent is unknown is listed under `unlinked`.
 
+**Tool replay policy (C30, D65).** Each tool carries `replay: safe | interrupted` in its metadata
+(default `interrupted`; `domain/tool_replay.py`). `PolicyEnforcement` journals every call of a tool
+that is not safe in `tool_executions` through the `ToolJournal` port (begin before the body, finish
+after it, drop it if the body only deferred) and, when a repeated step meets a call that already
+began, answers with an `interrupted` result instead of running the tool again. The C5 attempt
+ledger counts how often a workflow is entered; the journal says which calls inside it already
+began. Policy (allow, ask, deny) is decided first, so a refused or suspended call is never journaled.
+
 **Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
 and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the
 two-sided gate), the caller's policy rules and each callee profile's `description`. A denied,

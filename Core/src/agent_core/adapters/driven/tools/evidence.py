@@ -62,10 +62,12 @@ NOT THIS MODULE'S JOB
 
 from __future__ import annotations
 
+from pydantic_ai import Tool
 from pydantic_ai.exceptions import CallDeferred
 from pydantic_ai.toolsets import FunctionToolset
 
 from agent_core.adapters.driven.human.gateway import new_correlation_id
+from agent_core.domain.tool_replay import safe_tool_metadata
 
 
 def request_evidence(kind: str, reason: str) -> dict[str, str]:
@@ -95,4 +97,5 @@ def build_toolset() -> FunctionToolset[None]:
     a caller could accidentally share across profiles or turns. A vertical's own
     `build_toolset()` composes this one in rather than redeclaring the function.
     """
-    return FunctionToolset([request_evidence])
+    # C30. The body only defers: running it again does nothing.
+    return FunctionToolset([Tool(request_evidence, metadata=safe_tool_metadata())])

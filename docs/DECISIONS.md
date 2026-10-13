@@ -2476,3 +2476,41 @@ current turn. It is the second delegation tool, not a second mechanism.
   toolset grants of `_grant_peer_mechanism` are one table of (switch, toolset); the `SpawnRefusal`
   docstring lists the causes in gate order; the end-to-end test's `_kind` (which returned a target
   agent) is `_target_of` and its generator no longer unpacks an unused tuple.
+
+## D65 - Tool replay policy (C30)
+
+- **What a crash can repeat.** A turn step that dies mid-run is run again by DBOS and nothing of the
+  run is persisted until it ends, so a tool whose work was done (or half done) can run a second
+  time. The repeat that can be recognised is the one that keeps the provider's `tool_call_id`:
+  above all the approved call executed by the resumed turn (the id was fixed when the turn
+  suspended). A fresh model generation after a restart issues new ids, those are new decisions, and
+  they are not recognised (the model, not the journal, then chooses to repeat a send).
+- **Tool metadata `replay: safe | interrupted`, default `interrupted`.** The task text says
+  "default per existing semantics"; the existing behaviour (run again) is the `safe` one, but a
+  default that re-runs a tool nobody vouched for is the unsafe one, and the codebase fails closed
+  elsewhere (empty allowlists mean nobody). An unknown value also reads as `interrupted`. The
+  built-ins that only read or only defer are declared `safe`, so the default costs a journal write
+  only for tools with possible side effects: `peer_message`, `pricing_apply`, `case_notes_append`,
+  `freeze_account` and anything a deployment adds. Rejected: default `safe` (silent duplicates).
+- **A journal, not the audit row.** The audit sink records intent and verdict and never the outcome
+  (port FROZEN, CLAUDE.md #6), so it cannot say "started and not finished". New port `ToolJournal`
+  (`begin` -> fresh | started | finished, `finish`, `abandon`), Postgres adapter over
+  `tool_executions(turn_id, tool_call_id, tool, started_at, finished_at)` (migration `0043`), keyed
+  `(turn_id, tool_call_id)`. `begin` is one atomic upsert, so two attempts racing for one call
+  cannot both see it fresh. Rows live on the domain pool; none are deleted (OPERATIONS has a trim).
+- **A finished call is not repeated either.** The task text covers started-and-not-finished. A call
+  whose end was recorded but whose turn step repeated before the turn was stored would run its side
+  effect a second time, which is the same harm, and the result was not kept (storing results is
+  more than this task asks), so both get the `interrupted` result; the text says the call "may or
+  may not have taken effect".
+- **Hook placement.** `before_tool_execute` (after the policy verdict, so a denied or suspended
+  call is never journaled) begins the call; `wrap_tool_execute` ends it: an `Exception` or a
+  return finishes it, `ApprovalRequired`/`CallDeferred` from the body drop the row (the call never
+  ran; the approved run must find it fresh), and a `BaseException` (cancel, kill) leaves it
+  started. `after_tool_execute`/`on_tool_execute_error` were not used because the framework routes
+  deferrals and retries around them.
+- **Recorded steps unchanged**, so `PINNED_DBOS_APPLICATION_VERSION` stays `agent-core-turns.11`
+  and there is no drain note; migration `0043` is additive and ignored by a running older build.
+- **Wiring.** `PydanticAgentRunner(tool_journal=...)`; `build_container` passes
+  `PgToolJournal(PoolConnections(domain_pool))`. `None` (tests, other composers) keeps every call
+  as it was.

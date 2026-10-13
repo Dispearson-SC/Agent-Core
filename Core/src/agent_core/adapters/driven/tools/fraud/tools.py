@@ -62,7 +62,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from pydantic_ai import Tool
 from pydantic_ai.toolsets import FunctionToolset
+
+from agent_core.domain.tool_replay import safe_tool_metadata
 
 
 class UnknownAccountError(ValueError):
@@ -214,8 +217,10 @@ def build_toolset() -> FunctionToolset[None]:
     """
     return FunctionToolset(
         [
-            sql_readonly,
-            account_history,
+            # C30. The two reads repeat harmlessly; the note and the freeze keep the default
+            # (`interrupted`): a repeated note is a duplicate, a repeated freeze is a second audit.
+            Tool(sql_readonly, metadata=safe_tool_metadata()),
+            Tool(account_history, metadata=safe_tool_metadata()),
             case_notes_append,
             freeze_account,
         ]

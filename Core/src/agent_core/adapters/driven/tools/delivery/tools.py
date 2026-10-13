@@ -59,7 +59,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
+from pydantic_ai import Tool
 from pydantic_ai.toolsets import FunctionToolset
+
+from agent_core.domain.tool_replay import safe_tool_metadata
 
 
 class UnknownOrderError(ValueError):
@@ -202,9 +205,11 @@ def build_toolset() -> FunctionToolset[None]:
     """
     return FunctionToolset(
         [
-            routing_estimate,
-            pricing_quote,
+            # C30. The three reads repeat harmlessly; `pricing_apply` writes a price and keeps the
+            # default (`interrupted`).
+            Tool(routing_estimate, metadata=safe_tool_metadata()),
+            Tool(pricing_quote, metadata=safe_tool_metadata()),
             pricing_apply,
-            orders_lookup,
+            Tool(orders_lookup, metadata=safe_tool_metadata()),
         ]
     )

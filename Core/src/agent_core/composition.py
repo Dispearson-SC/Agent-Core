@@ -202,6 +202,7 @@ from agent_core.adapters.driven.persistence_pg.migrations import (
     ensure_databases,
 )
 from agent_core.adapters.driven.persistence_pg.policy_repository import PgToolPolicy
+from agent_core.adapters.driven.persistence_pg.tool_journal import PgToolJournal
 from agent_core.adapters.driven.persistence_pg.transcript_repository import (
     PgTranscriptReader,
 )
@@ -1961,6 +1962,9 @@ def build_container(
         background_agents=WorkflowBackgroundAgents(mailbox, profiles),
         # C26 (D58). The reply stream rides the same publisher as the other progress events.
         reply_events=events if resolved.stream_replies else None,
+        # C30 (D65). A tool that is not `replay: safe` is journaled on the domain pool, so a turn
+        # step repeated after a crash does not run it twice.
+        tool_journal=PgToolJournal(PoolConnections(domain_pool)),
     )
 
     channels = build_channel_registry(resolved)

@@ -403,3 +403,24 @@ refused.
   never completed).
 - To retry a poisoned workflow on purpose after fixing the cause, delete its ledger row and fork
   or resubmit it; do not raise the budget to "push it through".
+
+## Tool calls a crash interrupted (replay policy, C30, D65)
+
+A tool declares `replay: safe | interrupted` in its metadata (`Tool(fn, metadata=...)`; the default
+is `interrupted`). A call of a tool that is not `safe` is written to `tool_executions` (migration
+`0043`, additive: nothing else reads it, no app-version bump) before its body runs and marked
+finished after it. If a turn step is repeated after a crash and meets a call it already knows (the
+same turn and the same provider tool-call id, which an approved call keeps across the approval), the
+tool is NOT run again: the model is told `Tool call interrupted and not repeated ...` and decides.
+
+- What was interrupted: `SELECT turn_id, tool_call_id, tool, started_at FROM tool_executions WHERE
+  finished_at IS NULL ORDER BY started_at;` A row stays unfinished when the process died inside the
+  tool; it may or may not have taken effect, which is why the model is told to check first.
+- The rows are small and are the evidence of an interruption; trim them on your own schedule:
+  `DELETE FROM tool_executions WHERE started_at < now() - interval '30 days';`
+- Declare a tool `safe` only if running it twice is harmless (it reads, or it only defers). The
+  built-in `ask_peer`, `spawn_subagent`, `request_evidence`, `knowledge_search`, `peer_list`,
+  `peer_status` and `peer_stop` are safe; `peer_message` and an unclassified tool (a vertical's, an
+  MCP server's) are not.
+- A journal that cannot be written fails the tool call (the turn step fails and is retried like
+  any other failed step); there is no silent fallback to running unguarded.

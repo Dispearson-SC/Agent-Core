@@ -32,6 +32,7 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from agent_core.adapters.driven.tools.context import TurnContext
 from agent_core.adapters.driven.tools.peers import _without_parameter
+from agent_core.domain.tool_replay import safe_tool_metadata
 
 _AVAILABLE_SUBAGENTS = "Available subagents (use the id as `agent`):"
 
@@ -101,4 +102,7 @@ async def _prepare_spawn_subagent(
 def build_toolset() -> FunctionToolset[None]:
     """This mechanism's toolset - exactly `spawn_subagent`. A fresh one per call, for the reason
     `peers.build_toolset` gives."""
-    return FunctionToolset([Tool(spawn_subagent, prepare=_prepare_spawn_subagent)])
+    # C30. The body only defers (`CallDeferred`): running it again does nothing.
+    return FunctionToolset(
+        [Tool(spawn_subagent, prepare=_prepare_spawn_subagent, metadata=safe_tool_metadata())]
+    )

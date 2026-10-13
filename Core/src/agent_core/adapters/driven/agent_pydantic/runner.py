@@ -83,7 +83,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final
@@ -93,6 +93,7 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability, ProcessHistory, ValidatedToolArgs
 from pydantic_ai.exceptions import (
     ApprovalRequired,
+    CallDeferred,
     ModelRetry,
     SkipToolExecution,
     UsageLimitExceeded,
@@ -117,6 +118,7 @@ from pydantic_ai.tools import (
     DeferredToolApprovalResult,
     DeferredToolRequests,
     DeferredToolResults,
+    Tool,
     ToolApproved,
     ToolDefinition,
     ToolDenied,
@@ -140,6 +142,12 @@ from agent_core.domain.media import MediaDelivery, MediaKind
 from agent_core.domain.policy import Effect, PolicyDecision, RuleSet
 from agent_core.domain.profile import AgentProfile, profile_content_hash
 from agent_core.domain.subagents import SPAWN_SUBAGENT_TOOL
+from agent_core.domain.tool_replay import (
+    ReplayPolicy,
+    interrupted_result,
+    replay_policy,
+    safe_tool_metadata,
+)
 from agent_core.domain.turn import (
     CallerIdentity,
     PeerOwner,
@@ -161,6 +169,7 @@ from agent_core.ports.event_publisher import EventPublisher
 from agent_core.ports.knowledge_base import KnowledgeBase
 from agent_core.ports.media_store import SignedMedia
 from agent_core.ports.model_gateway import ModelGateway
+from agent_core.ports.tool_journal import ToolJournal, ToolRunState
 from agent_core.ports.tool_policy import ToolPolicy
 from agent_core.ports.tool_provider import ToolProvider
 
@@ -468,7 +477,8 @@ def build_knowledge_toolset(
             render_knowledge_hits(hits), budget=policy.max_context_chars
         )
 
-    return FunctionToolset([knowledge_search])
+    # C30. A read: repeating it is harmless.
+    return FunctionToolset([Tool(knowledge_search, metadata=safe_tool_metadata())])
 
 
 def refusal_result(decision: PolicyDecision) -> str:
@@ -547,7 +557,9 @@ class PolicyEnforcement(AbstractCapability[Any]):
         audit: AuditSink,
         turn_id: TurnId,
         caller: CallerIdentity,
+        journal: ToolJournal | None = None,
     ) -> None:
+        self._journal = journal
         self._policy = policy
         self._rules = rules
         self._audit = audit
@@ -613,7 +625,51 @@ class PolicyEnforcement(AbstractCapability[Any]):
             # verdict, and a bare `if` would refuse it here after deferring it there.
             raise SkipToolExecution(refusal_result(decision))
 
+        # C30 (D65). Last, so a refused or suspended call is never journaled as begun. A call a
+        # crash interrupted on an earlier attempt is answered with an `interrupted` result instead
+        # of being run a second time.
+        if self._journal is not None and self._journals(tool_def):
+            state = await self._journal.begin(self._turn_id, call.tool_call_id, call.tool_name)
+            if state is not ToolRunState.FRESH:
+                raise SkipToolExecution(interrupted_result(call.tool_name))
+
         return args
+
+    @staticmethod
+    def _journals(tool_def: ToolDefinition) -> bool:
+        """Whether a call of this tool is journaled: it is not declared `replay: safe`."""
+        return replay_policy(tool_def.metadata) is not ReplayPolicy.SAFE
+
+    async def wrap_tool_execute(
+        self,
+        ctx: RunContext[Any],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: ValidatedToolArgs,
+        handler: Callable[[ValidatedToolArgs], Awaitable[Any]],
+    ) -> Any:
+        """Run the call and record how it ended in the journal.
+
+        A return, or any `Exception` the model reads as an error, is an END: the call is marked
+        finished. A tool that DEFERS (asks for approval or for an outside answer from inside its
+        body) never ran its work: its row is dropped so the run that executes it later finds it
+        fresh. A `BaseException` (the task cancelled, the process killed) is neither: the row stays
+        `started`, which is the whole point. This hook is used rather than `after_tool_execute` and
+        `on_tool_execute_error` because the framework routes deferrals and retries around those.
+        """
+        if self._journal is None or not self._journals(tool_def):
+            return await handler(args)
+        try:
+            result = await handler(args)
+        except (ApprovalRequired, CallDeferred):
+            await self._journal.abandon(self._turn_id, call.tool_call_id)
+            raise
+        except Exception:
+            await self._journal.finish(self._turn_id, call.tool_call_id)
+            raise
+        await self._journal.finish(self._turn_id, call.tool_call_id)
+        return result
 
 
 class UnsupportedHistoryError(TypeError):
@@ -1425,6 +1481,7 @@ class PydanticAgentRunner:
         peer_profiles: Mapping[str, AgentProfile] | None = None,
         background_agents: BackgroundAgents | None = None,
         reply_events: EventPublisher | None = None,
+        tool_journal: ToolJournal | None = None,
     ) -> None:
         self._model = model
         self._policy = policy
@@ -1444,6 +1501,9 @@ class PydanticAgentRunner:
         # C26 (D58). Where the reply of a turn a PERSON started is streamed as it is written. None
         # (the default) keeps the model call exactly as it was: no streaming, no events.
         self._reply_events = reply_events
+        # C30 (D65). Where a tool call that is not `replay: safe` is journaled, so a run repeated
+        # after a crash does not run it twice. None keeps every call as it was: no journal.
+        self._tool_journal = tool_journal
         self._agents: dict[tuple[str, str, str], Agent[Any, RunOutput]] = {}
 
     def usage_limits_for(self, profile: AgentProfile) -> UsageLimits:
@@ -1490,6 +1550,7 @@ class PydanticAgentRunner:
             audit=self._audit,
             turn_id=turn_id,
             caller=request.caller,
+            journal=self._tool_journal,
         )
 
         # `UntrustedResultWrapping` is attached for every turn without exception. It was
@@ -1667,6 +1728,7 @@ class PydanticAgentRunner:
                 audit=self._audit,
                 turn_id=turn_id,
                 caller=caller,
+                journal=self._tool_journal,
             ),
             # The same profile, so a resumed turn bounds a server by the same number the
             # first half of it did (t-f11-25). A continuation that forgot the profile
