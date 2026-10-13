@@ -4,7 +4,7 @@ Phase:   Agent-comms v2, C30
 Tests:   Core/tests/contract/test_tool_journal.py, Core/tests/integration/test_migrations.py
 
 One row per tool call that is not `replay: safe`: the turn and the call's key (the provider's
-tool-call id qualified by the model-response ordinal, `r<n>:<id>`, D68), the
+tool-call id qualified by the model-response ordinal, `j<version>:r<n>:<id>`, D68, D69), the
 tool's name, when it began and, once it ended, when. A row without `finished_at` is a call a crash
 interrupted. Additive; nothing reads it but the journal. Rows are not deleted here: they are small
 and they are the evidence of an interruption (trim them on your own schedule, OPERATIONS.md).

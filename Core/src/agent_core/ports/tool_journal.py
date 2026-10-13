@@ -10,7 +10,8 @@ step again; a call whose id is already journaled began in an earlier attempt, an
 not run it a second time (`domain/tool_replay.py`).
 
 The id the runner passes is the PROVIDER's `tool_call_id` qualified by the model-response ordinal
-(`r<n>:<id>`), because some providers reuse an id in a later response of the same turn. The
+(`j<version>:r<n>:<id>`; the version guards the way `<n>` is counted), because some providers
+reuse an id in a later response of the same turn. The
 qualified id is stable where it matters: a call that was approved, and is executed by the resumed
 turn, rebuilds the same history and so keeps the key it was suspended under. A fresh model
 generation after a restart issues new ids, and those are new calls by definition.

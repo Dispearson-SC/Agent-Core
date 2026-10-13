@@ -508,18 +508,27 @@ def refusal_result(decision: PolicyDecision) -> str:
     return f"Tool call refused by policy and did not run. Reason: {decision.reason}"
 
 
+# The version of the key's shape, written into every key (`j<version>:r<n>:<id>`). The key is only
+# recognised by a build that counts the same way, so a build that changes what `<n>` counts must
+# bump this: its keys then never equal an older build's rows, which a replay reads as fresh calls
+# (a visible re-run risk the rollout note covers) instead of mis-matching a different call.
+JOURNAL_KEY_VERSION: Final[int] = 1
+
+
 def _journal_key(ctx: RunContext[Any], call: ToolCallPart) -> str:
-    """The journal identity of a call: its model-response ordinal plus the provider's call id.
+    """The journal identity of a call: key version, model-response ordinal, provider call id.
 
     Some providers number calls per response (`call_0` again in the next one), so the id alone can
     name two different calls of one turn and a later legitimate call would be answered
     `interrupted` (R3/R4, slice 17). The ordinal is how many model responses the history holds when
     the call runs, and it is stable where replay needs it: a repeated step or resume rebuilds the
-    same history, so the same call lands on the same key. It is a prefix of the key string, so the
+    same history, so the same call lands on the same key. It depends on that history keeping one
+    `ModelResponse` per model call (R3-key-history-stability): compaction that merged or dropped
+    responses would shift it, hence the version prefix. It is a prefix of the key string, so the
     `tool_executions` schema is unchanged.
     """
     responses = sum(1 for message in ctx.messages if isinstance(message, ModelResponse))
-    return f"r{responses}:{call.tool_call_id}"
+    return f"j{JOURNAL_KEY_VERSION}:r{responses}:{call.tool_call_id}"
 
 
 class PolicyEnforcement(AbstractCapability[Any]):
@@ -679,32 +688,59 @@ class PolicyEnforcement(AbstractCapability[Any]):
         """
         if self._journal is None or not self._journals(tool_def):
             return await handler(args)
+        key = _journal_key(ctx, call)
         try:
             result = await handler(args)
         except (ApprovalRequired, CallDeferred):
-            await self._record_end(self._journal.abandon, ctx, call)
+            await self._record_end(self._journal.abandon, "abandon", key, call)
             raise
         except Exception:
-            await self._record_end(self._journal.finish, ctx, call)
+            await self._record_end(self._journal.finish, "finish", key, call)
             raise
-        await self._record_end(self._journal.finish, ctx, call)
+        await self._record_end(self._journal.finish, "finish", key, call)
         return result
 
     async def _record_end(
         self,
         write: Callable[[TurnId, str], Awaitable[None]],
-        ctx: RunContext[Any],
+        action: str,
+        key: str,
         call: ToolCallPart,
     ) -> None:
-        """Write how the call ended. The call already happened, so an unreachable journal must not
-        discard its result: the row stays `started` and a replay reads it as interrupted (the
-        conservative outcome, `ToolJournalUnavailableError`)."""
+        """Write how the call ended. The call already happened (or its deferral is already
+        decided), so an unreachable journal must not discard the outcome: the row stays `started`
+        and a replay reads it as interrupted (the conservative outcome,
+        `ToolJournalUnavailableError`).
+
+        The failure is logged with the turn, the tool and the key (R3-abandon-swallow). A failed
+        `abandon` is the costly one: the call is going to be executed later, by the run a person's
+        approval starts, and that run will find its row `started` and answer `interrupted` instead
+        of running it. It is logged at ERROR under the stable token `tool_journal_abandon_failed`
+        so an alert can key on it; the rows it leaves are the unfinished `tool_executions` rows
+        OPERATIONS tells the operator to look at. The codebase has no metrics sink, so the log
+        line is the signal (D69).
+        """
         try:
-            await write(self._turn_id, _journal_key(ctx, call))
-        except ToolJournalUnavailableError:
-            _LOG.warning(
-                "tool journal unreachable after %s ran; its row stays started", call.tool_name
-            )
+            await write(self._turn_id, key)
+        except ToolJournalUnavailableError as error:
+            if action == "abandon":
+                _LOG.error(
+                    "tool_journal_abandon_failed: turn=%s tool=%s key=%s; the deferred call "
+                    "will be answered interrupted when it resumes (%s)",
+                    self._turn_id,
+                    call.tool_name,
+                    key,
+                    error,
+                )
+            else:
+                _LOG.warning(
+                    "tool_journal_finish_failed: turn=%s tool=%s key=%s; the row stays started "
+                    "(%s)",
+                    self._turn_id,
+                    call.tool_name,
+                    key,
+                    error,
+                )
 
 
 class UnsupportedHistoryError(TypeError):

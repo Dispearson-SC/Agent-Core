@@ -155,7 +155,7 @@ def test_a_non_replayable_tool_interrupted_by_a_crash_is_not_run_again() -> None
     tools.crash_next = True
     with pytest.raises(_Crash):
         _run(_runner(tools, journal, _send()))
-    assert journal.rows[(str(TURN), "r1:call-1")][1] is ToolRunState.STARTED
+    assert journal.rows[(str(TURN), "j1:r1:call-1")][1] is ToolRunState.STARTED
 
     second = _runner(tools, journal, _send())
     _run(second)
@@ -182,7 +182,7 @@ def test_a_call_that_finished_is_not_run_a_second_time_either() -> None:
     tools, journal = _Tools(), FakeToolJournal()
     first = _runner(tools, journal, _send())
     _run(first)
-    assert journal.rows[(str(TURN), "r1:call-1")][1] is ToolRunState.FINISHED
+    assert journal.rows[(str(TURN), "j1:r1:call-1")][1] is ToolRunState.FINISHED
 
     second = _runner(tools, journal, _send())
     _run(second)
@@ -271,7 +271,7 @@ def test_an_unreachable_journal_after_the_tool_ran_keeps_the_result() -> None:
     _run(built)
 
     assert tools.runs == ["send"] and built.returned == ["sent"]
-    assert journal.rows[(str(TURN), "r1:call-1")][1] is ToolRunState.STARTED
+    assert journal.rows[(str(TURN), "j1:r1:call-1")][1] is ToolRunState.STARTED
 
 
 def test_without_a_journal_nothing_changes() -> None:
@@ -310,6 +310,73 @@ def test_a_call_that_defers_for_approval_is_forgotten_so_the_approved_run_execut
 
     assert outcome.pending, "the turn suspended for the approval"
     assert journal.rows == {}, tools.runs
+
+
+class _AbandonFails(FakeToolJournal):
+    async def abandon(self, turn_id: TurnId, tool_call_id: str) -> None:
+        raise ToolJournalUnavailableError("no connection")
+
+
+def _deferring_runner(journal: FakeToolJournal, defers: list[bool]) -> Any:
+    """A runner whose one tool asks for approval while `defers[0]` is true, then returns."""
+    runs: list[str] = []
+
+    def risky() -> str:
+        """Do the risky thing."""
+        if defers[0]:
+            raise ApprovalRequired
+        runs.append("risky")
+        return "done"
+
+    def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        returned = [p for m in messages for p in m.parts if isinstance(p, ToolReturnPart)]
+        if returned:
+            return ModelResponse(parts=[TextPart("ok")])
+        return ModelResponse(parts=[ToolCallPart("risky", {}, tool_call_id="call-1")])
+
+    built = runner_module.PydanticAgentRunner(
+        model=fakes.FakeModelGateway(model_map={"m": "m"}),
+        policy=fakes.FakeToolPolicy(RuleSet.for_caller(CALLER, (), default_effect=Effect.ALLOW)),
+        audit=fakes.FakeAuditSink(),
+        tools=fakes.FakeToolProvider(FunctionToolset([Tool(risky)]), ("risky",)),
+        model_factory=lambda model_id, base_url: FunctionModel(model),
+        tool_journal=journal,
+    )
+    built.runs = runs
+    return built
+
+
+def test_a_deferred_call_is_fresh_for_the_run_that_executes_it_later() -> None:
+    """R3-abandon-untested: forgetting the row is what lets the approved run execute the tool; it
+    would otherwise be answered `interrupted`."""
+    journal, defers = FakeToolJournal(), [True]
+    built = _deferring_runner(journal, defers)
+
+    first = asyncio.run(built.run(TURN, REQUEST, PROFILE, None))
+    defers[0] = False
+    asyncio.run(built.run(TURN, REQUEST, PROFILE, None))
+
+    assert first.pending and built.runs == ["risky"]
+
+
+def test_a_failed_abandon_keeps_the_suspension_and_is_reported_with_its_ids(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R3-abandon-swallow / R4-abandon-swallow-observability: the turn still suspends (the
+    deferral is not lost), the row stays `started` (the approved run will read it as interrupted)
+    and that consequence is logged at ERROR with the turn, the tool and the key."""
+    journal = _AbandonFails()
+    built = _deferring_runner(journal, [True])
+
+    with caplog.at_level("WARNING"):
+        outcome = asyncio.run(built.run(TURN, REQUEST, PROFILE, None))
+
+    assert outcome.pending
+    assert journal.rows[(str(TURN), "j1:r1:call-1")][1] is ToolRunState.STARTED
+    [record] = [r for r in caplog.records if "tool_journal_abandon_failed" in r.getMessage()]
+    assert record.levelname == "ERROR"
+    message = record.getMessage()
+    assert str(TURN) in message and "risky" in message and "j1:r1:call-1" in message
 
 
 # --- the built-in toolsets declare what they are -----------------------------------------------

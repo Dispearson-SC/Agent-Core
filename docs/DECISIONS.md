@@ -2581,8 +2581,8 @@ current turn. It is the second delegation tool, not a second mechanism.
   passes `r<n>:<tool_call_id>`, `<n>` being the count of `ModelResponse` messages in the run's
   history when the call runs. A repeated step or resume rebuilds the same history, so the same call
   lands on the same key (the approved-call-across-a-crash test still holds). No schema change: the
-  key lives in the existing `tool_call_id` TEXT column and the port is untouched, so there is no new
-  migration. Rejected: a per-run call counter (depends on the order calls are dispatched in) and
+  key lives in the existing `tool_call_id` TEXT column, so there is no new migration (the port
+  gained only the `ToolJournalUnavailableError` type; its three methods are unchanged). Rejected: a per-run call counter (depends on the order calls are dispatched in) and
   the SDK's per-run `run_step` (a resumed run is a new run, so it was not relied on). Rows written under the old
   bare-id key are not recognised after the upgrade (OPERATIONS has the drain note); the recorded
   steps are unchanged, so `PINNED_DBOS_APPLICATION_VERSION` stays `agent-core-turns.11`.
@@ -2590,7 +2590,8 @@ current turn. It is the second delegation tool, not a second mechanism.
   `PoolConnections(domain_pool, timeout=5 s)` (`TOOL_JOURNAL_CHECKOUT_TIMEOUT_SECONDS`), longer than
   the attempt ledger's 1 s because it cannot fail open. A timeout or an unreachable database surfaces
   as `ToolJournalUnavailableError` (port module): from `begin` the tool is not run and the step is
-  retried; from `finish`/`abandon` the result is kept (the call happened) and a warning is logged.
+  retried; from `finish`/`abandon` the result is kept (the call happened) and the failure is logged
+  (D69).
 - **Open-count predicate (R3-open-count-predicate).** Did not hold: the SQL predicate and
   `background_state` agree. A test now runs both over the same rows, including shapes the happy path
   never writes, so they cannot drift apart.
@@ -2603,3 +2604,31 @@ current turn. It is the second delegation tool, not a second mechanism.
 - **Test (R2-004, R3-source-grep-test).** The source-grep on `_step_resume_round` is a behavioural
   test: the step is driven with a recording `ResumeTurn` and the owner it was handed is asserted.
 
+## D69 - Slice 18 advisories (C1t)
+
+- **Key is versioned (R3-key-history-stability, R4-journal-key-version-skew).** The call key is now
+  `j<version>:r<n>:<provider id>` with `JOURNAL_KEY_VERSION = 1` in the runner. `<n>` counts the
+  `ModelResponse` messages in the run's history, so it holds only while the history keeps one
+  response per model call; a build that changes what `<n>` counts (a compaction that merges
+  responses) bumps the version, and its keys never equal an older build's rows. The cost is the one
+  D68 already accepted: a row written under another key shape is not recognised, so the call looks
+  fresh (OPERATIONS keeps the drain note). Safe now because `r<n>` keys have not left this stack.
+  No schema change, no app-version bump (`agent-core-turns.11` stays: recorded steps are unchanged).
+- **A failed abandon is reported, not swallowed (R3-abandon-swallow, R4-abandon-swallow-observability).**
+  Still non-fatal (the deferral must reach the person), but a failed `abandon` leaves a `started`
+  row that the approved run will answer `interrupted`, so it is logged at ERROR as
+  `tool_journal_abandon_failed` with turn, tool and key; a failed `finish` is a WARNING
+  (`tool_journal_finish_failed`) with the same ids. The codebase has no metrics sink and the audit
+  sink records tool calls and decisions, not infrastructure faults, so the stable log token is the
+  signal; adding a metrics port is a separate decision. The key is computed once per hook.
+- **The journal narrows what it calls unreachable (R3-operationalerror-breadth).** `PoolTimeout`,
+  `PoolClosed` and an `OperationalError` without a SQLSTATE (the connect failed) or with class 08 or
+  57P01-03 become `ToolJournalUnavailableError`. A deadlock, a cancelled query or a lock timeout
+  propagates as itself: the store answered, and calling it unreachable would mislead the operator.
+  Consequence: such an error after the tool ran now fails the step instead of being logged.
+- **Wording (R2-d68-port-untouched-claim, R2-tool-journal-for-export).** D68 no longer says the port
+  is untouched (it gained the error type). `tool_journal_for` is the public builder beside
+  `attempt_ledger_for`, kept public so a test can assert which pool and timeout it checks out with;
+  its docstring says so.
+- **Tests (R3-abandon-untested).** The abandon path is covered behaviourally: a deferred call is
+  fresh for the run that executes it, and a failing abandon keeps the suspension and is logged.

@@ -943,7 +943,11 @@ TOOL_JOURNAL_CHECKOUT_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
 def tool_journal_for(pool: Any) -> PgToolJournal:
-    """The tool journal over `pool`, with a bounded checkout timeout."""
+    """The tool journal over `pool`, with a bounded checkout timeout.
+
+    Public, like `attempt_ledger_for`, so a test can assert which pool and timeout the journal
+    checks out with; the container is its only production caller.
+    """
     return PgToolJournal(PoolConnections(pool, timeout=TOOL_JOURNAL_CHECKOUT_TIMEOUT_SECONDS))
 
 

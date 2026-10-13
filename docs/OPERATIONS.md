@@ -422,18 +422,22 @@ tool is NOT run again: the model is told `Tool call interrupted and not repeated
   built-in `ask_peer`, `spawn_subagent`, `request_evidence`, `knowledge_search`, `peer_list`,
   `peer_status` and `peer_stop` are safe; `peer_message` and an unclassified tool (a vertical's, an
   MCP server's) are not.
-- The `tool_call_id` column holds the call KEY `r<n>:<provider id>`: `<n>` is the number of model
-  responses in the history when the call ran, so a provider that reuses an id in a later response
+- The `tool_call_id` column holds the call KEY `j1:r<n>:<provider id>` (`j1` is the key version, D69):
+  `<n>` is the number of model responses in the history when the call ran, so a provider that reuses an id in a later response
   (D68) no longer has its second call answered `interrupted`. Upgrading from a build that wrote the
-  bare provider id: a call that began under the old key and is replayed after the upgrade is not
+  bare provider id (or from the unversioned `r<n>:` key): a call that began under the old key and is replayed after the upgrade is not
   recognised (it looks fresh), so drain first (let turns that are inside a non-safe tool call
   finish, or cancel them) when that matters. No app-version bump: recorded steps are unchanged.
 - A journal that cannot be reached when a call begins (the pool checkout waits at most 5 s,
   `TOOL_JOURNAL_CHECKOUT_TIMEOUT_SECONDS`, or the database is down) fails the tool call with
   `ToolJournalUnavailableError` before the tool runs (the turn step fails and is retried like any
   other failed step); there is no silent fallback to running unguarded. If it cannot be reached
-  AFTER the tool ran, the result is kept and a warning is logged; the row stays `started`, which a
-  replay reads as interrupted.
+  AFTER the tool ran, the result is kept and a warning is logged (`tool_journal_finish_failed`); the
+  row stays `started`, which a replay reads as interrupted. If a deferral (approval, outside
+  answer) cannot forget its row, `tool_journal_abandon_failed` is logged at ERROR with the turn,
+  tool and key: the approved run will answer `interrupted` for that call, so delete the row
+  (`DELETE FROM tool_executions WHERE turn_id = ... AND tool_call_id = ...`) before approving, or
+  ask the person to repeat the request. Alert on that token.
 
 ## Provider cassettes for adapter tests (C31, D66)
 

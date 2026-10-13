@@ -16,7 +16,7 @@ from contextlib import AbstractContextManager
 from typing import Any, Final
 
 from psycopg import OperationalError
-from psycopg_pool import PoolTimeout
+from psycopg_pool import PoolClosed, PoolTimeout
 
 from agent_core.domain.turn import TurnId
 from agent_core.ports.tool_journal import ToolJournalUnavailableError, ToolRunState
@@ -38,8 +38,22 @@ _FINISH_SQL: Final[str] = (
 _ABANDON_SQL: Final[str] = "DELETE FROM tool_executions WHERE turn_id = %s AND tool_call_id = %s"
 
 
-# A saturated pool (`PoolTimeout`) or an unreachable database (`OperationalError`).
-_UNREACHABLE: Final = (PoolTimeout, OperationalError)
+# SQLSTATE classes of a server that cannot be reached right now: connection exceptions (08) and an
+# operator shutdown or crash recovery (57P01 admin shutdown, 57P02 crash shutdown, 57P03 cannot
+# connect now).
+_UNREACHABLE_STATES: Final = ("08", "57P01", "57P02", "57P03")
+
+
+def _is_unreachable(error: Exception) -> bool:
+    """Whether `error` says the store cannot be reached: a saturated or closed pool, or a failed
+    connection. A deadlock, a cancelled query or a lock timeout is an `OperationalError` too, but
+    the database answered; those propagate as themselves (R3-operationalerror-breadth)."""
+    if isinstance(error, PoolTimeout | PoolClosed):
+        return True
+    if isinstance(error, OperationalError):
+        state = error.sqlstate  # None when the connection itself failed before any server reply
+        return state is None or state.startswith(_UNREACHABLE_STATES)
+    return False
 
 
 class PgToolJournal:
@@ -55,7 +69,9 @@ class PgToolJournal:
         try:
             with self._connect() as conn:
                 row = conn.execute(_BEGIN_SQL, (turn_id, tool_call_id, tool)).fetchone()
-        except _UNREACHABLE as error:
+        except (PoolTimeout, PoolClosed, OperationalError) as error:
+            if not _is_unreachable(error):
+                raise
             raise ToolJournalUnavailableError(str(error) or type(error).__name__) from error
         if row is None:  # pragma: no cover - the upsert always returns a row
             raise RuntimeError("the tool journal returned no row")
@@ -73,5 +89,7 @@ class PgToolJournal:
         try:
             with self._connect() as conn:
                 conn.execute(sql, (turn_id, tool_call_id))
-        except _UNREACHABLE as error:
+        except (PoolTimeout, PoolClosed, OperationalError) as error:
+            if not _is_unreachable(error):
+                raise
             raise ToolJournalUnavailableError(str(error) or type(error).__name__) from error
