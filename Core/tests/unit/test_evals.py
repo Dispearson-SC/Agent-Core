@@ -113,11 +113,46 @@ def test_a_trial_that_never_finishes_is_a_failed_trial_with_a_timeout() -> None:
     assert not trial.passed and trial.error is not None and "timed out" in trial.error
 
 
-def test_the_pass_rate_floor_turns_a_weak_run_into_a_failing_exit_code(tmp_path: Path) -> None:
+def test_the_pass_rate_floor_turns_a_weak_run_into_a_failing_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     scripted = {"AGENT_CORE_EVAL_MODEL": "scripted", "AGENT_CORE_EVAL_REPETITIONS": "1"}
 
     assert main(_env(tmp_path, AGENT_CORE_EVAL_MIN_PASS_RATE="1", **scripted)) == 0
-    assert main(_env(tmp_path, AGENT_CORE_EVAL_MIN_PASS_RATE="1.5", **scripted)) == 1
+
+    from evals import __main__ as entry
+    from evals.harness import CheckResult, Outcome, Scenario
+
+    async def wrong(source: object) -> Outcome:
+        return Outcome((CheckResult("a", False, "no"),))
+
+    monkeypatch.setattr(entry, "SCENARIOS", (Scenario("weak", "d", wrong, dict),))  # type: ignore[arg-type]
+    assert main(_env(tmp_path, AGENT_CORE_EVAL_MIN_PASS_RATE="0.5", **scripted)) == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("AGENT_CORE_EVAL_REPETITIONS", "three"),
+        ("AGENT_CORE_EVAL_REPETITIONS", "0"),
+        ("AGENT_CORE_EVAL_REPETITIONS", ""),
+        ("AGENT_CORE_EVAL_TRIAL_TIMEOUT", "soon"),
+        ("AGENT_CORE_EVAL_TRIAL_TIMEOUT", "0"),
+        ("AGENT_CORE_EVAL_TRIAL_TIMEOUT", "-5"),
+        ("AGENT_CORE_EVAL_TRIAL_TIMEOUT", "nan"),
+        ("AGENT_CORE_EVAL_MIN_PASS_RATE", "high"),
+        ("AGENT_CORE_EVAL_MIN_PASS_RATE", "1.5"),
+        ("AGENT_CORE_EVAL_MIN_PASS_RATE", "-0.1"),
+        ("AGENT_CORE_EVAL_MIN_PASS_RATE", "nan"),
+    ],
+)
+def test_an_invalid_numeric_setting_is_refused_by_name_even_when_the_run_would_be_skipped(
+    tmp_path: Path, name: str, value: str
+) -> None:
+    """R2-002 / R3-eval-env-parse: a typo is a clear error naming the variable, never a silent
+    default or a traceback, and it is caught before a (paid) run or a skip hides it."""
+    with pytest.raises(SystemExit, match=name):
+        main(_env(tmp_path, **{name: value}))
 
 
 def test_an_unknown_scenario_name_is_refused(tmp_path: Path) -> None:
