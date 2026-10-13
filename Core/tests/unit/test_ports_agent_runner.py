@@ -42,6 +42,7 @@ from __future__ import annotations
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     CallerIdentity,
+    PeerOwner,
     SessionRef,
     TurnId,
     TurnOutcome,
@@ -69,6 +70,7 @@ class StubRunner:
         *,
         caller: CallerIdentity,
         session: SessionRef,
+        owner: PeerOwner | None = None,
     ) -> TurnOutcome:
         raise NotImplementedError
 
@@ -82,6 +84,7 @@ from __future__ import annotations
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     CallerIdentity,
+    PeerOwner,
     SessionRef,
     TurnId,
     TurnOutcome,
@@ -113,6 +116,7 @@ class WrongArityRunner:
         *,
         caller: CallerIdentity,
         session: SessionRef,
+        owner: PeerOwner | None = None,
     ) -> TurnOutcome:
         raise NotImplementedError
 

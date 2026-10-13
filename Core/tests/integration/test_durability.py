@@ -548,6 +548,7 @@ class _InBandResume:
         resolutions: tuple[ToolResolution, ...],
         *,
         caller: CallerIdentity,
+        owner: Any = None,
     ) -> TurnOutcome:
         del session, profile_id, caller
         self.resolutions.extend(resolutions)
@@ -1219,6 +1220,7 @@ class _LedgerResume:
         resolutions: tuple[ToolResolution, ...],
         *,
         caller: CallerIdentity,
+        owner: Any = None,
     ) -> TurnOutcome:
         _note(self._directory, "resume")
         (self._directory / _RESOLUTIONS).write_text(
@@ -1650,6 +1652,7 @@ class _RecordingResume:
         resolutions: tuple[ToolResolution, ...],
         *,
         caller: CallerIdentity,
+        owner: Any = None,
     ) -> TurnOutcome:
         with self._lock:
             self.calls.append((turn_id, resolutions, caller))

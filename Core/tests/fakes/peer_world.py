@@ -230,6 +230,7 @@ class Resume:
         resolutions: tuple[Any, ...],
         *,
         caller: CallerIdentity,
+        owner: Any = None,
     ) -> TurnOutcome:
         self.entered += 1
         if self.entered in self.die_on_entry:

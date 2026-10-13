@@ -142,6 +142,7 @@ from agent_core.domain.profile import AgentProfile, profile_content_hash
 from agent_core.domain.subagents import SPAWN_SUBAGENT_TOOL
 from agent_core.domain.turn import (
     CallerIdentity,
+    PeerOwner,
     PendingKind,
     PendingRequest,
     SessionRef,
@@ -1523,7 +1524,7 @@ class PydanticAgentRunner:
                     agent_id=request.profile_id,
                     peer_catalogue=self._peer_catalogue(profile, rules),
                     subagent_catalogue=self._subagent_catalogue(profile, rules),
-                    can_spawn=self._can_spawn(request, profile),
+                    can_spawn=self._can_spawn(request.owner, profile),
                     allow_continuation=profile.peers.allow_continuation,
                     allow_background=profile.peers.allow_background,
                     **self._background_deps(profile, turn_id, request.caller, request.session),
@@ -1574,6 +1575,7 @@ class PydanticAgentRunner:
         *,
         caller: CallerIdentity,
         session: SessionRef,
+        owner: PeerOwner | None = None,
     ) -> TurnOutcome:
         """Feed answers that arrived from outside back in as the pending calls' results.
 
@@ -1689,6 +1691,7 @@ class PydanticAgentRunner:
                     agent_id=profile.id,
                     peer_catalogue=self._peer_catalogue(profile, rules),
                     subagent_catalogue=self._subagent_catalogue(profile, rules),
+                    can_spawn=self._can_spawn(owner, profile),
                     allow_continuation=profile.peers.allow_continuation,
                     allow_background=profile.peers.allow_background,
                     **self._background_deps(profile, turn_id, caller, session),
@@ -1823,15 +1826,16 @@ class PydanticAgentRunner:
         )
 
     @staticmethod
-    def _can_spawn(request: TurnRequest, profile: AgentProfile) -> bool:
+    def _can_spawn(owner: PeerOwner | None, profile: AgentProfile) -> bool:
         """Whether this turn is offered `spawn_subagent`: not once a spawn would go past the
         profile's own `subagents.depth`.
 
         This is the restricted toolset of a subagent (its profile's tools minus `spawn_subagent`
         unless its depth allows). It is the menu only, and only this profile's side of the limit:
-        the workflow's gate (`authorise_spawn`) is what enforces the stricter of both sides.
+        the workflow's gate (`authorise_spawn`) is what enforces the stricter of both sides. `run`
+        and `resume` both ask it, with the owner the turn started from, so the second half of a
+        turn that waited for a person has the menu the first half had.
         """
-        owner = request.owner
         depth = 0 if owner is None else owner.subagent_depth
         return depth + 1 <= profile.subagents.depth
 

@@ -821,6 +821,7 @@ class _RecordingResume:
         resolutions: tuple[Any, ...],
         *,
         caller: CallerIdentity,
+        owner: Any = None,
     ) -> TurnOutcome:
         self.calls.append((turn_id, resolutions))
         return TurnOutcome(turn_id=turn_id, result=TurnResult(text=_ANSWER))

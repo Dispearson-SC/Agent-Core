@@ -242,6 +242,7 @@ class _RecordingResume:
         resolutions: tuple[Any, ...],
         *,
         caller: CallerIdentity,
+        owner: Any = None,
     ) -> TurnOutcome:
         self.resolutions.extend(resolutions)
         self.callers.append(caller)

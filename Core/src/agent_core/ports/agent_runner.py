@@ -43,6 +43,7 @@ from typing import Protocol
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     CallerIdentity,
+    PeerOwner,
     SessionRef,
     ToolCallId,
     TurnId,
@@ -111,6 +112,7 @@ class AgentRunner(Protocol):
         *,
         caller: CallerIdentity,
         session: SessionRef,
+        owner: PeerOwner | None = None,
     ) -> TurnOutcome:
         """PSEUDO-CODE - F3.
 

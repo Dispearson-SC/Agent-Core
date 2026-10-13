@@ -72,6 +72,7 @@ from agent_core.domain.media import MediaDelivery, MediaRef
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     CallerIdentity,
+    PeerOwner,
     SessionRef,
     ToolCallId,
     TurnId,
@@ -153,6 +154,7 @@ class ResumeTurn:
         resolutions: tuple[ToolResolution, ...],
         *,
         caller: CallerIdentity,
+        owner: PeerOwner | None = None,
     ) -> TurnOutcome:
         """Feed the human's answers back into a suspended turn.
 
@@ -219,7 +221,7 @@ class ResumeTurn:
         # a finished one; the process may die while the next human takes three days.
         history = await self._store.load_history(session)
         outcome = await self._runner.resume(
-            turn_id, profile, history, prepared, caller=caller, session=session
+            turn_id, profile, history, prepared, caller=caller, session=session, owner=owner
         )
         await self._store.append_outcome(turn_id, outcome)
 

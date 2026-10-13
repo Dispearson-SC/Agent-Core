@@ -252,6 +252,7 @@ class _Resume:
         resolutions: tuple[Any, ...],
         *,
         caller: CallerIdentity,
+        owner: Any = None,
     ) -> TurnOutcome:
         self.calls.append((profile_id, resolutions))
         text = "the account is frozen" if profile_id == fanout.PEER else "all done"

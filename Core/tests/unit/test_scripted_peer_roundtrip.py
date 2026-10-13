@@ -62,7 +62,14 @@ def test_two_ask_peer_calls_from_a_scripted_model_resume_once_in_id_order(
 
     class _Seat:
         async def execute(
-            self, turn_id: TurnId, session: Any, profile_id: str, resolutions: Any, *, caller: Any
+            self,
+            turn_id: TurnId,
+            session: Any,
+            profile_id: str,
+            resolutions: Any,
+            *,
+            caller: Any,
+            owner: Any = None,
         ) -> TurnOutcome:
             handed.append([str(r.tool_call_id) for r in resolutions])
             return await runner.resume(

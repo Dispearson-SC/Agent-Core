@@ -51,6 +51,7 @@ from agent_core.domain.transcript import (
 )
 from agent_core.domain.turn import (
     CallerIdentity,
+    PeerOwner,
     PendingRequest,
     SessionRef,
     TenantId,
@@ -114,6 +115,7 @@ class FakeAgentRunner:
         *,
         caller: CallerIdentity,
         session: SessionRef,
+        owner: PeerOwner | None = None,
     ) -> TurnOutcome:
         """The port's settled arity, seats included (docs/TASKS.md#t-f3-16).
 

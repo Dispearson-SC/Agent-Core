@@ -295,7 +295,14 @@ class Resume:
         self.then: list[TurnOutcome] = []  # outcomes to return before finishing
 
     async def execute(
-        self, turn_id: TurnId, session: Any, profile_id: str, resolutions: Any, *, caller: Any
+        self,
+        turn_id: TurnId,
+        session: Any,
+        profile_id: str,
+        resolutions: Any,
+        *,
+        caller: Any,
+        owner: Any = None,
     ) -> TurnOutcome:
         self.calls.append(tuple((str(r.tool_call_id), r.payload) for r in resolutions))
         self.approvals.append(tuple((str(r.tool_call_id), r.approved) for r in resolutions))

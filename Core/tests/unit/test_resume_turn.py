@@ -63,6 +63,7 @@ from agent_core.domain.policy import Effect, PolicyDecision, PolicyRule, RuleSet
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
     CallerIdentity,
+    PeerOwner,
     SessionRef,
     TenantId,
     ToolCallId,
@@ -178,6 +179,7 @@ class ContinuingRunner:
         *,
         caller: CallerIdentity,
         session: SessionRef,
+        owner: PeerOwner | None = None,
     ) -> TurnOutcome:
         self.resume_calls.append((turn_id, profile, history, resolutions))
         self.callers.append(caller)

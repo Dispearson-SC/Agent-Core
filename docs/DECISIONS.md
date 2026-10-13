@@ -2445,3 +2445,9 @@ current turn. It is the second delegation tool, not a second mechanism.
   Rejected: reusing `mode: subagent` as the consent. A mode says what a profile IS; it cannot say
   WHO may use it, and any spawner that listed a worker could otherwise run it. Breaking change for
   profiles that spawn (branch undeployed): add `accept_from` to each worker; none ship in-tree.
+- **R2-003 / R3. A resumed subagent keeps the menu its first half had.** `AgentRunner.resume` and
+  `ResumeTurn.execute` take `owner: PeerOwner | None = None` (keyword, last); `_step_resume_round`
+  hands `request.owner` on and the runner asks the same `_can_spawn(owner, profile)` as `run`, so a
+  subagent at its depth limit is not offered `spawn_subagent` after a person approves. The gate
+  already refused the spawn; this stops offering a tool that cannot work. Port change: both fakes,
+  the frozen-port stub and every `execute` fake of the resume seat gained the keyword.

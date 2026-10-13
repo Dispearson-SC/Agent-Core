@@ -2186,6 +2186,7 @@ async def _step_resume_round(
         request.profile_id,
         tuple(resolved),
         caller=request.caller,
+        owner=request.owner,
     )
 
 
