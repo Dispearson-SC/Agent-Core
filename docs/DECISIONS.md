@@ -2433,3 +2433,15 @@ current turn. It is the second delegation tool, not a second mechanism.
   profiles keep it.
 - **Order of refusals.** switch, allowlist, mode, depth, hop: the first cause that can be fixed in
   one profile is the one the model (and the audit row) reads.
+
+## D64 - Slice 16 advisories (C1r): the worker consents, resume keeps its menu, nothing orphaned
+
+- **R1. A spawn is checked on both sides, like an ask.** `subagents.accept_from` (new key, default
+  empty = nobody, strict list like `agents`) is the SPAWNED profile's consent. `authorise_spawn`
+  takes the spawner's id and refuses with `callee_does_not_accept_spawner`, after the mode check and
+  before the two limits (the first cause fixable in one profile is the one reported). It applies
+  whether or not the worker has `subagents.enabled`. The menu (`build_subagent_catalogue`) hides a
+  worker that would refuse. Deny still wins: the policy rules (C15) are checked on top, unchanged.
+  Rejected: reusing `mode: subagent` as the consent. A mode says what a profile IS; it cannot say
+  WHO may use it, and any spawner that listed a worker could otherwise run it. Breaking change for
+  profiles that spawn (branch undeployed): add `accept_from` to each worker; none ship in-tree.

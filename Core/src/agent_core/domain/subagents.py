@@ -7,6 +7,8 @@ cancel cascade, the progress events and the C8 envelope); what differs is the ga
 
   * the SPAWNER lists the agents it may spawn (`agents`; empty means nobody, never everybody);
   * the SPAWNED agent's `mode` must allow it (`AgentMode.spawnable`);
+  * the SPAWNED agent must list the spawner in its own `accept_from` (both sides consent, as for a
+    peer ask; empty means nobody);
   * `depth` bounds how many subagent links a chain may hold (C29).
 
 `enabled` is the feature switch, off by default, like `PeerPolicy.enabled`.
@@ -38,6 +40,14 @@ class SubagentPolicy:
     # C29. The most subagent links a chain through this profile may hold (the stricter of the
     # spawner's and the spawned profile's number wins).
     depth: int = DEFAULT_SUBAGENT_DEPTH
+    # R1 (C1r). Who may spawn THIS profile: the spawned agent's own consent, the counterpart of the
+    # spawner's `agents`. Independent of `enabled` (a worker that spawns nothing still names its
+    # spawners). Empty means nobody.
+    accept_from: tuple[AgentId, ...] = ()
+
+    def accepts(self, spawner: AgentId) -> bool:
+        """Membership is the whole rule, as in `may_spawn`: nobody listed, nobody accepted."""
+        return spawner in self.accept_from
 
     def may_spawn(self, agent_id: AgentId) -> bool:
         """Membership is the whole rule: an allowlist nobody was added to denies everything by

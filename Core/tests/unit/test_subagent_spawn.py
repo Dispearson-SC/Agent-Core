@@ -20,6 +20,8 @@ import pytest
 
 from agent_core.adapters.driving.workflow import turn_workflow
 from agent_core.domain.agent_mode import AgentMode, DelegationKind
+from agent_core.domain.peers import AgentId
+from agent_core.domain.subagents import SubagentPolicy
 from agent_core.domain.turn import TurnId, TurnOutcome
 from tests.fakes import fanout
 
@@ -155,6 +157,10 @@ def test_fail_fast_cancels_the_sibling_subagent_when_one_fails(
     [
         (lambda: fanout.asker_subagents(enabled=False), "caller_subagents_disabled"),
         (lambda: fanout.asker_subagents(agents=()), "caller_does_not_allow_subagent"),
+        (
+            lambda: fanout.callee_profile(subagents=SubagentPolicy()),
+            "callee_does_not_accept_spawner",
+        ),
         (lambda: fanout.callee_profile(mode=AgentMode.PEER), "callee_mode_not_spawnable"),
         (lambda: fanout.callee_profile(mode=AgentMode.PRIMARY), "callee_mode_not_spawnable"),
     ],
@@ -292,7 +298,11 @@ def test_a_peer_ask_in_the_same_step_is_unaffected(monkeypatch: pytest.MonkeyPat
     seat = turn_workflow._dependencies.peers  # noqa: SLF001
     assert seat is not None
     seat.profiles["p-sub"] = type(seat.profiles[fanout.PEER])(
-        id="p-sub", persona="s", model="m", mode=AgentMode.SUBAGENT
+        id="p-sub",
+        persona="s",
+        model="m",
+        mode=AgentMode.SUBAGENT,
+        subagents=SubagentPolicy(accept_from=(AgentId(fanout.ASKER),)),
     )
 
     _run()

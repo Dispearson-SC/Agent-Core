@@ -448,6 +448,17 @@ def asker_subagents(**changes: Any) -> None:
     values: dict[str, Any] = {"enabled": True, "agents": (AgentId(PEER),)}
     values.update(changes)
     seat.profiles[ASKER] = dataclasses.replace(asker, subagents=SubagentPolicy(**values))
+    # R1: the worker consents to its spawner, so a test only takes the asker's side away.
+    for agent in values["agents"]:
+        worker = seat.profiles.get(str(agent))
+        if worker is not None:
+            seat.profiles[str(agent)] = dataclasses.replace(
+                worker, subagents=_accepting(worker.subagents, AgentId(ASKER))
+            )
+
+
+def _accepting(policy: SubagentPolicy, spawner: AgentId) -> SubagentPolicy:
+    return dataclasses.replace(policy, accept_from=(*policy.accept_from, spawner))
 
 
 def callee_profile(**changes: Any) -> None:

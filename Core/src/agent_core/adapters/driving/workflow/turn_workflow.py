@@ -1405,6 +1405,7 @@ async def _step_ask_peers(
         next_depth = chain_depth
         if is_subagent:
             spawn = authorise_spawn(
+                caller=caller,
                 caller_policy=seat.profiles[request.profile_id].subagents,
                 callee=AgentId(target),
                 callee_mode=callee_profile.mode,

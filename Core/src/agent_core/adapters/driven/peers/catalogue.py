@@ -78,11 +78,13 @@ def build_subagent_catalogue(
         if callee is None:
             continue
         decision = authorise_spawn(
+            caller=AgentId(spawner.id),
             caller_policy=spawner.subagents,
             callee=agent_id,
             callee_mode=callee.mode,
             hop=0,
             depth=0,
+            callee_subagents=callee.subagents,
         )
         if not decision.allowed or not permits(str(agent_id)):
             continue

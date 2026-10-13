@@ -148,6 +148,7 @@ class SpawnRefusal(StrEnum):
     CALLER_SUBAGENTS_DISABLED = "caller_subagents_disabled"
     CALLER_DOES_NOT_ALLOW_SUBAGENT = "caller_does_not_allow_subagent"
     CALLEE_MODE_NOT_SPAWNABLE = "callee_mode_not_spawnable"
+    CALLEE_DOES_NOT_ACCEPT_SPAWNER = "callee_does_not_accept_spawner"
     SUBAGENT_DEPTH_REACHED = "subagent_depth_reached"
     HOP_LIMIT_REACHED = "hop_limit_reached"
 
@@ -167,6 +168,7 @@ class SpawnDecision:
 
 def authorise_spawn(
     *,
+    caller: AgentId,
     caller_policy: SubagentPolicy,
     callee: AgentId,
     callee_mode: AgentMode,
@@ -179,7 +181,8 @@ def authorise_spawn(
     """May the spawner (whose policy this is) spawn `callee`, at this `hop` and subagent `depth`?
 
     Checks run in a fixed order so one cause is reported for one refusal: the spawner's switch,
-    the spawner's allowlist, the spawned agent's mode, then the two limits (C29). Every branch fails
+    the spawner's allowlist, the spawned agent's mode, the spawned agent's consent
+    (`accept_from`), then the two limits (C29). Every branch fails
     closed, and `callee` must be in the allowlist even when its mode would allow it: a mode removes
     reach, it never grants it. Keyword-only, for `authorise_hop`'s reason.
 
@@ -196,7 +199,10 @@ def authorise_spawn(
         return SpawnDecision(False, SpawnRefusal.CALLER_DOES_NOT_ALLOW_SUBAGENT)
     if not callee_mode.spawnable:
         return SpawnDecision(False, SpawnRefusal.CALLEE_MODE_NOT_SPAWNABLE)
-    callee_depth = (callee_subagents or SubagentPolicy()).depth
+    callee_policy = callee_subagents or SubagentPolicy()
+    if not callee_policy.accepts(caller):
+        return SpawnDecision(False, SpawnRefusal.CALLEE_DOES_NOT_ACCEPT_SPAWNER)
+    callee_depth = callee_policy.depth
     if depth + 1 > min(caller_policy.depth, callee_depth):
         return SpawnDecision(False, SpawnRefusal.SUBAGENT_DEPTH_REACHED)
     if hop >= min((caller_peers or PeerPolicy()).max_hops, (callee_peers or PeerPolicy()).max_hops):

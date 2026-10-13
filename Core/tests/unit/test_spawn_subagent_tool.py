@@ -56,7 +56,10 @@ def _profile(
         mode=mode,
         description=description,
         subagents=SubagentPolicy(
-            enabled=enabled and bool(spawns), agents=tuple(AgentId(a) for a in spawns)
+            enabled=enabled and bool(spawns),
+            agents=tuple(AgentId(a) for a in spawns),
+            # R1: every worker in this world consents to every spawner in it.
+            accept_from=(AgentId(BOSS), AgentId(RESEARCHER), AgentId(WRITER)),
         ),
     )
 
@@ -321,7 +324,12 @@ def test_a_subagent_whose_profile_allows_a_deeper_chain_keeps_the_spawn_tool() -
     world = _world()
     deeper = replace(
         _profile(RESEARCHER, spawns=(WRITER,), mode=AgentMode.SUBAGENT),
-        subagents=SubagentPolicy(enabled=True, agents=(AgentId(WRITER),), depth=2),
+        subagents=SubagentPolicy(
+            enabled=True,
+            agents=(AgentId(WRITER),),
+            depth=2,
+            accept_from=(AgentId(BOSS), AgentId(RESEARCHER)),
+        ),
     )
     world[RESEARCHER] = deeper
 

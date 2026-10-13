@@ -507,30 +507,38 @@ def _build_agent_ref(data: object) -> AgentRef:
     )
 
 
+def _agent_id_list(raw: object, *, where: str) -> tuple[AgentId, ...]:
+    """A strict list of distinct agent ids: a string where a list belongs, an empty id or a
+    duplicate refuses to load (these lists grant reach)."""
+    if not isinstance(raw, (list, tuple)):
+        raise ProfileValidationError(f"{where} must be a list of agent ids, got {raw!r}")
+    ids: list[AgentId] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise ProfileValidationError(f"{where} must be non-empty strings, got {item!r}")
+        if AgentId(item) in ids:
+            raise ProfileValidationError(f"{where} lists {item!r} twice")
+        ids.append(AgentId(item))
+    return tuple(ids)
+
+
 def _build_subagent_policy(data: object) -> SubagentPolicy:
     """The `subagents:` block (C28). Strict throughout: it grants the power to start agents, so a
     misspelt key, a string where a list belongs or a duplicate id refuses to load."""
     mapping = _require_mapping(data, where="subagents")
     _reject_unknown_keys(mapping, {f.name for f in fields(SubagentPolicy)}, where="subagents")
     defaults = SubagentPolicy()
-    raw = mapping.get("agents", defaults.agents)
-    if not isinstance(raw, (list, tuple)):
-        raise ProfileValidationError(f"subagents.agents must be a list of agent ids, got {raw!r}")
-    agents: list[AgentId] = []
-    for item in raw:
-        if not isinstance(item, str) or not item.strip():
-            raise ProfileValidationError(
-                f"subagents.agents must be non-empty strings, got {item!r}"
-            )
-        if AgentId(item) in agents:
-            raise ProfileValidationError(f"subagents.agents lists {item!r} twice")
-        agents.append(AgentId(item))
+    agents = _agent_id_list(mapping.get("agents", defaults.agents), where="subagents.agents")
+    accept_from = _agent_id_list(
+        mapping.get("accept_from", defaults.accept_from), where="subagents.accept_from"
+    )
     return SubagentPolicy(
         enabled=_strict_bool(
             mapping.get("enabled", defaults.enabled), where="subagents.enabled"
         ),
-        agents=tuple(agents),
+        agents=agents,
         depth=_positive_int(mapping.get("depth", defaults.depth), where="subagents.depth"),
+        accept_from=accept_from,
     )
 
 

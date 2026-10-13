@@ -191,7 +191,8 @@ first release.
 `spawn_subagent` is off until a profile says `subagents: {enabled: true, agents: [...]}` AND a policy
 rule allows the tool (`tool_pattern: spawn_subagent`, optionally narrowed with `resource: <agent id>`;
 a `deny` for an agent hides it and wins over any allow). The spawned profile must have `mode:
-subagent` (or `all`). A subagent is a row of `peer_messages` with `kind = 'subagent'`:
+subagent` (or `all`) AND list the spawner in its own `subagents: {accept_from: [...]}` (empty means
+nobody, whether or not the worker itself may spawn; D64). A subagent is a row of `peer_messages` with `kind = 'subagent'`:
 `SELECT correlation_id, target_agent_id, subagent_depth, state, cancel_reason FROM peer_messages WHERE
 kind = 'subagent' ORDER BY enqueued_at;` The peer worker must poll the subagent's queue: it does for
 any profile with `mode: subagent` and for any agent a profile with `subagents.enabled` lists. The

@@ -29,6 +29,7 @@ from tests.fakes import fanout
 
 SUB = DelegationKind.SUBAGENT
 WORKER = AgentId("worker")
+SPAWNER = AgentId("boss")
 
 
 def _policy(depth: int = 1, *agents: AgentId) -> SubagentPolicy:
@@ -45,12 +46,13 @@ def _gate(
     callee_hops: int = 2,
 ) -> Any:
     return authorise_spawn(
+        caller=SPAWNER,
         caller_policy=_policy(caller_depth),
         callee=WORKER,
         callee_mode=AgentMode.SUBAGENT,
         hop=hop,
         depth=depth,
-        callee_subagents=SubagentPolicy(depth=callee_depth),
+        callee_subagents=SubagentPolicy(depth=callee_depth, accept_from=(SPAWNER,)),
         caller_peers=PeerPolicy(max_hops=caller_hops),
         callee_peers=PeerPolicy(max_hops=callee_hops),
     )
@@ -148,7 +150,8 @@ def test_the_same_spawn_is_allowed_where_both_profiles_allow_the_depth(
     seat = fanout.turn_workflow._dependencies.peers  # noqa: SLF001
     assert seat is not None
     seat.profiles[fanout.PEER] = dataclasses.replace(
-        seat.profiles[fanout.PEER], subagents=SubagentPolicy(depth=2)
+        seat.profiles[fanout.PEER],
+        subagents=SubagentPolicy(depth=2, accept_from=(AgentId(fanout.ASKER),)),
     )
 
     _run(_as_subagent(depth=1))

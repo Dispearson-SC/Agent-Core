@@ -76,7 +76,11 @@ def _bind(monkeypatch: pytest.MonkeyPatch) -> tuple[w.World, _Start]:
         profiles[w.A], subagents=SubagentPolicy(enabled=True, agents=(AgentId(w.B), AgentId(w.C)))
     )
     for agent in (w.B, w.C):
-        profiles[agent] = dataclasses.replace(profiles[agent], mode=AgentMode.SUBAGENT)
+        profiles[agent] = dataclasses.replace(
+            profiles[agent],
+            mode=AgentMode.SUBAGENT,
+            subagents=SubagentPolicy(accept_from=(AgentId(w.A),)),
+        )
     monkeypatch.setattr(
         turn_workflow,
         "_dependencies",

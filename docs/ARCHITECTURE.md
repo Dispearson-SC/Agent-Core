@@ -674,7 +674,8 @@ profile as a child of the current turn, on the same machinery as a peer ask: a d
 a `peer_messages` row (`kind = 'subagent'`, `subagent_depth`), a durable child workflow, the same
 collect round (one resume for the whole step), caps, `fan_out`, timeouts, cancel cascade, background
 rules, progress events and the C8 envelope (with `kind="subagent"`). Its gate is its own: the
-spawner's `subagents.enabled` and `subagents.agents` allowlist and the spawned profile's `mode`; C15
+spawner's `subagents.enabled` and `subagents.agents` allowlist, the spawned profile's `mode` and its
+own consent (`subagents.accept_from`, D64); C15
 policy rules narrow by `resource` (the `agent`) and `deny` wins. The subagent sees its task and
 nothing of the conversation, runs with its own profile's tools, and is not offered `spawn_subagent`
 unless the depth limit allows (C29). The ownership tree labels each child `peer` or `subagent`.
