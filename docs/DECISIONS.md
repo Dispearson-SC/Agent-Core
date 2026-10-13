@@ -2632,3 +2632,30 @@ current turn. It is the second delegation tool, not a second mechanism.
   its docstring says so.
 - **Tests (R3-abandon-untested).** The abandon path is covered behaviourally: a deferred call is
   fresh for the run that executes it, and a failing abandon keeps the suspension and is logged.
+
+## D70 - Addon manifest and where addon code lives (A1)
+
+Phase 2 (roadmap section 5). Addons live in the monorepo at `Agent-Core/addons/<name>/` (user
+decision 2026-10-13) and are described by `addon.yaml`.
+
+- **Placement: `adapters/driven/addons_fs/`.** Reading manifests off a disk, parsing YAML and
+  validating with pydantic are all adapter work (the layer rules ban `yaml` outside `adapters/`,
+  and `domain/` imports nothing external). Nothing in `domain/`, `application/` or `ports/` asks
+  for an addon: the composition root resolves the enabled addons once at startup and passes the
+  result on as data, the same reason there is no profile-loading port. A port would be a protocol
+  with one caller that is itself the wiring. Rejected: a top-level `agent_core/addons` package
+  (it would need its own import rules to stay out of the inner layers) and putting the model in
+  `domain/` (it needs pydantic and YAML).
+- **Strict schema.** Unknown keys are errors (a typo must not silently drop an extension point);
+  `name` is lower-case words joined by single underscores (a double underscore separates the
+  segments of an addon's setting environment variable, D72); `version` is a PEP 440 version and
+  `core` a PEP 440 specifier set (`packaging`, now a declared dependency); every path is relative
+  and cannot leave the addon directory; a bridge (`auto_install`) must depend on something.
+- **`audit.allow` / `audit.presence_only` are `tool -> [argument]` mappings**, not the bare lists
+  of the roadmap example: that is the shape `collect_audit_policy` takes, and a list cannot say
+  which argument of which tool is stored. Deviation recorded.
+- **Errors name the addon and the field and never echo a value** (a setting can be a secret).
+  A directory must carry the name of the addon it holds.
+- **Core's own version is `0.0.0`** (`pyproject.toml`), so a manifest written today declares
+  `core: ">=0.0,<1"`; the roadmap's `>=1.0,<2` becomes meaningful when Core is versioned 1.0.
+

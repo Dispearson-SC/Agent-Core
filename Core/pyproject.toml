@@ -21,6 +21,8 @@ dependencies = [
     "pyyaml>=6.0",
     # C9: typed peer answers are checked against the profile's JSON Schema.
     "jsonschema>=4.18",
+    # Phase 2: an addon's `version` and its `core` range are PEP 440 versions and specifiers.
+    "packaging>=23",
 ]
 
 [project.optional-dependencies]
