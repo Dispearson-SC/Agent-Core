@@ -245,7 +245,7 @@ class EventFeed:
         failures = 0  # consecutive snapshot reads that failed; bounded by max_snapshot_failures
 
         def shown(sent: FeedSnapshot) -> tuple[int, int, float]:
-            """What the client now knows after `sent`: (event floor, open asks, time of the send)."""
+            """What the client now knows after `sent`: (event floor, open asks, send time)."""
             return sent.last_seq, sent.open_asks, clock()
 
         try:
