@@ -2514,3 +2514,32 @@ current turn. It is the second delegation tool, not a second mechanism.
 - **Wiring.** `PydanticAgentRunner(tool_journal=...)`; `build_container` passes
   `PgToolJournal(PoolConnections(domain_pool))`. `None` (tests, other composers) keeps every call
   as it was.
+
+## D66 - Recorded provider cassettes (C31)
+
+- **Where the recording happens: the HTTP transport.** The model is an `OpenAIChatModel` over an
+  `openai` SDK client over `httpx`, so an `httpx.AsyncBaseTransport` sees exactly the request the
+  adapter builds and hands back exactly the bytes the SDK parses. `model_for`, `library_mode_model`
+  and `proxy_model` gained a keyword-only `http_client` (default `None`: the SDK builds its own, as
+  before), the single production-code change of C31.
+- **Test support, not product code.** `tests/support/http_cassette.py` (`CassetteTransport`) and
+  JSON cassettes under `tests/fixtures/cassettes/`. Nothing in `src/` imports it.
+- **Matching is method + redacted URL + JSON body, exactly.** A request that matches nothing raises
+  `CassetteMiss` (an `AssertionError`), never falls through to a network call. The cost: a
+  pydantic-ai upgrade that changes the request body needs a re-record, which is what a request
+  contract test should say. Rejected: matching on the last user message only (hides a changed
+  tool schema or model name).
+- **Recording is opt-in by environment** (`AGENT_CORE_RECORD_CASSETTES=1`), is the only mode that
+  uses an upstream transport, and writes after every exchange. **Redaction happens on the way out**
+  (allowlisted headers, masked credential headers, masked credential-looking query parameters,
+  body/URL strings scrubbed of the request's own credential, of secret-named environment values and
+  of key-shaped text), so a cassette is committable as written. The limit is stated in OPERATIONS:
+  a secret that is only ordinary text and in no environment variable cannot be recognised.
+- **The shipped cassette is hand-made** (`minimax_chat_hello.json`): the request body is the one
+  pydantic-ai really sends (captured against a mock transport), the response follows the documented
+  `chat.completion` shape. No real key or account was used. Not a real provider capture, and its
+  `note` field says so.
+- **A finding, recorded.** The first import of `litellm` downloads its model-cost map from the
+  internet. A test that must be offline sets `LITELLM_LOCAL_MODEL_COST_MAP=True` and imports
+  litellm before closing the sockets; production behaviour is unchanged (an operator who wants no
+  boot-time fetch sets the same variable).

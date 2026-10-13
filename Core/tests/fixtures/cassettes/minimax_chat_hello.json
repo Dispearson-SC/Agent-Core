@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "note": "Hand-made from the request pydantic-ai 2.31 sends to MiniMax's OpenAI-compatible chat endpoint; the response follows the documented chat.completion shape. No real key or account data. Re-record with AGENT_CORE_RECORD_CASSETTES=1 (see docs/OPERATIONS.md).",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://api.minimax.io/v1/chat/completions",
+        "headers": {"authorization": "[REDACTED]", "content-type": "application/json"},
+        "body": {"messages": [{"role": "user", "content": "Say hello"}], "model": "MiniMax-M3", "stream": false}
+      },
+      "response": {
+        "status": 200,
+        "headers": {"content-type": "application/json"},
+        "body": {
+          "id": "cassette-0001",
+          "object": "chat.completion",
+          "created": 1760000000,
+          "model": "MiniMax-M3",
+          "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello from the cassette!"}, "finish_reason": "stop"}],
+          "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}
+        }
+      }
+    }
+  ]
+}

@@ -63,6 +63,7 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 if TYPE_CHECKING:
+    import httpx
     from pydantic_ai.models.openai import OpenAIChatModel
     from pydantic_ai.settings import ModelSettings
 
@@ -156,9 +157,16 @@ def _resolved(model_id: str) -> tuple[str, str]:
 
 
 def library_mode_model(
-    model_id: str, *, settings: ModelSettings | None = None
+    model_id: str,
+    *,
+    settings: ModelSettings | None = None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> OpenAIChatModel:
     """DAY 1. The provider's own OpenAI-compatible endpoint, resolved by litellm.
+
+    `http_client` is the seam for the HTTP layer (C31): a test passes a client whose transport
+    replays a recorded cassette, so the adapter is exercised end to end with no network. Left
+    out, the OpenAI SDK builds its own, exactly as before.
 
     `settings` is the seat for per-model options such as `max_tokens` or
     `openai_reasoning_effort`. It is not reachable from `ModelFactory`, whose shape is
@@ -208,13 +216,17 @@ def library_mode_model(
         # and a provider sent it as a model name answers 404 much later and much less
         # clearly. Proxy mode keeps the prefix for exactly the opposite reason.
         wire_model,
-        provider=OpenAIProvider(base_url=api_base, api_key=api_key),
+        provider=OpenAIProvider(base_url=api_base, api_key=api_key, http_client=http_client),
         settings=settings,
     )
 
 
 def proxy_model(
-    model_id: str, base_url: str, *, settings: ModelSettings | None = None
+    model_id: str,
+    base_url: str,
+    *,
+    settings: ModelSettings | None = None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> OpenAIChatModel:
     """DAY 2. Pydantic AI talking to a LiteLLM PROXY. `t-d2-01` owns this path.
 
@@ -225,13 +237,20 @@ def proxy_model(
     from pydantic_ai.models.openai import OpenAIChatModel
     from pydantic_ai.providers.litellm import LiteLLMProvider
 
-    return OpenAIChatModel(
-        model_id, provider=LiteLLMProvider(api_base=base_url), settings=settings
+    provider = (
+        LiteLLMProvider(api_base=base_url)
+        if http_client is None
+        else LiteLLMProvider(api_base=base_url, http_client=http_client)
     )
+    return OpenAIChatModel(model_id, provider=provider, settings=settings)
 
 
 def model_for(
-    model_id: str, base_url: str | None, *, settings: ModelSettings | None = None
+    model_id: str,
+    base_url: str | None,
+    *,
+    settings: ModelSettings | None = None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> OpenAIChatModel:
     """The day-1/day-2 switch, and the only place it is read.
 
@@ -240,8 +259,8 @@ def model_for(
     the promise is kept.
     """
     if base_url is None:
-        return library_mode_model(model_id, settings=settings)
-    return proxy_model(model_id, base_url, settings=settings)
+        return library_mode_model(model_id, settings=settings, http_client=http_client)
+    return proxy_model(model_id, base_url, settings=settings, http_client=http_client)
 
 
 def _chat_config(wire_model: str, provider: str) -> ProviderChatConfig | None:

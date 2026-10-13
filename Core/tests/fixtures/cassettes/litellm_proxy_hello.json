@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "note": "Hand-made: the request pydantic-ai 2.31 sends to a LiteLLM proxy (the routing prefix is kept), and a documented chat.completion response. No real key or account.",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "url": "http://litellm.test:4000/chat/completions",
+        "headers": {"authorization": "[REDACTED]", "content-type": "application/json"},
+        "body": {"messages": [{"role": "user", "content": "Say hello"}], "model": "minimax/MiniMax-M3", "stream": false}
+      },
+      "response": {
+        "status": 200,
+        "headers": {"content-type": "application/json"},
+        "body": {
+          "id": "cassette-0002",
+          "object": "chat.completion",
+          "created": 1760000001,
+          "model": "minimax/MiniMax-M3",
+          "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello via the proxy cassette!"}, "finish_reason": "stop"}],
+          "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11}
+        }
+      }
+    }
+  ]
+}

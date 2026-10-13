@@ -424,3 +424,23 @@ tool is NOT run again: the model is told `Tool call interrupted and not repeated
   MCP server's) are not.
 - A journal that cannot be written fails the tool call (the turn step fails and is retried like
   any other failed step); there is no silent fallback to running unguarded.
+
+## Provider cassettes for adapter tests (C31, D66)
+
+`Core/tests/fixtures/cassettes/*.json` hold recorded HTTP exchanges with a model provider;
+`tests/support/http_cassette.py` (`CassetteTransport`) replays them through the `http_client` seam of
+`llm_litellm.models.model_for(...)`, so an adapter test runs the real request-building and
+response-parsing code with no network and no cost.
+
+- Replay is the default and needs nothing. A request the cassette does not hold fails as
+  `CassetteMiss` (never as a network call).
+- To record or refresh one, on a developer machine with the provider's key in the environment (never
+  committed, never printed): `AGENT_CORE_RECORD_CASSETTES=1 pytest <test>` with the test's client
+  built as `httpx.AsyncClient(transport=CassetteTransport(path))`. The cassette is written
+  REDACTED: credential headers masked, other request/response headers dropped, secret-named query
+  parameters masked, and every string scrubbed of the request's own credential, of the value of
+  every `*KEY*`/`*TOKEN*`/`*SECRET*`/`*PASSWORD*` environment variable and of key-shaped text
+  (`sk-...`, `Bearer ...`). Read the diff before committing: redaction cannot know about a secret
+  that appears only as ordinary text and is not in the environment.
+- The first import of `litellm` fetches its model-cost map from the internet; export
+  `LITELLM_LOCAL_MODEL_COST_MAP=True` (the cassette tests do) wherever that must not happen.
