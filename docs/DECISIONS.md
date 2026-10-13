@@ -2407,3 +2407,29 @@ current turn. It is the second delegation tool, not a second mechanism.
 - **Profile key deviation, recorded.** The task text names the depth `subagent_depth` on the profile;
   it is `subagents.depth` inside the `subagents:` block that also carries the switch and the allowlist
   (D63).
+
+## D63 - Depth and ownership limits for subagents (C29)
+
+- **Depth is a count that travels, like `hop` (t-f11-47).** The depth of a turn is the number of subagent
+  links in the chain down to it. A spawn writes `parent depth + 1` on the ask row (`subagent_depth`,
+  migration `0041`), the worker copies it onto `PeerOwner`, and the child's own asks read it from
+  there; a PEER ask passes the chain's depth on unchanged, so a subagent that asks a peer, and a peer
+  that then spawns, still count the link above. The task text says "by walking the owner chain":
+  every turn's owner already IS the chain's summary (it is built from the row that started it), so
+  nothing is walked at spawn time and no query is made inside the replayed step. Rejected: walking
+  `peer_messages` upwards at each spawn. A callee's turn id is a hash of its row, so the walk would
+  need the parent's call stored on every row, which is a second copy of what the owner already holds.
+- **`subagents.depth` (default 1), the stricter side wins.** A top-level turn (depth 0) may spawn a
+  subagent (depth 1); that subagent may not spawn (`1 + 1 > 1`), refused with
+  `subagent_depth_reached`. Both the spawner's and the spawned profile's limit apply and the smaller
+  one decides, for the reason `max_hops` works that way: a limit read off one side is a limit that
+  side can raise. The tool's menu hides `spawn_subagent` on a turn whose own profile's limit is
+  reached (the restricted toolset of D62); the gate is what enforces both sides.
+- **A spawn is a hop.** It travels with `hop + 1` and is refused (`hop_limit_reached`) at
+  `min(spawner.peers.max_hops, spawned.peers.max_hops)`, so delegation of every kind (ask or spawn) is
+  bounded by one number per profile and one profile cannot be used to launder depth through the other.
+  The cost: a profile with `peers.max_hops: 1` cannot spawn a subagent that then asks a peer. Raise
+  `max_hops` on the profiles of a deployment that wants both. The default is 2 and all shipped
+  profiles keep it.
+- **Order of refusals.** switch, allowlist, mode, depth, hop: the first cause that can be fixed in
+  one profile is the one the model (and the audit row) reads.

@@ -148,6 +148,8 @@ class SpawnRefusal(StrEnum):
     CALLER_SUBAGENTS_DISABLED = "caller_subagents_disabled"
     CALLER_DOES_NOT_ALLOW_SUBAGENT = "caller_does_not_allow_subagent"
     CALLEE_MODE_NOT_SPAWNABLE = "callee_mode_not_spawnable"
+    SUBAGENT_DEPTH_REACHED = "subagent_depth_reached"
+    HOP_LIMIT_REACHED = "hop_limit_reached"
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,13 +172,23 @@ def authorise_spawn(
     callee_mode: AgentMode,
     hop: int,
     depth: int,
+    callee_subagents: SubagentPolicy | None = None,
+    caller_peers: PeerPolicy | None = None,
+    callee_peers: PeerPolicy | None = None,
 ) -> SpawnDecision:
     """May the spawner (whose policy this is) spawn `callee`, at this `hop` and subagent `depth`?
 
     Checks run in a fixed order so one cause is reported for one refusal: the spawner's switch,
-    the spawner's allowlist, then the spawned agent's mode. Every branch fails closed, and
-    `callee` must be in the allowlist even when its mode would allow it: a mode removes reach, it
-    never grants it. Keyword-only, for `authorise_hop`'s reason.
+    the spawner's allowlist, the spawned agent's mode, then the two limits (C29). Every branch fails
+    closed, and `callee` must be in the allowlist even when its mode would allow it: a mode removes
+    reach, it never grants it. Keyword-only, for `authorise_hop`'s reason.
+
+    THE LIMITS. `depth` is how many subagent links the chain down to the spawning turn holds; the
+    child sits one deeper, and the STRICTER of the spawner's and the spawned profile's
+    `subagents.depth` bounds it (a limit read off one side is a limit that side can raise). A spawn
+    is also a hop: it spends `peers.max_hops` like an ask does, so peers and subagents share one
+    bound on how far work can be delegated, again the stricter side's. Left out (None), a side's
+    policy is the default one; the workflow always passes both.
     """
     if not caller_policy.enabled:
         return SpawnDecision(False, SpawnRefusal.CALLER_SUBAGENTS_DISABLED)
@@ -184,4 +196,9 @@ def authorise_spawn(
         return SpawnDecision(False, SpawnRefusal.CALLER_DOES_NOT_ALLOW_SUBAGENT)
     if not callee_mode.spawnable:
         return SpawnDecision(False, SpawnRefusal.CALLEE_MODE_NOT_SPAWNABLE)
-    return SpawnDecision(True, next_hop=hop, next_depth=depth + 1)
+    callee_depth = (callee_subagents or SubagentPolicy()).depth
+    if depth + 1 > min(caller_policy.depth, callee_depth):
+        return SpawnDecision(False, SpawnRefusal.SUBAGENT_DEPTH_REACHED)
+    if hop >= min((caller_peers or PeerPolicy()).max_hops, (callee_peers or PeerPolicy()).max_hops):
+        return SpawnDecision(False, SpawnRefusal.HOP_LIMIT_REACHED)
+    return SpawnDecision(True, next_hop=hop + 1, next_depth=depth + 1)

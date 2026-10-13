@@ -1399,14 +1399,20 @@ async def _step_ask_peers(
         # switch and allowlist and the spawned agent's mode (`authorise_spawn`, C28): a subagent is
         # not a peer, so `peers.enabled` and the peers' allowlists do not apply to it, while the
         # caps, `fan_out`, timeouts and background rules below are shared on purpose.
-        next_depth = 0
+        # C29. The subagent links above this turn, carried on its owner; a peer ask passes them on
+        # unchanged so the chain's depth survives a peer in the middle.
+        chain_depth = request.owner.subagent_depth if request.owner is not None else 0
+        next_depth = chain_depth
         if is_subagent:
             spawn = authorise_spawn(
                 caller_policy=seat.profiles[request.profile_id].subagents,
                 callee=AgentId(target),
                 callee_mode=callee_profile.mode,
                 hop=request.hop,
-                depth=request.owner.subagent_depth if request.owner is not None else 0,
+                depth=chain_depth,
+                callee_subagents=callee_profile.subagents,
+                caller_peers=caller_policy,
+                callee_peers=callee_profile.peers,
             )
             allowed, gate_text = spawn.allowed, _SPAWN_REFUSED.format(
                 target=target, reason=spawn.reason.value if spawn.reason else "refused"
@@ -1569,7 +1575,9 @@ async def _step_ask_peers(
         # C12: `continue_session` is the model's claim; the mailbox checks it against the rows
         # that created that session, and a claim it cannot back is a refusal, not a crash.
         delegation: dict[str, Any] = (
-            {"kind": kind, "subagent_depth": next_depth} if is_subagent else {}
+            {"kind": kind, "subagent_depth": next_depth}
+            if is_subagent
+            else ({"subagent_depth": next_depth} if next_depth else {})
         )
         try:
             correlation_id = await seat.mailbox.ask(

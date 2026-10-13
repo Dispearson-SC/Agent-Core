@@ -309,3 +309,32 @@ def test_subagents_enabled_grants_the_spawn_toolset_and_peers_enabled_is_not_nee
     assert "peers" not in granted.toolsets
     assert _grant_peer_mechanism(granted).toolsets == granted.toolsets, "idempotent"
     assert _grant_peer_mechanism(_world()[RESEARCHER]).toolsets == (), "nothing enabled, no grant"
+
+
+def test_a_subagent_whose_profile_allows_a_deeper_chain_keeps_the_spawn_tool() -> None:
+    """C29: the menu hides the tool only once a spawn would pass the profile's own depth limit."""
+    from dataclasses import replace
+
+    from agent_core.domain.agent_mode import DelegationKind
+    from agent_core.domain.turn import PeerOwner
+
+    world = _world()
+    deeper = replace(
+        _profile(RESEARCHER, spawns=(WRITER,), mode=AgentMode.SUBAGENT),
+        subagents=SubagentPolicy(enabled=True, agents=(AgentId(WRITER),), depth=2),
+    )
+    world[RESEARCHER] = deeper
+
+    def child(depth: int) -> TurnRequest:
+        return TurnRequest(
+            session=_request().session,
+            caller=_request().caller,
+            profile_id=RESEARCHER,
+            input=UserInput(text="task"),
+            owner=PeerOwner(
+                "root", "root", BOSS, "corr", kind=DelegationKind.SUBAGENT, subagent_depth=depth
+            ),
+        )
+
+    assert _offered(world, request=child(1)) is not None, "one link above, depth 2 allows another"
+    assert _offered(world, request=child(2)) is None, "two links above, no more"

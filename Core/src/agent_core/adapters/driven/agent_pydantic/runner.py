@@ -134,7 +134,6 @@ from agent_core.adapters.driven.peers.typed_answer import answer_problem
 from agent_core.adapters.driven.tools.background import BackgroundAgents, BackgroundOwner
 from agent_core.adapters.driven.tools.context import PeerEntry, TurnContext
 from agent_core.application.ingest_media import sniff_media
-from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.compaction import CompactionPolicy, ContextState
 from agent_core.domain.knowledge import KnowledgeHit, TenantKnowledgePolicy
 from agent_core.domain.media import MediaDelivery, MediaKind
@@ -1524,7 +1523,7 @@ class PydanticAgentRunner:
                     agent_id=request.profile_id,
                     peer_catalogue=self._peer_catalogue(profile, rules),
                     subagent_catalogue=self._subagent_catalogue(profile, rules),
-                    can_spawn=self._can_spawn(request),
+                    can_spawn=self._can_spawn(request, profile),
                     allow_continuation=profile.peers.allow_continuation,
                     allow_background=profile.peers.allow_background,
                     **self._background_deps(profile, turn_id, request.caller, request.session),
@@ -1824,15 +1823,17 @@ class PydanticAgentRunner:
         )
 
     @staticmethod
-    def _can_spawn(request: TurnRequest) -> bool:
-        """Whether this turn is offered `spawn_subagent` at all: not when it IS a subagent.
+    def _can_spawn(request: TurnRequest, profile: AgentProfile) -> bool:
+        """Whether this turn is offered `spawn_subagent`: not once a spawn would go past the
+        profile's own `subagents.depth`.
 
-        This is the restricted toolset of a subagent (its profile's tools minus `spawn_subagent`).
-        It is the menu only; the workflow's gate is what enforces the rule (C29 makes both
-        depth-aware).
+        This is the restricted toolset of a subagent (its profile's tools minus `spawn_subagent`
+        unless its depth allows). It is the menu only, and only this profile's side of the limit:
+        the workflow's gate (`authorise_spawn`) is what enforces the stricter of both sides.
         """
         owner = request.owner
-        return owner is None or owner.kind is not DelegationKind.SUBAGENT
+        depth = 0 if owner is None else owner.subagent_depth
+        return depth + 1 <= profile.subagents.depth
 
     def _per_turn_toolsets(
         self, caller: CallerIdentity, profile: AgentProfile
