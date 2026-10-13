@@ -783,7 +783,8 @@ publisher that fails costs the event, not the turn.
 subscribers by (tenant, root turn); each subscriber has a bounded queue, and one that falls behind is
 emptied and handed a SNAPSHOT of the tree (state, tools, timing per turn) instead of the events it
 missed, then live events again. Every connection, including a reconnect, starts with a snapshot, and
-the stream ends with `end` when nothing under the turn is running. Authorised exactly as
+the stream ends with `end` when nothing under the turn is running (the open-ask count is a SQL
+count, exact past the 500-ask read window) or with `error` after 5 failed snapshot reads in a row. Authorised exactly as
 `GET /turns/{id}` (same lookup, same 404) and scoped by the authenticated tenant in SQL.
 
 **Streaming the reply (C26, D58).** With `AGENT_CORE_STREAM_REPLIES` on, the runner attaches Pydantic

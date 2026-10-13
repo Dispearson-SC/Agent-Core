@@ -2456,3 +2456,12 @@ current turn. It is the second delegation tool, not a second mechanism.
   model stream that raises, a cancelled turn and a flush timeout all leave no task publishing the
   text of a finished turn. The pending queue holds a small `_Chunk` dataclass instead of an untyped
   `[response, index, text]` list.
+- **R4. The feed's open-ask count is exact and its snapshot retry is bounded.** `TaskGraphReader`
+  gained `count_open(tenant, root)` (`state <> 'cancelled' AND answered_at IS NULL`, tenant-scoped,
+  the predicate of `background_state`). When `asks_under` returns a truncated window the feed asks
+  for the count instead of treating every omitted ask as open (C1q's rule, which made a tree with
+  more asks than the window unable to ever settle); a complete window is still counted from its
+  records, with no second query. `EventFeed(max_snapshot_failures=5)`: after that many consecutive
+  failed snapshot reads (idle, lag or terminal-event reads) the stream yields `FeedKind.ERROR`
+  (SSE `event: error`) and ends; a success resets the count. Rejected: exponential back-off, since
+  the retry is already paced by the idle period (at most 5 s) and the bound is what stops it.

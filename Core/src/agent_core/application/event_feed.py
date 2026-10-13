@@ -48,6 +48,7 @@ from agent_core.ports.task_graph_reader import TaskGraphReader
 
 __all__ = [
     "DEFAULT_KEEPALIVE_SECONDS",
+    "DEFAULT_MAX_SNAPSHOT_FAILURES",
     "DEFAULT_RECONCILE_SECONDS",
     "DEFAULT_QUEUE_SIZE",
     "EventFeed",
@@ -60,6 +61,7 @@ _LOG = logging.getLogger(__name__)
 DEFAULT_QUEUE_SIZE: Final[int] = 64
 DEFAULT_KEEPALIVE_SECONDS: Final[float] = 15.0
 DEFAULT_RECONCILE_SECONDS: Final[float] = 5.0
+DEFAULT_MAX_SNAPSHOT_FAILURES: Final[int] = 5
 _POLL_SECONDS: Final[float] = 2.0
 _OPEN_ASKS: Final[frozenset[BackgroundState]] = frozenset(
     {BackgroundState.QUEUED, BackgroundState.RUNNING}
@@ -72,6 +74,7 @@ class FeedKind(StrEnum):
     EVENT = "event"
     KEEPALIVE = "keepalive"
     END = "end"
+    ERROR = "error"
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,9 +121,13 @@ class EventFeed:
         poll_seconds: float = _POLL_SECONDS,
         asks: TaskGraphReader | None = None,
         reconcile_seconds: float = DEFAULT_RECONCILE_SECONDS,
+        max_snapshot_failures: int = DEFAULT_MAX_SNAPSHOT_FAILURES,
     ) -> None:
         if queue_size < 1:
             raise ValueError("queue_size must be at least 1")
+        if max_snapshot_failures < 1:
+            raise ValueError("max_snapshot_failures must be at least 1")
+        self._max_failures = max_snapshot_failures
         self._reader = reader
         self._wakeup = wakeup
         self._queue_size = queue_size
@@ -186,10 +193,14 @@ class EventFeed:
         if self._asks is None:
             return snapshot
         asks = await self._asks.asks_under(tenant_id, root_turn_id)
-        # The ask read is oldest-first and bounded: the asks it left out are the newest and none is
-        # known to be finished, so each counts as open. A truncated window never reads as settled.
-        open_known = sum(1 for record in asks.records if record.state in _OPEN_ASKS)
-        return replace(snapshot, open_asks=open_known + max(0, asks.omitted))
+        if asks.omitted:
+            # The window left asks out, so it cannot say how many are open. Counting the omitted
+            # ones as open would keep a big tree from ever settling; the exact count comes from
+            # the store, over all of them (R4, C1r).
+            open_asks = await self._asks.count_open(tenant_id, root_turn_id)
+        else:
+            open_asks = sum(1 for record in asks.records if record.state in _OPEN_ASKS)
+        return replace(snapshot, open_asks=open_asks)
 
     async def _snapshot_or_none(self, tenant_id: str, root_turn_id: str) -> FeedSnapshot | None:
         """`_snapshot`, but a failed read is logged and returns None: the stream is an observer and
@@ -221,11 +232,17 @@ class EventFeed:
         whatever the live path missed is corrected by the next one (yielded when it differs from
         what the client holds). A keepalive is yielded whenever `keepalive_seconds` pass quietly.
         Cancel the iteration to unsubscribe.
+
+        A snapshot read that fails is retried at the next idle period, at most
+        `max_snapshot_failures` times in a row; past that the stream yields an `ERROR` item and
+        ends, so a client reconnects (and gets a fresh snapshot) instead of waiting on a feed
+        that can no longer tell it anything. A read that succeeds resets the count.
         """
         sub = _Subscription(tenant_id, root_turn_id, self._queue_size)
         self._subscribers.add(sub)
         idle = min(keepalive_seconds, self._reconcile)
         clock = asyncio.get_running_loop().time
+        failures = 0  # consecutive snapshot reads that failed; bounded by max_snapshot_failures
         try:
             snapshot = await self._snapshot(tenant_id, root_turn_id)
             yield FeedItem(FeedKind.SNAPSHOT, snapshot=snapshot)
@@ -239,7 +256,12 @@ class EventFeed:
                 except TimeoutError:
                     fresh = await self._snapshot_or_none(tenant_id, root_turn_id)
                     if fresh is None:
+                        failures += 1
+                        if failures >= self._max_failures:
+                            yield FeedItem(FeedKind.ERROR)
+                            return
                         continue
+                    failures = 0
                     snapshot = fresh
                     changed = snapshot.last_seq > floor or snapshot.open_asks != shown_open
                     if changed or snapshot.settled:
@@ -260,7 +282,12 @@ class EventFeed:
                     sub.lagging = False
                     fresh = await self._snapshot_or_none(tenant_id, root_turn_id)
                     if fresh is None:  # the next idle snapshot corrects the state
+                        failures += 1
+                        if failures >= self._max_failures:
+                            yield FeedItem(FeedKind.ERROR)
+                            return
                         continue
+                    failures = 0
                     snapshot = fresh
                     floor, shown_open, last_sent = snapshot.last_seq, snapshot.open_asks, clock()
                     yield FeedItem(FeedKind.SNAPSHOT, snapshot=snapshot)
@@ -275,7 +302,12 @@ class EventFeed:
                 if stored.event.kind in (EventKind.FINISHED, EventKind.FAILED):
                     fresh = await self._snapshot_or_none(tenant_id, root_turn_id)
                     if fresh is None:  # the next idle snapshot decides whether the tree settled
+                        failures += 1
+                        if failures >= self._max_failures:
+                            yield FeedItem(FeedKind.ERROR)
+                            return
                         continue
+                    failures = 0
                     snapshot = fresh
                     shown_open = snapshot.open_asks
                     if snapshot.settled:

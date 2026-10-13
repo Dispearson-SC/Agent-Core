@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from agent_core.adapters.driving.http.event_routes import frames
-from agent_core.application.event_feed import EventFeed, FeedKind
+from agent_core.application.event_feed import EventFeed, FeedItem, FeedKind
 from agent_core.domain.events import (
     EventKind,
     EventOwner,
@@ -377,31 +378,62 @@ def test_a_queued_background_ask_also_keeps_the_stream_open() -> None:
     assert run(scenario()).snapshot.open_asks == 1
 
 
-def test_a_truncated_ask_window_never_reports_the_tree_settled() -> None:
-    """C1q: the ask read is oldest-first and bounded; the asks it left out (`omitted`) are the
-    newest, so none of them is known to be finished. They count as open."""
+class _Truncated:
+    """A window that holds one finished ask and left three out; `open_total` is the SQL count over
+    all of them."""
 
-    class Truncated:
-        async def asks_under(
-            self, tenant_id: str, root_turn_id: str, *, limit: int = 500
-        ) -> AskWindow:
-            done = AskRecord(
-                "h0", "billing", "a", root_turn_id, BackgroundState.ANSWERED, True, 0, T0
-            )
-            return AskWindow((done,), omitted=3)
+    def __init__(self, open_total: int) -> None:
+        self.open_total = open_total
+        self.counted = 0
 
+    async def asks_under(self, tenant_id: str, root_turn_id: str, *, limit: int = 500) -> AskWindow:
+        done = AskRecord("h0", "billing", "a", root_turn_id, BackgroundState.ANSWERED, True, 0, T0)
+        return AskWindow((done,), omitted=3)
+
+    async def count_open(self, tenant_id: str, root_turn_id: str) -> int:
+        self.counted += 1
+        return self.open_total
+
+
+def _first_snapshot(asks: Any) -> Any:
     store = Store()
     store.add(_event(ROOT, EventKind.STARTED))
     store.add(_event(ROOT, EventKind.FINISHED, elapsed=3))
-    feed = EventFeed(store, store, poll_seconds=0.01, asks=Truncated())
+    feed = EventFeed(store, store, poll_seconds=0.01, asks=asks)
 
     async def scenario() -> Any:
         return await anext(feed.follow("t", ROOT))
 
-    first = run(scenario())
+    return run(scenario()).snapshot
 
-    assert first.snapshot.open_asks == 3
-    assert not first.snapshot.settled
+
+def test_a_truncated_ask_window_reports_the_exact_open_count_not_the_omitted_one() -> None:
+    """C1r: the window left three asks out, but a count over ALL of them says only one is open."""
+    asks = _Truncated(open_total=1)
+
+    snapshot = _first_snapshot(asks)
+
+    assert snapshot.open_asks == 1 and not snapshot.settled
+    assert asks.counted == 1
+
+
+def test_a_permanently_truncated_window_still_settles_once_nothing_is_open() -> None:
+    """C1r R4: the old rule counted every omitted ask as open, so a tree with more asks than the
+    window holds could never end however long ago they finished."""
+    snapshot = _first_snapshot(_Truncated(open_total=0))
+
+    assert snapshot.open_asks == 0 and snapshot.settled
+
+
+def test_a_complete_window_is_counted_from_its_records_without_a_second_read() -> None:
+    asks = _Asks(BackgroundState.RUNNING, BackgroundState.ANSWERED)
+    asks.count_open = _boom  # type: ignore[method-assign]
+
+    assert _first_snapshot(asks).open_asks == 1
+
+
+async def _boom(tenant_id: str, root_turn_id: str) -> int:
+    raise AssertionError("the window was complete: no count query is needed")
 
 
 def test_a_failing_idle_snapshot_read_keeps_the_stream_and_retries_at_the_next_idle() -> None:
@@ -457,3 +489,71 @@ def test_the_frames_are_valid_sse_with_ids_to_resume_from() -> None:
     assert body["settled"] is True and body["turns"][0]["state"] == "finished"
     assert body["open_asks"] == 0
     assert end_frame.startswith("event: end\n") and snapshot_frame.endswith("\n\n")
+
+
+def test_a_snapshot_read_that_keeps_failing_ends_the_stream_with_an_error_item() -> None:
+    """C1r R4: the idle snapshot retry is bounded. After `max_snapshot_failures` consecutive
+    failures the stream says so and ends instead of retrying for ever."""
+    store = Store()
+    store.add(_event(ROOT, EventKind.STARTED))
+    real_tree = store.tree
+    calls = {"n": 0}
+
+    async def dead_tree(tenant_id: str, root_turn_id: str, *, limit: int = 2000) -> EventWindow:
+        calls["n"] += 1
+        if calls["n"] > 1:  # the first read opens the stream; every later one fails
+            raise ConnectionError("the database is gone")
+        return await real_tree(tenant_id, root_turn_id, limit=limit)
+
+    store.tree = dead_tree  # type: ignore[method-assign]
+    feed = EventFeed(store, store, poll_seconds=0.01, max_snapshot_failures=3)
+
+    async def scenario() -> list[FeedKind]:
+        stream = feed.follow("t", ROOT, keepalive_seconds=0.01)
+        kinds: list[FeedKind] = []
+        for _ in range(10):
+            try:
+                kinds.append((await asyncio.wait_for(anext(stream), 1)).kind)
+            except StopAsyncIteration:
+                break
+        return kinds
+
+    kinds = run(scenario())
+
+    assert kinds[-1] is FeedKind.ERROR, kinds
+    assert calls["n"] == 1 + 3, "three consecutive failures, then it stopped"
+    assert feed.subscriber_count == 0
+
+
+def test_a_successful_read_resets_the_failure_count() -> None:
+    store = Store()
+    store.add(_event(ROOT, EventKind.STARTED))
+    real_tree = store.tree
+    calls = {"n": 0}
+
+    async def every_other(tenant_id: str, root_turn_id: str, *, limit: int = 2000) -> EventWindow:
+        calls["n"] += 1
+        if calls["n"] > 1 and calls["n"] % 2 == 0:
+            raise ConnectionError("blip")
+        return await real_tree(tenant_id, root_turn_id, limit=limit)
+
+    store.tree = every_other  # type: ignore[method-assign]
+    feed = EventFeed(store, store, poll_seconds=0.01, max_snapshot_failures=2)
+
+    async def scenario() -> list[FeedKind]:
+        stream = feed.follow("t", ROOT, keepalive_seconds=0.01)
+        return [(await asyncio.wait_for(anext(stream), 1)).kind for _ in range(8)]
+
+    assert FeedKind.ERROR not in run(scenario())
+
+
+def test_an_error_item_is_an_error_frame() -> None:
+    async def one() -> AsyncIterator[FeedItem]:
+        yield FeedItem(FeedKind.ERROR)
+
+    async def scenario() -> list[str]:
+        return [chunk.decode() async for chunk in frames(one())]
+
+    (frame,) = run(scenario())
+
+    assert frame == 'event: error\ndata: {"error": "snapshot_unavailable"}\n\n'

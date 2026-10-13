@@ -30,6 +30,16 @@ _SQL = """
     LIMIT %s
 """
 
+# The same predicate as `background_state`: an ask is open until it is answered or cancelled.
+_COUNT_OPEN_SQL = """
+    SELECT count(*)
+    FROM peer_messages
+    WHERE from_tenant_id = %s
+      AND (root_turn_id = %s OR (root_turn_id IS NULL AND turn_id = %s))
+      AND state <> 'cancelled'
+      AND answered_at IS NULL
+"""
+
 
 class PgTaskGraphReader:
     """Reads through `EventConnections` (a conninfo builds a pool of its own): the feed asks for the
@@ -44,6 +54,14 @@ class PgTaskGraphReader:
 
     async def asks_under(self, tenant_id: str, root_turn_id: str, *, limit: int = 500) -> AskWindow:
         return await asyncio.to_thread(self._read, tenant_id, root_turn_id, limit)
+
+    async def count_open(self, tenant_id: str, root_turn_id: str) -> int:
+        return await asyncio.to_thread(self._count_open, tenant_id, root_turn_id)
+
+    def _count_open(self, tenant_id: str, root_turn_id: str) -> int:
+        with self._connections() as conn:
+            row = conn.execute(_COUNT_OPEN_SQL, (tenant_id, root_turn_id, root_turn_id)).fetchone()
+        return 0 if row is None else int(row[0])
 
     def _read(self, tenant_id: str, root_turn_id: str, limit: int) -> AskWindow:
         with self._connections() as conn:

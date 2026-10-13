@@ -152,3 +152,27 @@ def test_a_spawned_subagent_is_read_back_with_its_kind() -> None:
 
     kinds = {child.handle: child.kind for child in graph.root.children}
     assert kinds == {peer: DelegationKind.PEER, sub: DelegationKind.SUBAGENT}
+
+
+def test_count_open_counts_every_unfinished_ask_not_just_a_window_of_them() -> None:
+    """C1r R4: `count_open` is a SQL count over the whole tree, so it agrees with what a read
+    truncated to two asks cannot see."""
+
+    async def scenario() -> tuple[int, int, int]:
+        await w.fresh_databases(_DATABASE)
+        mailbox = PgAgentMailbox(w.conninfo(_DATABASE))
+        stopped = await _ask(mailbox, w.B, w.A, ROOT, "k0")
+        await mailbox.cancel(stopped, "stopped")
+        for n in range(1, 5):
+            await _ask(mailbox, w.B, w.A, ROOT, f"k{n}")
+        reader = PgTaskGraphReader(w.conninfo(_DATABASE))
+        window = await reader.asks_under("t", ROOT, limit=2)
+        return (
+            len(window.records) + window.omitted,
+            await reader.count_open("t", ROOT),
+            await reader.count_open("other-tenant", ROOT),
+        )
+
+    total, open_asks, foreign = asyncio.run(scenario())
+
+    assert (total, open_asks, foreign) == (5, 4, 0)

@@ -100,6 +100,8 @@ async def frames(items: AsyncIterator[FeedItem]) -> AsyncIterator[bytes]:
             yield b": keepalive\n\n"
         elif item.kind is FeedKind.END:
             yield _frame("end", {})
+        elif item.kind is FeedKind.ERROR:
+            yield _frame("error", {"error": "snapshot_unavailable"})
 
 
 def _node_json(node: TaskNode) -> dict[str, Any]:

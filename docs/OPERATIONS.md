@@ -222,6 +222,10 @@ opened on first use). Behind a reverse proxy
 disable response buffering for the path (the app sends `X-Accel-Buffering: no`) and keep the idle
 timeout above 15 s (the keepalive interval). A feed that cannot read the database logs `the event feed
 could not read new events; retrying` at WARNING and recovers by itself; clients reconnect to a snapshot.
+A SNAPSHOT read that fails is retried at the next idle period, at most 5 times in a row (D64): then
+the stream sends `event: error` (`{"error": "snapshot_unavailable"}`) and ends, and the client
+reconnects. The count of open asks is exact even for a tree with more asks than one read returns
+(`count_open`, a SQL count), so such a tree still settles.
 The stream ends only when a snapshot shows the tree settled (no running turn and no queued or running
 ask under it, so a background ask keeps it open), and every 5 s of quiet (or the keepalive interval,
 if shorter) the feed reads a snapshot, so a missed event is corrected by the next one. A tree of more

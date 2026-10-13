@@ -24,3 +24,9 @@ class TaskGraphReader(Protocol):
         oldest first, at most `limit`, for that tenant only. Asks past the limit are counted in
         `AskWindow.omitted`, never dropped silently."""
         ...
+
+    async def count_open(self, tenant_id: str, root_turn_id: str) -> int:
+        """How many asks under the root are not finished (queued or running; neither answered,
+        failed nor cancelled), counted over ALL of them, not over a window. The feed settles on
+        this when `asks_under` was truncated, so a long-lived tree can still end."""
+        ...
