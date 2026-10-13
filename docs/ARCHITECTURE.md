@@ -97,6 +97,7 @@ Core/
         context/           # ContextEngine: the compaction ladder
         skills_fs/         # SkillRegistry over SKILL.md files
         profiles_fs/       # reads and parses profile YAML; the domain never does
+        addons_fs/         # addon.yaml manifests, resolution, settings (Phase 2, D70-D72)
         mcp/               # MCPToolset composed into ToolProvider
         human/             # HumanGateway: channel + evidence
         media_fs/          # MediaStore
@@ -108,7 +109,28 @@ Core/
 ```
 
 `profiles/` and `skills/` sit beside `src/`, not inside the package: they are data read at
-runtime, not Python modules, and packaging them into the wheel would be wrong.
+runtime, not Python modules, and packaging them into the wheel would be wrong. `addons/`
+(repository root, beside `Core/`) holds the addons for the same reason.
+
+### Addons (Phase 2)
+
+An addon is a directory `addons/<name>/` with an `addon.yaml` manifest (name, version, `core`
+range, `depends`, `auto_install`, `provides`, `settings`, `hooks`, `migrations`; D70). At startup
+the composition root calls ONE function, `load_addons_from_environment`, which returns the active
+addons in dependency order with their validated settings:
+
+1. `AGENT_CORE_ADDONS` lists the enabled addons. Nothing else enables one; a dependency is never
+   enabled for you (D71).
+2. Each manifest is validated; the graph is resolved; a cycle, a missing dependency or a Core
+   version outside the addon's `core` range stops startup with a message naming the addon.
+3. A bridge (`auto_install: true`) activates when ALL its dependencies are active, never otherwise.
+4. Settings are validated against the schema the manifest declares (defaults < deployment file <
+   environment) and fail startup naming the addon and the key (D72).
+
+The loader never imports addon code and never touches the toolset registry, the policy or the
+database: it is an adapter (`adapters/driven/addons_fs/`) whose result the root consumes as data.
+Registering what an addon provides is the next step (A4). Authoring: see `docs/OPERATIONS.md`,
+"Addons", and the samples in `addons/sample_*`.
 
 ---
 

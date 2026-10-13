@@ -479,3 +479,24 @@ opt-in, because against a real model it takes minutes and costs money.
   contains keys, prompts or the environment.
 - To add a scenario: an async function in `evals/scenarios.py` that drives agents through
   `PydanticAgentRunner` and returns `CheckResult`s, plus the scripts the scripted model plays.
+
+## Addons: enabling them and setting them (Phase 2, D70-D72)
+
+| Variable | Meaning |
+|---|---|
+| `AGENT_CORE_ADDONS` | Comma list of the addons to enable (`sample_base,sample_extra`). Default: none. |
+| `AGENT_CORE_ADDONS_DIR` | Where the addons live. Default `<repository>/addons`; set it for an installed wheel. |
+| `AGENT_CORE_ADDONS_CONFIG` | Optional YAML file: `addon_name: {setting: value, group: {key: value}}`. |
+| `AGENT_CORE_ADDON__<ADDON>__<KEY>` | One setting, upper case, `__` between segments (`AGENT_CORE_ADDON__SAMPLE_BASE__MAX_ITEMS=8`). Wins over the file. |
+
+- Installing or removing an addon needs a restart. Startup stops, with a message naming the addon
+  and the field or key, when: a manifest is invalid; a listed addon has no directory; a dependency
+  is not listed (list it: dependencies are never enabled for you); there is a cycle; the addon's
+  `core` range does not contain this Core's version; a setting is invalid, unknown or missing; or a
+  setting (file or variable) names an addon that is not active.
+- A bridge (`auto_install: true`) needs no entry in the list: it activates when every addon it
+  depends on is active. Do not set its variables unless that is the case, or startup stops.
+- A wrong value is never printed back (it may be a secret); the message names the variable instead.
+- This slice only resolves and validates; what an addon provides (toolsets, policy, fragments,
+  channels) is registered by A4, so enabling one has no runtime effect yet.
+

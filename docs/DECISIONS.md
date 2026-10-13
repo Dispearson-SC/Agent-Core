@@ -2690,3 +2690,28 @@ decision 2026-10-13) and are described by `addon.yaml`.
   be broken (cycles, bad manifests) are built in `tmp_path` by the tests.
 - **Entry point.** `load_addons_from_environment(env)` returns the active addons in activation
   order. The composition root will call it in A4; nothing is registered yet.
+
+## D72 - Addon settings are a declarative schema (A3)
+
+- **Choice: the schema is data in `addon.yaml`'s `settings:` block, not a pydantic class the
+  manifest points at.** Pointing at a class means importing addon code while the manifest is being
+  read, i.e. running an addon before it is enabled, resolved or checked, and it would make "no addon
+  touches `domain/`, `application/` or `ports/`" impossible to prove from the manifest. A
+  declarative block needs no import, is validated with pydantic `TypeAdapter`s built from it, and
+  is what a vertical author reads. Cost: no custom validators; an addon that needs one validates in
+  its own code at its hook (A7). Rejected: a JSON-Schema document (a second vocabulary for four
+  types, and `jsonschema` would not give per-key messages without echoing values).
+- **Grammar.** A scalar is a default (its type is inferred); a mapping without `type` is a group;
+  an explicit field has `type` (`str|int|float|bool|list|object`), `default`, `minimum`/`maximum`,
+  `choices`, `items`, `fields`, `description`. No default means the deployment must set it.
+  Keys are lower case words joined by single underscores. Validation is strict (no `"5"` for an
+  int, no `true` for a number).
+- **Sources, lowest to highest:** manifest default, the deployment file
+  (`AGENT_CORE_ADDONS_CONFIG`), environment `AGENT_CORE_ADDON__<ADDON>__<KEY>` (a double underscore
+  separates segments, hence the naming rule). A bool in the environment is `true` or `false`; a
+  list is comma separated.
+- **Conservative failures.** Unknown keys, settings for an addon that is not active (a typo, or a
+  bridge that did not activate), a named-but-missing deployment file and a bad default in the
+  manifest all stop startup. A value is never echoed. The resolved settings are read-only
+  (`MappingProxyType`, tuples) so an addon cannot change another's.
+

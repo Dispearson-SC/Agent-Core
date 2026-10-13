@@ -12,7 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_core.adapters.driven.addons_fs.errors import AddonResolutionError, ManifestError
+from agent_core.adapters.driven.addons_fs.errors import (
+    AddonResolutionError,
+    AddonSettingsError,
+    ManifestError,
+)
 from agent_core.adapters.driven.addons_fs.loader import (
     core_version,
     default_addons_root,
@@ -184,3 +188,76 @@ def test_the_environment_carries_the_list_and_the_root(tmp_path: Path) -> None:
 
 def test_nothing_is_enabled_when_the_environment_does_not_say_so() -> None:
     assert load_addons_from_environment({}) == ()
+
+
+# --- settings reach the loaded addons (A3) -----------------------------------------------------
+
+
+def test_each_loaded_addon_carries_its_validated_settings(tmp_path: Path) -> None:
+    _addon(tmp_path, "a", "settings:\n  limit: {type: int, default: 3, maximum: 9}\n")
+    _addon(tmp_path, "b")
+
+    loaded = load_addons(
+        enabled=["a", "b"],
+        addons_root=tmp_path,
+        core_version="0.0.0",
+        config={"a": {"limit": 7}},
+    )
+
+    assert dict(loaded[0].settings) == {"limit": 7} and dict(loaded[1].settings) == {}
+
+
+def test_invalid_settings_stop_startup_naming_the_addon_and_the_key(tmp_path: Path) -> None:
+    _addon(tmp_path, "a", "settings:\n  limit: {type: int, default: 3, maximum: 9}\n")
+
+    with pytest.raises(AddonSettingsError) as caught:
+        load_addons(
+            enabled=["a"],
+            addons_root=tmp_path,
+            core_version="0.0.0",
+            env={"AGENT_CORE_ADDON__A__LIMIT": "99"},
+        )
+
+    assert caught.value.addon == "a" and caught.value.field == "limit"
+
+
+def test_settings_of_a_bridge_that_did_not_activate_are_an_error(tmp_path: Path) -> None:
+    _addon(tmp_path, "a")
+    _addon(tmp_path, "b")
+    _addon(tmp_path, "a_b", "depends: [a, b]\nauto_install: true\nsettings:\n  n: 1\n")
+
+    with pytest.raises(AddonSettingsError, match="not enabled"):
+        load_addons(
+            enabled=["a"], addons_root=tmp_path, core_version="0.0.0", config={"a_b": {"n": 2}}
+        )
+
+
+def test_the_sample_addons_settings_come_from_the_file_and_the_environment(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "addons.yaml"
+    config.write_text("sample_base:\n  greeting: hola\n  max_items: 4\n", encoding="utf-8")
+    env = {
+        "AGENT_CORE_ADDONS": "sample_base,sample_extra",
+        "AGENT_CORE_ADDONS_CONFIG": str(config),
+        "AGENT_CORE_ADDON__SAMPLE_BASE__MAX_ITEMS": "8",
+        "AGENT_CORE_ADDON__SAMPLE_EXTRA__ENABLED_FEATURES": "x,y",
+    }
+
+    loaded = {a.manifest.name: a.settings for a in load_addons_from_environment(env)}
+
+    assert dict(loaded["sample_base"]) == {"greeting": "hola", "max_items": 8}
+    assert dict(loaded["sample_extra"]) == {"enabled_features": ("x", "y")}
+    assert dict(loaded["sample_bridge"]) == {}
+
+
+def test_a_deployment_file_that_is_named_but_missing_stops_startup(tmp_path: Path) -> None:
+    env = {"AGENT_CORE_ADDONS": "sample_base", "AGENT_CORE_ADDONS_CONFIG": str(tmp_path / "x.yaml")}
+
+    with pytest.raises(AddonSettingsError, match="x.yaml"):
+        load_addons_from_environment(env)
+
+
+def test_settings_variables_with_no_addon_enabled_are_an_error_not_silently_ignored() -> None:
+    with pytest.raises(AddonSettingsError, match="not enabled"):
+        load_addons_from_environment({"AGENT_CORE_ADDON__SAMPLE_BASE__MAX_ITEMS": "3"})

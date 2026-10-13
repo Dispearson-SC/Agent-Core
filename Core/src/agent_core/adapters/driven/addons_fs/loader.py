@@ -34,6 +34,7 @@ from agent_core.adapters.driven.addons_fs.manifest import (
     load_manifest,
 )
 from agent_core.adapters.driven.addons_fs.resolver import parse_enabled, resolve_addons
+from agent_core.adapters.driven.addons_fs.settings import read_addons_config, resolve_settings
 
 __all__ = [
     "ResolvedAddon",
@@ -45,6 +46,7 @@ __all__ = [
 
 ENV_ADDONS: Final = "AGENT_CORE_ADDONS"
 ENV_ADDONS_DIR: Final = "AGENT_CORE_ADDONS_DIR"
+ENV_ADDONS_CONFIG: Final = "AGENT_CORE_ADDONS_CONFIG"
 
 _REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[6]
 
@@ -106,12 +108,16 @@ def load_addons(
     enabled: Sequence[str],
     addons_root: Path,
     core_version: str,
+    config: Mapping[str, Any] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[ResolvedAddon, ...]:
     """The active addons under `addons_root`, in activation order. Raises `AddonError` subclasses.
 
-    Nothing is read when nothing is enabled.
+    `config` is the parsed deployment file and `env` the environment the settings are read from
+    (`settings.py`). No manifest is read when nothing is enabled.
     """
     if not enabled:
+        resolve_settings([], config=config or {}, env=env or {})  # settings for nothing: an error
         return ()
     if not addons_root.is_dir():
         raise AddonResolutionError(enabled[0], None, f"is enabled but {addons_root} does not exist")
@@ -134,18 +140,29 @@ def load_addons(
     resolved = resolve_addons(enabled=enabled, available=available, core_version=core_version)
     for item in resolved:
         _check_paths(item.manifest, addons_root / item.manifest.name)
+    settings = resolve_settings(
+        [item.manifest for item in resolved], config=config or {}, env=env or {}
+    )
     return tuple(
-        ResolvedAddon(item.manifest, addons_root / item.manifest.name, item.source)
+        ResolvedAddon(
+            item.manifest,
+            addons_root / item.manifest.name,
+            item.source,
+            settings[item.manifest.name],
+        )
         for item in resolved
     )
 
 
 def load_addons_from_environment(env: Mapping[str, str]) -> tuple[ResolvedAddon, ...]:
-    """`AGENT_CORE_ADDONS` (comma list, default none) and `AGENT_CORE_ADDONS_DIR` (default the
-    repository's `addons/`) -> the active addons for this Core."""
-    root = env.get(ENV_ADDONS_DIR)
+    """`AGENT_CORE_ADDONS` (comma list, default none), `AGENT_CORE_ADDONS_DIR` (default the
+    repository's `addons/`), `AGENT_CORE_ADDONS_CONFIG` (optional settings file) and the
+    `AGENT_CORE_ADDON__<ADDON>__<KEY>` variables -> the active addons for this Core."""
+    root, config_path = env.get(ENV_ADDONS_DIR), env.get(ENV_ADDONS_CONFIG)
     return load_addons(
         enabled=parse_enabled(env.get(ENV_ADDONS, "")),
         addons_root=Path(root) if root else default_addons_root(),
         core_version=core_version(),
+        config=read_addons_config(Path(config_path)) if config_path else None,
+        env=env,
     )
