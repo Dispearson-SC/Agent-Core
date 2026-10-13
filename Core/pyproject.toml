@@ -50,7 +50,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-src = ["src", "tests"]
+src = ["src", "tests", "evals"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "TID"]
@@ -70,11 +70,12 @@ select = ["E", "F", "I", "UP", "B", "TID"]
 [tool.ruff.lint.per-file-ignores]
 "src/agent_core/adapters/**" = ["TID251"]
 "tests/**" = ["TID251"]
+"evals/**" = ["TID251"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "evals"]
 
 # `jsonschema` ships no stubs (and `types-jsonschema` is not a runtime dependency).
 [[tool.mypy.overrides]]

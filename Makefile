@@ -13,7 +13,7 @@ CORE := Core
 PY   := python
 
 .DEFAULT_GOAL := help
-.PHONY: help install test test-unit test-integration lint typecheck check imports clean
+.PHONY: help install test test-unit test-integration lint typecheck check imports eval clean
 
 help:  ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -31,10 +31,13 @@ test-integration:  ## Integration tests — needs Postgres and DBOS
 	cd $(CORE) && $(PY) -m pytest tests/integration
 
 lint:  ## Ruff, including the banned-api layer rule
-	cd $(CORE) && $(PY) -m ruff check src tests
+	cd $(CORE) && $(PY) -m ruff check src tests evals
 
 typecheck:  ## mypy in strict mode
 	cd $(CORE) && $(PY) -m mypy
+
+eval:  ## Eval harness (opt-in: AGENT_CORE_EVAL=1 + provider key, or AGENT_CORE_EVAL_MODEL=scripted)
+	cd $(CORE) && $(PY) -m evals
 
 imports:  ## Every module must import cleanly — runs without dev dependencies installed
 	$(PY) $(CORE)/scripts/check_imports.py

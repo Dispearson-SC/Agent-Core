@@ -444,3 +444,24 @@ response-parsing code with no network and no cost.
   that appears only as ordinary text and is not in the environment.
 - The first import of `litellm` fetches its model-cost map from the internet; export
   `LITELLM_LOCAL_MODEL_COST_MAP=True` (the cassette tests do) wherever that must not happen.
+
+## The eval harness (C32, D67)
+
+`make eval` runs scripted multi-agent scenarios (`Core/evals/`) through the production runner and
+writes `report.json` and `report.md`. It is not part of `pytest` (`testpaths = ["tests"]`) and it is
+opt-in, because against a real model it takes minutes and costs money.
+
+- Nothing set: `eval skipped: set AGENT_CORE_EVAL=1 ...`, exit 0, no files.
+- Real model: `AGENT_CORE_EVAL=1` plus the provider's key in the environment (`MINIMAX_API_KEY` for
+  the default `minimax/MiniMax-M3`). A missing key is a skip that names the variable.
+- Offline, for the machinery: `AGENT_CORE_EVAL_MODEL=scripted make eval` (the scripted fake model,
+  no key, no network).
+- Knobs: `AGENT_CORE_EVAL_MODEL` (litellm id), `AGENT_CORE_EVAL_REPETITIONS` (default 3),
+  `AGENT_CORE_EVAL_SCENARIOS` (comma list), `AGENT_CORE_EVAL_REPORT_DIR` (default
+  `Core/evals/reports`, git-ignored), `AGENT_CORE_EVAL_TRIAL_TIMEOUT` (seconds, default 180),
+  `AGENT_CORE_EVAL_MIN_PASS_RATE` (exit 1 below it, default 0).
+- A real model is not deterministic: read the pass rate over the repetitions, not a single trial.
+  A trial that raises or times out is a failed trial with its error in the report; the report never
+  contains keys, prompts or the environment.
+- To add a scenario: an async function in `evals/scenarios.py` that drives agents through
+  `PydanticAgentRunner` and returns `CheckResult`s, plus the scripts the scripted model plays.

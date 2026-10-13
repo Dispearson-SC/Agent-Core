@@ -2543,3 +2543,32 @@ current turn. It is the second delegation tool, not a second mechanism.
   internet. A test that must be offline sets `LITELLM_LOCAL_MODEL_COST_MAP=True` and imports
   litellm before closing the sockets; production behaviour is unchanged (an operator who wants no
   boot-time fetch sets the same variable).
+
+## D67 - Eval harness (C32)
+
+- **Separate from the unit suite, by location.** `Core/evals/` (a package next to `src` and `tests`)
+  is outside `testpaths = ["tests"]`, so `pytest` never collects it. `make eval` runs
+  `python -m evals`. Ruff and mypy cover it (`pyproject.toml` lists it; `TID251` is allowed there as
+  in `tests/`). Nothing under `src/` imports it.
+- **Opt-in twice.** A real run needs `AGENT_CORE_EVAL=1` AND the provider's key (the key variable is
+  derived from the model id's provider and checked with the same `credential_present` the model
+  builder uses). Either missing is a clean skip (exit 0, a line naming what to set, no report).
+  `AGENT_CORE_EVAL_MODEL=scripted` runs the machinery offline with the T9 `ScriptedModel`; it needs
+  neither. Rejected: skipping through pytest markers (the evals are not tests of this code, they
+  are measurements of a model).
+- **What a scenario is.** An async function that drives agents through the PRODUCTION
+  `PydanticAgentRunner` (real `ask_peer`, real untrusted-content wrapping) over in-memory ports and
+  returns named checks. The workflow's hand-off between turns (run the asked agent, resume the asker
+  with a `<peer>` envelope) is done in-process in a few lines; DBOS and Postgres are not part of an
+  eval, the integration suite owns them. The first scenario, `front_desk_asks_inventory`, checks
+  that the front desk delegates, that the specialist states the number its persona holds and that
+  the final answer relays it.
+- **Repetitions and failure shape.** Each scenario runs N times on a fresh model source. A trial
+  that raises or exceeds its timeout is a failed trial carrying `Type: message` only (a traceback
+  can hold request bodies). The headline is the pass rate; `AGENT_CORE_EVAL_MIN_PASS_RATE` makes it
+  an exit code for CI.
+- **Dev tooling may import the test fakes.** `evals` uses `tests.fakes` (scripted model, in-memory
+  ports) rather than copying them; the fakes are the ones the suite already trusts.
+- **Not verified here.** The real-model path (`RealSource` through `litellm_model_factory`) was
+  not exercised: the task forbids calling a paid model in verification, and only the skip path and
+  the scripted path were run.
