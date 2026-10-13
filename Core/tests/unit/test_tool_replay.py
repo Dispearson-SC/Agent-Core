@@ -49,7 +49,7 @@ from agent_core.domain.turn import (
     TurnRequest,
     UserInput,
 )
-from agent_core.ports.tool_journal import ToolRunState
+from agent_core.ports.tool_journal import ToolJournalUnavailableError, ToolRunState
 from tests.fakes import ports as fakes
 from tests.fakes.tool_journal import FakeToolJournal
 
@@ -155,7 +155,7 @@ def test_a_non_replayable_tool_interrupted_by_a_crash_is_not_run_again() -> None
     tools.crash_next = True
     with pytest.raises(_Crash):
         _run(_runner(tools, journal, _send()))
-    assert journal.rows[(str(TURN), "call-1")][1] is ToolRunState.STARTED
+    assert journal.rows[(str(TURN), "r1:call-1")][1] is ToolRunState.STARTED
 
     second = _runner(tools, journal, _send())
     _run(second)
@@ -182,7 +182,7 @@ def test_a_call_that_finished_is_not_run_a_second_time_either() -> None:
     tools, journal = _Tools(), FakeToolJournal()
     first = _runner(tools, journal, _send())
     _run(first)
-    assert journal.rows[(str(TURN), "call-1")][1] is ToolRunState.FINISHED
+    assert journal.rows[(str(TURN), "r1:call-1")][1] is ToolRunState.FINISHED
 
     second = _runner(tools, journal, _send())
     _run(second)
@@ -199,6 +199,79 @@ def test_a_tool_that_raises_is_finished_and_a_new_call_id_is_a_new_call() -> Non
     _run(second)
 
     assert tools.runs == ["send", "send"] and second.returned == ["sent"]
+
+
+def test_a_provider_that_reuses_a_call_id_across_responses_still_runs_each_call() -> None:
+    """R3-journal-id-reuse / R4-journal-key-collision: some providers number calls per response
+    (`call-1` again in the next one). The second `send` is a different call in a later model
+    response and must run, not be answered `interrupted` because the first one finished."""
+    tools, journal = _Tools(), FakeToolJournal()
+    seen_returns: list[int] = []
+
+    def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        returned = [p for m in messages for p in m.parts if isinstance(p, ToolReturnPart)]
+        seen_returns.append(len(returned))
+        if len(returned) < 2:
+            return ModelResponse(parts=[_send()])  # the same id, response after response
+        return ModelResponse(parts=[TextPart("done")])
+
+    built = runner_module.PydanticAgentRunner(
+        model=fakes.FakeModelGateway(model_map={"m": "m"}),
+        policy=fakes.FakeToolPolicy(RuleSet.for_caller(CALLER, (), default_effect=Effect.ALLOW)),
+        audit=fakes.FakeAuditSink(),
+        tools=fakes.FakeToolProvider(tools.toolset(), ("send", "peek")),
+        model_factory=lambda model_id, base_url: FunctionModel(model),
+        tool_journal=journal,
+    )
+    _run(built)
+
+    assert tools.runs == ["send", "send"], "both calls ran"
+    assert len(journal.rows) == 2, "and each has its own journal row"
+
+
+class _UnreachableJournal(FakeToolJournal):
+    """A journal whose store cannot be reached (the pool checkout timed out)."""
+
+    def __init__(self, *, begin_fails: bool, end_fails: bool) -> None:
+        super().__init__()
+        self._begin_fails, self._end_fails = begin_fails, end_fails
+
+    async def begin(self, turn_id: TurnId, tool_call_id: str, tool: str) -> ToolRunState:
+        if self._begin_fails:
+            raise ToolJournalUnavailableError("no connection")
+        return await super().begin(turn_id, tool_call_id, tool)
+
+    async def finish(self, turn_id: TurnId, tool_call_id: str) -> None:
+        if self._end_fails:
+            raise ToolJournalUnavailableError("no connection")
+        await super().finish(turn_id, tool_call_id)
+
+
+def test_an_unreachable_journal_fails_closed_before_the_tool_runs() -> None:
+    """R4-journal-pool-checkout: if the journal cannot say whether the call began, running it could
+    be a second run. The turn step fails with the named error (the workflow retries the step) and
+    the tool is not run."""
+    tools = _Tools()
+    journal = _UnreachableJournal(begin_fails=True, end_fails=False)
+
+    with pytest.raises(ToolJournalUnavailableError):
+        _run(_runner(tools, journal, _send()))
+
+    assert tools.runs == []
+
+
+def test_an_unreachable_journal_after_the_tool_ran_keeps_the_result() -> None:
+    """The call already happened: failing the turn would throw its result away and the retry would
+    be answered `interrupted` anyway. The row is left `started` (the conservative record) and the
+    model gets the real result."""
+    tools = _Tools()
+    journal = _UnreachableJournal(begin_fails=False, end_fails=True)
+    built = _runner(tools, journal, _send())
+
+    _run(built)
+
+    assert tools.runs == ["send"] and built.returned == ["sent"]
+    assert journal.rows[(str(TURN), "r1:call-1")][1] is ToolRunState.STARTED
 
 
 def test_without_a_journal_nothing_changes() -> None:

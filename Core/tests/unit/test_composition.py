@@ -644,6 +644,27 @@ def test_the_attempt_ledger_checks_out_with_a_short_timeout() -> None:
     assert 0 < ATTEMPT_LEDGER_CHECKOUT_TIMEOUT_SECONDS <= 2
 
 
+def test_the_tool_journal_checks_out_with_a_bounded_timeout() -> None:
+    """R4-journal-pool-checkout: like the attempt ledger, the journal never waits out the pool's
+    default 30 s checkout; behind a saturated pool it fails (fail closed) within seconds."""
+    from contextlib import nullcontext
+
+    from agent_core.composition import TOOL_JOURNAL_CHECKOUT_TIMEOUT_SECONDS, tool_journal_for
+
+    seen: list[object] = []
+
+    class _Pool:
+        def connection(self, timeout: float | None = None) -> object:
+            seen.append(timeout)
+            return nullcontext(None)
+
+    with tool_journal_for(_Pool())._connect():  # type: ignore[attr-defined]
+        pass
+
+    assert seen == [TOOL_JOURNAL_CHECKOUT_TIMEOUT_SECONDS]
+    assert 0 < TOOL_JOURNAL_CHECKOUT_TIMEOUT_SECONDS <= 10
+
+
 def test_the_containers_runner_journals_tool_calls_on_the_domain_pool() -> None:
     """C30: the journal is wired, over the domain pool (never the audit pool: the audit trail
     survives a rolled-back turn, the journal is domain state)."""

@@ -15,8 +15,11 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Any, Final
 
+from psycopg import OperationalError
+from psycopg_pool import PoolTimeout
+
 from agent_core.domain.turn import TurnId
-from agent_core.ports.tool_journal import ToolRunState
+from agent_core.ports.tool_journal import ToolJournalUnavailableError, ToolRunState
 
 ConnectionFactory = Callable[[], AbstractContextManager[Any]]
 
@@ -35,6 +38,10 @@ _FINISH_SQL: Final[str] = (
 _ABANDON_SQL: Final[str] = "DELETE FROM tool_executions WHERE turn_id = %s AND tool_call_id = %s"
 
 
+# A saturated pool (`PoolTimeout`) or an unreachable database (`OperationalError`).
+_UNREACHABLE: Final = (PoolTimeout, OperationalError)
+
+
 class PgToolJournal:
     __slots__ = ("_connect",)
 
@@ -45,8 +52,11 @@ class PgToolJournal:
         return await asyncio.to_thread(self._begin_sync, str(turn_id), tool_call_id, tool)
 
     def _begin_sync(self, turn_id: str, tool_call_id: str, tool: str) -> ToolRunState:
-        with self._connect() as conn:
-            row = conn.execute(_BEGIN_SQL, (turn_id, tool_call_id, tool)).fetchone()
+        try:
+            with self._connect() as conn:
+                row = conn.execute(_BEGIN_SQL, (turn_id, tool_call_id, tool)).fetchone()
+        except _UNREACHABLE as error:
+            raise ToolJournalUnavailableError(str(error) or type(error).__name__) from error
         if row is None:  # pragma: no cover - the upsert always returns a row
             raise RuntimeError("the tool journal returned no row")
         if row[0]:
@@ -60,5 +70,8 @@ class PgToolJournal:
         await asyncio.to_thread(self._run, _ABANDON_SQL, str(turn_id), tool_call_id)
 
     def _run(self, sql: str, turn_id: str, tool_call_id: str) -> None:
-        with self._connect() as conn:
-            conn.execute(sql, (turn_id, tool_call_id))
+        try:
+            with self._connect() as conn:
+                conn.execute(sql, (turn_id, tool_call_id))
+        except _UNREACHABLE as error:
+            raise ToolJournalUnavailableError(str(error) or type(error).__name__) from error

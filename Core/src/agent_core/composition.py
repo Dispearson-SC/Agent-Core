@@ -279,6 +279,7 @@ __all__ = [
     "DbosConfig",
     "MissingDatabaseError",
     "ATTEMPT_LEDGER_CHECKOUT_TIMEOUT_SECONDS",
+    "TOOL_JOURNAL_CHECKOUT_TIMEOUT_SECONDS",
     "PoolConnections",
     "attempt_ledger_for",
     "PoolFactory",
@@ -932,6 +933,18 @@ def attempt_ledger_for(pool: Any) -> PgAttemptLedger:
     return PgAttemptLedger(
         PoolConnections(pool, timeout=ATTEMPT_LEDGER_CHECKOUT_TIMEOUT_SECONDS)
     )
+
+
+# C1s (D68, R4-journal-pool-checkout). The tool journal shares `domain_pool` and is on the path of
+# every tool that is not `replay: safe`. Unlike the attempt ledger it cannot fail open (a call it
+# cannot vouch for is not run), so the bound is longer than the ledger's: long enough to ride out a
+# burst, short enough that a saturated pool fails the step quickly and the workflow retries it.
+TOOL_JOURNAL_CHECKOUT_TIMEOUT_SECONDS: Final[float] = 5.0
+
+
+def tool_journal_for(pool: Any) -> PgToolJournal:
+    """The tool journal over `pool`, with a bounded checkout timeout."""
+    return PgToolJournal(PoolConnections(pool, timeout=TOOL_JOURNAL_CHECKOUT_TIMEOUT_SECONDS))
 
 
 # Injectable so the wiring can be exercised without a database. Production passes
@@ -1964,7 +1977,7 @@ def build_container(
         reply_events=events if resolved.stream_replies else None,
         # C30 (D65). A tool that is not `replay: safe` is journaled on the domain pool, so a turn
         # step repeated after a crash does not run it twice.
-        tool_journal=PgToolJournal(PoolConnections(domain_pool)),
+        tool_journal=tool_journal_for(domain_pool),
     )
 
     channels = build_channel_registry(resolved)

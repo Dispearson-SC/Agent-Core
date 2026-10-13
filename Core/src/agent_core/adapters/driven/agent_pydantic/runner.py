@@ -81,6 +81,7 @@ THE HOOK SKETCH - now `PolicyEnforcement` below (verified against pydantic-ai 2.
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -169,9 +170,11 @@ from agent_core.ports.event_publisher import EventPublisher
 from agent_core.ports.knowledge_base import KnowledgeBase
 from agent_core.ports.media_store import SignedMedia
 from agent_core.ports.model_gateway import ModelGateway
-from agent_core.ports.tool_journal import ToolJournal, ToolRunState
+from agent_core.ports.tool_journal import ToolJournal, ToolJournalUnavailableError, ToolRunState
 from agent_core.ports.tool_policy import ToolPolicy
 from agent_core.ports.tool_provider import ToolProvider
+
+_LOG = logging.getLogger(__name__)
 
 # Tool-name prefixes whose results are third-party text the model will read: the natural
 # vector for indirect prompt injection. Their results are ALWAYS wrapped in
@@ -505,6 +508,20 @@ def refusal_result(decision: PolicyDecision) -> str:
     return f"Tool call refused by policy and did not run. Reason: {decision.reason}"
 
 
+def _journal_key(ctx: RunContext[Any], call: ToolCallPart) -> str:
+    """The journal identity of a call: its model-response ordinal plus the provider's call id.
+
+    Some providers number calls per response (`call_0` again in the next one), so the id alone can
+    name two different calls of one turn and a later legitimate call would be answered
+    `interrupted` (R3/R4, slice 17). The ordinal is how many model responses the history holds when
+    the call runs, and it is stable where replay needs it: a repeated step or resume rebuilds the
+    same history, so the same call lands on the same key. It is a prefix of the key string, so the
+    `tool_executions` schema is unchanged.
+    """
+    responses = sum(1 for message in ctx.messages if isinstance(message, ModelResponse))
+    return f"r{responses}:{call.tool_call_id}"
+
+
 class PolicyEnforcement(AbstractCapability[Any]):
     """The `before_tool_execute` gate: policy, then audit, then - only then - the tool.
 
@@ -629,7 +646,9 @@ class PolicyEnforcement(AbstractCapability[Any]):
         # crash interrupted on an earlier attempt is answered with an `interrupted` result instead
         # of being run a second time.
         if self._journal is not None and self._journals(tool_def):
-            state = await self._journal.begin(self._turn_id, call.tool_call_id, call.tool_name)
+            state = await self._journal.begin(
+                self._turn_id, _journal_key(ctx, call), call.tool_name
+            )
             if state is not ToolRunState.FRESH:
                 raise SkipToolExecution(interrupted_result(call.tool_name))
 
@@ -663,13 +682,29 @@ class PolicyEnforcement(AbstractCapability[Any]):
         try:
             result = await handler(args)
         except (ApprovalRequired, CallDeferred):
-            await self._journal.abandon(self._turn_id, call.tool_call_id)
+            await self._record_end(self._journal.abandon, ctx, call)
             raise
         except Exception:
-            await self._journal.finish(self._turn_id, call.tool_call_id)
+            await self._record_end(self._journal.finish, ctx, call)
             raise
-        await self._journal.finish(self._turn_id, call.tool_call_id)
+        await self._record_end(self._journal.finish, ctx, call)
         return result
+
+    async def _record_end(
+        self,
+        write: Callable[[TurnId, str], Awaitable[None]],
+        ctx: RunContext[Any],
+        call: ToolCallPart,
+    ) -> None:
+        """Write how the call ended. The call already happened, so an unreachable journal must not
+        discard its result: the row stays `started` and a replay reads it as interrupted (the
+        conservative outcome, `ToolJournalUnavailableError`)."""
+        try:
+            await write(self._turn_id, _journal_key(ctx, call))
+        except ToolJournalUnavailableError:
+            _LOG.warning(
+                "tool journal unreachable after %s ran; its row stays started", call.tool_name
+            )
 
 
 class UnsupportedHistoryError(TypeError):

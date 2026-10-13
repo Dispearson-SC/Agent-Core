@@ -15,7 +15,7 @@ from agent_core.adapters.driven.persistence_pg import migrations
 from agent_core.adapters.driven.persistence_pg.tool_journal import PgToolJournal
 from agent_core.composition import PoolConnections
 from agent_core.domain.turn import TurnId
-from agent_core.ports.tool_journal import ToolRunState
+from agent_core.ports.tool_journal import ToolJournalUnavailableError, ToolRunState
 from tests.contract.harnesses import database_name_for
 from tests.fakes import peer_world
 from tests.fakes.tool_journal import FakeToolJournal
@@ -97,3 +97,16 @@ class TestPostgresToolJournal(ToolJournalConformance):
             conn.execute("DELETE FROM tool_executions")
         with ConnectionPool(pg_conninfo, min_size=1, max_size=6) as pool:
             yield PgToolJournal(PoolConnections(pool))
+
+    async def test_a_saturated_pool_fails_in_the_defined_way(self, pg_conninfo: str) -> None:
+        """R4-journal-pool-checkout: a checkout that times out surfaces as
+        `ToolJournalUnavailableError`, not a bare pool error, for begin, finish and abandon."""
+        with ConnectionPool(pg_conninfo, min_size=1, max_size=1) as pool:
+            journal = PgToolJournal(PoolConnections(pool, timeout=0.1))
+            with pool.connection():  # the only connection is taken
+                with pytest.raises(ToolJournalUnavailableError):
+                    await journal.begin(T1, "call-1", "send")
+                with pytest.raises(ToolJournalUnavailableError):
+                    await journal.finish(T1, "call-1")
+                with pytest.raises(ToolJournalUnavailableError):
+                    await journal.abandon(T1, "call-1")

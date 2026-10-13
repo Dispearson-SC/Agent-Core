@@ -807,7 +807,8 @@ that is not safe in `tool_executions` through the `ToolJournal` port (begin befo
 after it, drop it if the body only deferred) and, when a repeated step meets a call that already
 began, answers with an `interrupted` result instead of running the tool again. The C5 attempt
 ledger counts how often a workflow is entered; the journal says which calls inside it already
-began. Policy (allow, ask, deny) is decided first, so a refused or suspended call is never journaled.
+began (keyed by model-response ordinal plus provider call id, D68). Policy (allow, ask, deny) is
+decided first, so a refused or suspended call is never journaled.
 
 **Who the model can ask is generated, not written (C14, D37).** The `ask_peer` tool's description
 and its `target` enum are built every turn from the asker's `PeerPolicy`, the callee's policy (the

@@ -9,8 +9,10 @@ provider tool-call id) been started before?". After a crash the durable workflow
 step again; a call whose id is already journaled began in an earlier attempt, and the runner does
 not run it a second time (`domain/tool_replay.py`).
 
-The id is the PROVIDER's `tool_call_id`, which is stable where it matters: a call that was
-approved, and is executed by the resumed turn, keeps the id it was suspended under. A fresh model
+The id the runner passes is the PROVIDER's `tool_call_id` qualified by the model-response ordinal
+(`r<n>:<id>`), because some providers reuse an id in a later response of the same turn. The
+qualified id is stable where it matters: a call that was approved, and is executed by the resumed
+turn, rebuilds the same history and so keeps the key it was suspended under. A fresh model
 generation after a restart issues new ids, and those are new calls by definition.
 """
 
@@ -21,7 +23,7 @@ from typing import Protocol
 
 from agent_core.domain.turn import TurnId
 
-__all__ = ["ToolJournal", "ToolRunState"]
+__all__ = ["ToolJournal", "ToolJournalUnavailableError", "ToolRunState"]
 
 
 class ToolRunState(StrEnum):
@@ -30,6 +32,17 @@ class ToolRunState(StrEnum):
     FRESH = "fresh"  # never seen: this attempt is the first
     STARTED = "started"  # begun by an earlier attempt, no end recorded
     FINISHED = "finished"  # begun and ended by an earlier attempt
+
+
+class ToolJournalUnavailableError(RuntimeError):
+    """The journal's store could not be reached (a pool checkout timed out, the database is down).
+
+    Raised by every `ToolJournal` method. The runner treats it as follows: from `begin` it FAILS
+    CLOSED (the tool is not run, because without the journal a repeat could not be told from a
+    first run; the turn step fails and the workflow retries it); from `finish` and `abandon` it is
+    logged and the result is kept (the call already happened; the row stays `started`, which a
+    replay reads as interrupted).
+    """
 
 
 class ToolJournal(Protocol):

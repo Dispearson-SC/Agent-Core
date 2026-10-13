@@ -2572,3 +2572,34 @@ current turn. It is the second delegation tool, not a second mechanism.
 - **Not verified here.** The real-model path (`RealSource` through `litellm_model_factory`) was
   not exercised: the task forbids calling a paid model in verification, and only the skip path and
   the scripted path were run.
+
+## D68 - Slice 17 advisories (C1s)
+
+- **Journal key = response ordinal + provider call id (R3-journal-id-reuse, R4-journal-key-collision).**
+  D65 keyed a call on `(turn, tool_call_id)`. Some providers number calls per response, so a later
+  legitimate call could meet an earlier call's row and be answered `interrupted`. The runner now
+  passes `r<n>:<tool_call_id>`, `<n>` being the count of `ModelResponse` messages in the run's
+  history when the call runs. A repeated step or resume rebuilds the same history, so the same call
+  lands on the same key (the approved-call-across-a-crash test still holds). No schema change: the
+  key lives in the existing `tool_call_id` TEXT column and the port is untouched, so there is no new
+  migration. Rejected: a per-run call counter (depends on the order calls are dispatched in) and
+  the SDK's per-run `run_step` (a resumed run is a new run, so it was not relied on). Rows written under the old
+  bare-id key are not recognised after the upgrade (OPERATIONS has the drain note); the recorded
+  steps are unchanged, so `PINNED_DBOS_APPLICATION_VERSION` stays `agent-core-turns.11`.
+- **Journal checkout is bounded and fails closed (R4-journal-pool-checkout).** The journal uses
+  `PoolConnections(domain_pool, timeout=5 s)` (`TOOL_JOURNAL_CHECKOUT_TIMEOUT_SECONDS`), longer than
+  the attempt ledger's 1 s because it cannot fail open. A timeout or an unreachable database surfaces
+  as `ToolJournalUnavailableError` (port module): from `begin` the tool is not run and the step is
+  retried; from `finish`/`abandon` the result is kept (the call happened) and a warning is logged.
+- **Open-count predicate (R3-open-count-predicate).** Did not hold: the SQL predicate and
+  `background_state` agree. A test now runs both over the same rows, including shapes the happy path
+  never writes, so they cannot drift apart.
+- **Eval env parsing (R2-002, R3-eval-env-parse).** `AGENT_CORE_EVAL_REPETITIONS` was already strict;
+  `TRIAL_TIMEOUT` and `MIN_PASS_RATE` were `float(...)` (a typo was a traceback, `nan` or a negative
+  timeout was accepted). All three are now parsed first, before the skip decision, and refused by
+  name. `MIN_PASS_RATE` must be in [0, 1] (so `1.5` is no longer a way to force a failure).
+- **Readability (R2-001, R2-003).** The feed's repeated "what the client now knows" assignment is a
+  local `shown(snapshot)`; the tool-journal migration helper uses the shared `apply_migration`.
+- **Test (R2-004, R3-source-grep-test).** The source-grep on `_step_resume_round` is a behavioural
+  test: the step is driven with a recording `ResumeTurn` and the owner it was handed is asserted.
+
