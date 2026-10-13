@@ -176,3 +176,52 @@ def test_count_open_counts_every_unfinished_ask_not_just_a_window_of_them() -> N
     total, open_asks, foreign = asyncio.run(scenario())
 
     assert (total, open_asks, foreign) == (5, 4, 0)
+
+
+def test_the_sql_open_count_agrees_with_the_in_memory_settled_rule_on_every_row_shape() -> None:
+    """R3-open-count-predicate: `count_open` (SQL) and the feed's fallback (`_OPEN_ASKS` over the
+    records `background_state` builds) are two spellings of one rule. They are run over the same
+    rows, including shapes the happy path never writes (cancelled after an answer, an answered
+    state with no timestamp), so a change to one cannot drift from the other."""
+    from agent_core.application.event_feed import _OPEN_ASKS  # noqa: PLC2701
+
+    shapes: tuple[tuple[str, str | None, bool], ...] = (
+        # (state, answered_at SQL, answer_failed)
+        ("queued", None, False),
+        ("delivered", None, False),
+        ("answered", "now()", False),
+        ("answered", "now()", True),
+        ("cancelled", None, False),
+        ("cancelled", "now()", False),
+        ("cancelled", "now()", True),
+        ("answered", None, False),
+        ("delivered", "now()", False),
+    )
+
+    async def scenario() -> tuple[int, int]:
+        await w.fresh_databases(_DATABASE)
+        mailbox = PgAgentMailbox(w.conninfo(_DATABASE))
+        handles = [await _ask(mailbox, w.B, w.A, ROOT, f"k{n}") for n in range(len(shapes))]
+        with psycopg.connect(w.conninfo(_DATABASE), autocommit=True) as conn:
+            for handle, (state, answered, failed) in zip(handles, shapes, strict=True):
+                stamp = answered or "NULL"
+                conn.execute(
+                    f"UPDATE peer_messages SET state = %s, answered_at = {stamp}, "
+                    "answer_failed = %s WHERE correlation_id = %s",
+                    (state, failed, handle),
+                )
+            # A row from before migration 0035 has no root and hangs from its asking turn.
+            conn.execute(
+                "UPDATE peer_messages SET root_turn_id = NULL, turn_id = %s "
+                "WHERE correlation_id = %s",
+                (ROOT, handles[0]),
+            )
+        reader = PgTaskGraphReader(w.conninfo(_DATABASE))
+        window = await reader.asks_under("t", ROOT)
+        in_memory = sum(1 for r in window.records if r.state in _OPEN_ASKS)
+        return await reader.count_open("t", ROOT), in_memory
+
+    sql_count, memory_count = asyncio.run(scenario())
+
+    assert sql_count == memory_count
+    assert sql_count == 3, "queued, delivered, and the answered-state row with no timestamp"

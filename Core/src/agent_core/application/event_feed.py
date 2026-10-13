@@ -243,10 +243,15 @@ class EventFeed:
         idle = min(keepalive_seconds, self._reconcile)
         clock = asyncio.get_running_loop().time
         failures = 0  # consecutive snapshot reads that failed; bounded by max_snapshot_failures
+
+        def shown(sent: FeedSnapshot) -> tuple[int, int, float]:
+            """What the client now knows after `sent`: (event floor, open asks, time of the send)."""
+            return sent.last_seq, sent.open_asks, clock()
+
         try:
             snapshot = await self._snapshot(tenant_id, root_turn_id)
             yield FeedItem(FeedKind.SNAPSHOT, snapshot=snapshot)
-            floor, shown_open, last_sent = snapshot.last_seq, snapshot.open_asks, clock()
+            floor, shown_open, last_sent = shown(snapshot)
             if snapshot.settled:
                 yield FeedItem(FeedKind.END, snapshot=snapshot)
                 return
@@ -265,11 +270,7 @@ class EventFeed:
                     snapshot = fresh
                     changed = snapshot.last_seq > floor or snapshot.open_asks != shown_open
                     if changed or snapshot.settled:
-                        floor, shown_open, last_sent = (
-                            snapshot.last_seq,
-                            snapshot.open_asks,
-                            clock(),
-                        )
+                        floor, shown_open, last_sent = shown(snapshot)
                         yield FeedItem(FeedKind.SNAPSHOT, snapshot=snapshot)
                     elif clock() - last_sent >= keepalive_seconds:
                         last_sent = clock()
@@ -289,7 +290,7 @@ class EventFeed:
                         continue
                     failures = 0
                     snapshot = fresh
-                    floor, shown_open, last_sent = snapshot.last_seq, snapshot.open_asks, clock()
+                    floor, shown_open, last_sent = shown(snapshot)
                     yield FeedItem(FeedKind.SNAPSHOT, snapshot=snapshot)
                     if snapshot.settled:
                         yield FeedItem(FeedKind.END, snapshot=snapshot)

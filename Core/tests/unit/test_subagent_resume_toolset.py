@@ -13,8 +13,10 @@ offered a tool it cannot use. The same owner that restricted the first half rest
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Any
 
+import pytest
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -86,10 +88,33 @@ def test_a_resumed_top_level_turn_keeps_the_spawn_tool() -> None:
     assert _offered_on_resume(None)
 
 
-def test_the_workflow_hands_the_requests_owner_to_resume() -> None:
-    import inspect
-
+def test_the_workflow_hands_the_requests_owner_to_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-004 / R3-source-grep-test: drive the step and read what `ResumeTurn` was handed, instead
+    of grepping the step's source for the keyword argument."""
     from agent_core.adapters.driving.workflow import turn_workflow
 
-    source: Any = inspect.getsource(turn_workflow._step_resume_round)  # noqa: SLF001
-    assert "owner=request.owner" in source
+    handed: dict[str, Any] = {}
+
+    class _RecordingResume:
+        async def execute(self, *args: Any, **kwargs: Any) -> str:
+            handed.update(kwargs)
+            return "outcome"
+
+    monkeypatch.setattr(turn_workflow, "_require_resume_turn", lambda: _RecordingResume())
+    owner = _subagent_at(1)
+    request = _request(RESEARCHER)
+    request = replace(request, owner=owner)
+    answer = turn_workflow.HumanAnswer(
+        turn_id=TurnId("t1"), tool_call_id="call_1", approved=True, note=None
+    )
+
+    outcome = asyncio.run(
+        turn_workflow._step_resume_round(  # noqa: SLF001
+            TurnId("t1"), request, ("call_1",), (), (answer,)
+        )
+    )
+
+    assert outcome == "outcome"
+    assert handed["owner"] == owner
