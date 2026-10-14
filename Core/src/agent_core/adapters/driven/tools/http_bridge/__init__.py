@@ -14,6 +14,7 @@ from agent_core.adapters.driven.tools.http_bridge.manifest import (
 )
 from agent_core.adapters.driven.tools.http_bridge.openapi import (
     OpenApiContractError,
+    clear_openapi_cache,
     load_openapi_manifest,
 )
 from agent_core.adapters.driven.tools.http_bridge.settings import BridgeSettings
@@ -26,6 +27,7 @@ __all__ = [
     "Reply",
     "build_bridge_toolset",
     "call_backend",
+    "clear_openapi_cache",
     "case_id_for",
     "load_bridge_manifest",
     "load_openapi_manifest",

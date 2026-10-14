@@ -24,6 +24,7 @@ from agent_core.adapters.driven.tools.http_bridge import (
 )
 from agent_core.adapters.driven.tools.http_bridge.openapi import (
     OpenApiContractError,
+    clear_openapi_cache,
     load_openapi_manifest,
 )
 from agent_core.domain.tool_replay import ReplayPolicy, replay_policy
@@ -31,6 +32,12 @@ from agent_core.domain.turn import CallerIdentity, SessionRef, TenantId
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "http_bridge" / "library_openapi.json"
 SETTINGS = BridgeSettings(base_url="http://svc.test:9")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_document_cache() -> None:
+    """The fetched document is cached per URL (G1c): a test must not see another test's fetch."""
+    clear_openapi_cache()
 
 
 def _spec() -> dict[str, Any]:
@@ -646,3 +653,175 @@ def test_x_agent_idempotency_true_keys_the_write_on_all_its_arguments() -> None:
     )
 
     assert _tools(load_openapi_manifest(spec))["x_op"].idempotency == ("a", "b")
+
+
+# --- G1c: slice 27 advisories ---
+
+
+class _AsyncOnly(httpx.AsyncBaseTransport):
+    """A transport that has no synchronous side (unlike httpx.MockTransport)."""
+
+    def __init__(self, document: dict[str, Any]) -> None:
+        self.document = document
+        self.seen: list[str] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.seen.append(str(request.url))
+        return httpx.Response(200, json=self.document)
+
+
+URL = "http://svc.test:9/openapi.json"
+
+
+def test_an_async_only_transport_serves_the_openapi_fetch() -> None:
+    transport = _AsyncOnly(_spec())
+
+    manifest = load_openapi_manifest(URL, transport=transport)
+
+    assert "get_book" in _tools(manifest)
+    assert transport.seen == [URL]
+
+
+def test_an_async_only_transport_reaches_the_fetch_through_build_bridge_toolset() -> None:
+    transport = _AsyncOnly(_spec())
+
+    toolset = build_bridge_toolset(SETTINGS, openapi=URL, transport=transport)
+
+    assert "get_book" in toolset.tools and transport.seen == [URL]
+
+
+def test_an_async_only_transport_works_when_the_toolset_is_built_inside_a_running_loop() -> None:
+    transport = _AsyncOnly(_spec())
+
+    async def build() -> Any:
+        return build_bridge_toolset(SETTINGS, openapi=URL, transport=transport)
+
+    assert "get_book" in asyncio.run(build()).tools
+
+
+def test_the_same_url_is_fetched_once_per_process_across_builds() -> None:
+    fetched: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fetched.append(str(request.url))
+        return httpx.Response(200, json=_spec())
+
+    for _ in range(3):
+        build_bridge_toolset(SETTINGS, openapi=URL, transport=httpx.MockTransport(handler))
+    build_bridge_toolset(
+        SETTINGS, openapi="http://other.test:9/openapi.json", transport=httpx.MockTransport(handler)
+    )
+
+    assert fetched == [URL, "http://other.test:9/openapi.json"]
+
+
+def test_a_cached_document_is_not_shared_mutably_between_builds() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_spec())
+
+    transport = httpx.MockTransport(handler)
+    overlay = {"tools": [{"name": "get_book", "description": "Patched."}]}
+    patched = build_bridge_toolset(SETTINGS, openapi=URL, overlay=overlay, transport=transport)
+    plain = build_bridge_toolset(SETTINGS, openapi=URL, transport=transport)
+
+    assert patched.tools["get_book"].description == "Patched."
+    assert plain.tools["get_book"].description != "Patched."
+
+
+def test_a_failed_fetch_is_not_cached_and_the_error_says_the_backend_must_answer_at_startup() -> (
+    None
+):
+    answers: list[Exception | None] = [httpx.ConnectError("down"), None]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        outcome = answers.pop(0)
+        if outcome is not None:
+            raise outcome
+        return httpx.Response(200, json=_spec())
+
+    transport = httpx.MockTransport(handler)
+    with pytest.raises(OpenApiContractError, match="svc.test.*startup"):
+        load_openapi_manifest(URL, transport=transport)
+
+    assert "get_book" in _tools(load_openapi_manifest(URL, transport=transport))
+
+
+def test_clearing_the_cache_fetches_again() -> None:
+    fetched: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fetched.append(str(request.url))
+        return httpx.Response(200, json=_spec())
+
+    transport = httpx.MockTransport(handler)
+    load_openapi_manifest(URL, transport=transport)
+    clear_openapi_cache()
+    load_openapi_manifest(URL, transport=transport)
+
+    assert len(fetched) == 2
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        "name",
+        {"name": "x"},
+        [3],
+        ["x"],
+        [None],
+        [{"in": "query", "schema": {"type": "string"}}],
+        [{"name": "x", "schema": {"type": "string"}}],
+        [{"name": 5, "in": "query", "schema": {"type": "string"}}],
+        [{"name": "x", "in": ["query"], "schema": {"type": "string"}}],
+        [{"name": "x", "in": "query", "schema": "string"}],
+        [{"name": "x", "in": "query", "schema": None}],
+    ],
+)
+def test_malformed_parameters_fail_naming_the_operation(parameters: Any) -> None:
+    spec = _one({"parameters": parameters})
+
+    with pytest.raises(OpenApiContractError, match="GET /x .x_op."):
+        load_openapi_manifest(spec)
+
+
+def test_malformed_path_item_parameters_fail_naming_the_operation() -> None:
+    spec = _one({})
+    spec["paths"]["/x"]["parameters"] = "oops"
+
+    with pytest.raises(OpenApiContractError, match="GET /x .x_op."):
+        load_openapi_manifest(spec)
+
+
+@pytest.mark.parametrize("content", [[], "json", {"application/json": "schema"}])
+def test_a_malformed_request_body_content_fails_naming_the_operation(content: Any) -> None:
+    spec = _one({"requestBody": {"content": content}}, method="post")
+
+    with pytest.raises(OpenApiContractError, match="POST /x .x_op."):
+        load_openapi_manifest(spec)
+
+
+@pytest.mark.parametrize(
+    ("overlay", "needle"),
+    [
+        ({"tools": "get_book"}, "tools"),
+        ({"tools": ["get_book"]}, "overlay tool"),
+        ({"tools": [None]}, "overlay tool"),
+        ({"tools": [{"description": "no name"}]}, "name"),
+        ({"tools": [{"name": 7}]}, "name"),
+        ({"tools": [{"name": ""}]}, "name"),
+        ({"tools": [{"name": "get_book", "arguments": ["limit"]}]}, "get_book.*arguments"),
+        (
+            {"tools": [{"name": "get_book", "arguments": {"book_id": "string"}}]},
+            "get_book.*book_id",
+        ),
+        ({"tools": [{"name": "get_book", "response": "pick"}]}, "get_book.*response"),
+        ({"tools": [{"name": "get_book", "operation": 5}]}, "get_book.*operation"),
+        ({"defaults": "x", "tools": []}, "defaults"),
+        ({"api_prefix": 3, "tools": []}, "api_prefix"),
+    ],
+)
+def test_an_overlay_of_the_wrong_shape_is_a_contract_error_naming_what_is_wrong(
+    overlay: Any, needle: str
+) -> None:
+    with pytest.raises(OpenApiContractError, match=needle):
+        load_openapi_manifest(_spec(), overlay=overlay)

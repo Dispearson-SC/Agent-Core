@@ -291,7 +291,7 @@ def build_bridge_toolset(
             overlay=overlay,
             expect=expect,
             timeout=resolved.timeout_seconds,
-            transport=transport if isinstance(transport, httpx.BaseTransport) else None,
+            transport=transport,
         )
     else:
         assert manifest is not None

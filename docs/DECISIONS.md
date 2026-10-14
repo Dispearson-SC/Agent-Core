@@ -3091,3 +3091,25 @@ decision 2026-10-13) and are described by `addon.yaml`.
 - **Default warning header** is now `X-Agent-Warning` (was `X-Warning`) to match the documented
   convention; a vertical with another name sets `warning_header`.
 
+
+## D86 - Slice 27 advisories closed: one OpenAPI fetch, honest errors, a migration hint (Phase 3, G1c)
+
+- **Fetch once.** `load_openapi_manifest` keeps a per-process cache keyed by URL (`_FETCHED`,
+  `clear_openapi_cache()` for tests): a consumer with eight toolsets asks the backend once, not eight
+  times. Only a good document is stored; a failure is raised every time and now says the backend must
+  answer at startup. Each build deep-copies the cached document, so an overlay never leaks between
+  builds. Rejected: a per-instance cache (the eight toolset modules are separate objects) and a TTL
+  (the contract is checked at startup, a long-lived process keeps the contract it started with).
+- **Async transports.** The builder used to drop a transport that was not a sync `httpx.BaseTransport`
+  when it fetched the document. It now passes any transport; an async-only one runs the fetch on its
+  own loop (on a helper thread when the build happens inside a running loop). `httpx.MockTransport`
+  is both and keeps the sync path.
+- **Malformed input is a contract error.** `parameters` that are not a list of objects with a text
+  `name` and `in`, a request body whose `content` is not an object, and an overlay of the wrong shape
+  (`tools` not a list, an entry without a text `name`, `arguments`/`response`/`defaults` not objects,
+  `operation`/`api_prefix` not text) raise `OpenApiContractError` naming the operation or overlay
+  tool instead of an `AttributeError`/`TypeError`.
+- **Settings migration.** A key set on a library addon with no settings of its own
+  (`AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*`, or its section of the addons file) is still refused, but
+  the message names the addons that depend on it and the variable to use. Rejected: honouring the old
+  names as an alias (two sources for one value; D84 chose one).

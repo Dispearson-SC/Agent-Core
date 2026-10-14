@@ -301,12 +301,25 @@ duplicate tool names, no marked operation at all, and `expect=` names the docume
 A backend that drops or breaks a marked operation therefore stops the deployment instead of the
 conversation.
 
+The document is fetched ONCE per process and URL (several toolsets of one consumer share the
+fetch; a failed fetch is not remembered and stops the startup naming the URL, so the backend must
+answer when Core starts). A sync or an async-only `httpx` transport is honoured for that fetch.
+
 The overlay is a manual manifest (`tools:`, optional `defaults:` and `api_prefix:`; a file or a dict).
 An entry named like a generated tool PATCHES it (`arguments` and `response` merge key by key, other
 fields replace); `operation: "GET /items/{item_id}"` pins the operation behind the tool and fails
 the startup when the document moved it. An entry with no twin must be a complete manual tool (its
 route gets the overlay's `api_prefix`); a partial entry that matches nothing is an error listing what
 the document does mark.
+
+### Migrating from `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*` (D86)
+
+Before D84 the bridge keys were set on the bridge itself. They now belong to the consumer addon that
+uses it: `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__BASE_URL` becomes `AGENT_CORE_ADDON__<CONSUMER>__BASE_URL`
+(same for every key in the list above, and in the `AGENT_CORE_ADDONS_CONFIG` file under the consumer's
+name). The old names are refused at startup, and the error says so: `http_tool_bridge has no settings of
+its own, set the key on the addon that depends on it (AGENT_CORE_ADDON__SHOP__BASE_URL)`. The consumer
+must declare the keys it wants an operator to edit in its own `settings:`.
 
 ### Vertical internal API conventions
 

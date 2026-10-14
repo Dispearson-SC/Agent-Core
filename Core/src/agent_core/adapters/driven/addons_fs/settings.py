@@ -218,8 +218,30 @@ def _parse_env(leaf: _Leaf, text: str) -> Any:
     return [_parse_scalar(leaf.item_kind, part.strip()) for part in text.split(",")]
 
 
+def _library_hint(
+    addon: str, tree: _Group, dependents: Mapping[str, tuple[str, ...]], key: str, *, env: bool
+) -> str:
+    """For a key set on a library addon (no settings of its own): where the key belongs (G1c).
+
+    `http_tool_bridge` used to be configured by `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*`; since D84
+    each consumer addon carries the bridge keys in ITS settings, so the old name is the wrong addon.
+    """
+    if tree.children:
+        return ""
+    users = dependents.get(addon, ())
+    head = f"; {addon} has no settings of its own, set the key on the addon that depends on it"
+    if not users:
+        return head
+    where = ", ".join(
+        f"{ENV_PREFIX}{user.upper()}__{key.upper()}" if env else repr(user) for user in users
+    )
+    return f"{head} ({where})"
+
+
 def _env_overrides(
-    trees: Mapping[str, _Group], env: Mapping[str, str]
+    trees: Mapping[str, _Group],
+    env: Mapping[str, str],
+    dependents: Mapping[str, tuple[str, ...]],
 ) -> dict[str, dict[str, Any]]:
     found: dict[str, dict[str, Any]] = {}
     for variable in sorted(env):
@@ -239,8 +261,15 @@ def _env_overrides(
         for key in keys:
             trail.append(key)
             if not isinstance(node, _Group) or key not in node.children:
+                hint = (
+                    _library_hint(addon, trees[addon], dependents, key, env=True)
+                    if len(trail) == 1
+                    else ""
+                )
                 raise AddonSettingsError(
-                    addon, _dotted(*trail), f"is not a setting of this addon (from {variable})"
+                    addon,
+                    _dotted(*trail),
+                    f"is not a setting of this addon (from {variable}){hint}",
                 )
             node = node.children[key]
         if isinstance(node, _Group):
@@ -272,13 +301,19 @@ def _merge(
     configured: Any,
     from_env: Mapping[str, Any],
     path: tuple[str, ...] = (),
+    dependents: Mapping[str, tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(configured, Mapping):
         raise AddonSettingsError(addon, _dotted(*path) or None, "must be a mapping of settings")
     for key in configured:
         if key not in group.children:
+            hint = (
+                _library_hint(addon, group, dependents or {}, str(key), env=False)
+                if not path
+                else ""
+            )
             raise AddonSettingsError(
-                addon, _dotted(*path, str(key)), "is not a setting of this addon"
+                addon, _dotted(*path, str(key)), f"is not a setting of this addon{hint}"
             )
     values: dict[str, Any] = {}
     for key, node in group.children.items():
@@ -321,11 +356,18 @@ def resolve_settings(
             raise AddonSettingsError(
                 str(name), None, "has settings in the deployment file but is not enabled"
             )
-    from_env = _env_overrides(trees, env)
+    dependents = {
+        m.name: tuple(d.name for d in manifests if m.name in d.depends) for m in manifests
+    }
+    from_env = _env_overrides(trees, env, dependents)
     return {
         name: cast(
             "Mapping[str, Any]",
-            _freeze(_merge(name, tree, config.get(name, {}), from_env.get(name, {}))),
+            _freeze(
+                _merge(
+                    name, tree, config.get(name, {}), from_env.get(name, {}), dependents=dependents
+                )
+            ),
         )
         for name, tree in trees.items()
     }

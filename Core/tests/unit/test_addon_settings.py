@@ -306,3 +306,46 @@ def test_a_deployment_file_of_the_wrong_shape_is_refused(tmp_path: Path, text: s
 def test_a_missing_deployment_file_is_refused_not_ignored(tmp_path: Path) -> None:
     with pytest.raises(AddonSettingsError, match="nope.yaml"):
         read_addons_config(tmp_path / "nope.yaml")
+
+
+# --- a library addon has no settings of its own (G1c) --------------------------------------------
+
+
+def _library_and_consumer() -> list[AddonManifest]:
+    library = parse_manifest("name: http_tool_bridge\nversion: 1.1.0\ncore: '>=0'\n")
+    consumer = parse_manifest(
+        "name: shop\nversion: 1.0.0\ncore: '>=0'\ndepends: [http_tool_bridge]\n"
+        "settings:\n  base_url: {type: str, default: 'http://x'}\n"
+    )
+    return [library, consumer]
+
+
+def test_a_key_set_on_a_library_addon_points_to_the_addon_that_depends_on_it_env() -> None:
+    env = {"AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__BASE_URL": "http://old"}
+
+    with pytest.raises(AddonSettingsError) as caught:
+        resolve_settings(_library_and_consumer(), config={}, env=env)
+
+    message = str(caught.value)
+    assert "http_tool_bridge" in message and "has no settings of its own" in message
+    assert "AGENT_CORE_ADDON__SHOP__BASE_URL" in message
+
+
+def test_a_key_set_on_a_library_addon_points_to_the_addon_that_depends_on_it_file() -> None:
+    with pytest.raises(AddonSettingsError) as caught:
+        resolve_settings(
+            _library_and_consumer(), config={"http_tool_bridge": {"timeout_seconds": 3}}, env={}
+        )
+
+    message = str(caught.value)
+    assert "has no settings of its own" in message and "'shop'" in message
+
+
+def test_an_unknown_key_of_an_addon_that_has_settings_keeps_the_plain_message() -> None:
+    env = {"AGENT_CORE_ADDON__SHOP__NOPE": "1"}
+
+    with pytest.raises(AddonSettingsError) as caught:
+        resolve_settings(_library_and_consumer(), config={}, env=env)
+
+    assert "is not a setting of this addon" in str(caught.value)
+    assert "no settings of its own" not in str(caught.value)

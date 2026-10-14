@@ -44,9 +44,11 @@ operation.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Coroutine, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -60,13 +62,26 @@ from agent_core.adapters.driven.tools.http_bridge.manifest import (
     parse_bridge_manifest,
 )
 
-__all__ = ["OpenApiContractError", "OpenApiSource", "load_openapi_manifest"]
+__all__ = ["OpenApiContractError", "OpenApiSource", "clear_openapi_cache", "load_openapi_manifest"]
 
 OpenApiSource = Path | str | Mapping[str, Any]
+Transport = httpx.BaseTransport | httpx.AsyncBaseTransport
+
+# URL -> the document the backend answered, once per process (G1c): a consumer with several
+# toolsets builds the same bridge several times and the backend is asked once. A failed fetch is
+# never stored. Tests call `clear_openapi_cache()`.
+_FETCHED: dict[str, dict[str, Any]] = {}
+_FETCH_LOCK = threading.Lock()
 
 _METHODS = ("get", "post", "put", "patch", "delete")
 _TYPES = ("string", "integer", "number", "boolean", "array", "object")
 _OVERLAY_KEYS = {"api_prefix", "defaults", "tools"}
+
+
+def clear_openapi_cache() -> None:
+    """Forget every fetched document, so the next build asks the backend again."""
+    with _FETCH_LOCK:
+        _FETCHED.clear()
 
 
 class OpenApiContractError(BridgeManifestError):
@@ -108,13 +123,13 @@ def _fail(where: str, message: str) -> OpenApiContractError:
 
 
 def _load_document(
-    source: OpenApiSource, timeout: float, transport: httpx.BaseTransport | None
+    source: OpenApiSource, timeout: float, transport: Transport | None
 ) -> tuple[dict[str, Any], str]:
     if isinstance(source, Mapping):
         return copy.deepcopy(dict(source)), "OpenAPI document"
     text = str(source)
     if "://" in text:
-        return _fetch(text, timeout, transport), text
+        return copy.deepcopy(_fetched(text, timeout, transport)), text
     path = Path(text)
     try:
         raw = path.read_text(encoding="utf-8")
@@ -127,16 +142,37 @@ def _load_document(
     return _as_document(parsed, str(path)), str(path)
 
 
-def _fetch(url: str, timeout: float, transport: httpx.BaseTransport | None) -> dict[str, Any]:
+def _fetched(url: str, timeout: float, transport: Transport | None) -> dict[str, Any]:
+    """The document at `url`, asked for once per process (G1c)."""
+    with _FETCH_LOCK:
+        cached = _FETCHED.get(url)
+    if cached is not None:
+        return cached
+    document = _fetch(url, timeout, transport)
+    with _FETCH_LOCK:
+        return _FETCHED.setdefault(url, document)
+
+
+def _fetch(url: str, timeout: float, transport: Transport | None) -> dict[str, Any]:
     if not url.lower().startswith(("http://", "https://")):
         scheme = url.split("://", 1)[0]
         raise _fail(url, f"only http and https URLs are fetched, not {scheme!r}")
     try:
-        with httpx.Client(timeout=timeout, transport=transport) as http:
-            response = http.get(url)
+        if isinstance(transport, httpx.AsyncBaseTransport) and not isinstance(
+            transport, httpx.BaseTransport
+        ):
+            response = _blocking(_get_async(url, timeout, transport))
+        else:
+            with httpx.Client(
+                timeout=timeout,
+                transport=transport if isinstance(transport, httpx.BaseTransport) else None,
+            ) as http:
+                response = http.get(url)
     except httpx.HTTPError as error:
         raise _fail(
-            url, f"OpenAPI document could not be fetched ({type(error).__name__})"
+            url,
+            f"OpenAPI document could not be fetched ({type(error).__name__}); the backend must "
+            "answer at startup, so check that it is running and that base_url is right",
         ) from error
     if response.status_code >= 400:
         raise _fail(url, f"OpenAPI document could not be fetched (HTTP {response.status_code})")
@@ -145,6 +181,40 @@ def _fetch(url: str, timeout: float, transport: httpx.BaseTransport | None) -> d
     except ValueError as error:
         raise _fail(url, "the reply is not a JSON OpenAPI document") from error
     return _as_document(parsed, url)
+
+
+async def _get_async(
+    url: str, timeout: float, transport: httpx.AsyncBaseTransport
+) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=timeout, transport=transport) as http:
+        return await http.get(url)
+
+
+def _blocking[T](work: Coroutine[Any, Any, T]) -> T:
+    """Run a coroutine to its end from synchronous code, even inside a running event loop.
+
+    A toolset is built synchronously at startup, which may itself run on a loop: then the work
+    gets its own loop on a helper thread instead of failing with "asyncio.run() inside a loop".
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(work)
+    outcome: list[T] = []
+    failure: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            outcome.append(asyncio.run(work))
+        except BaseException as error:  # noqa: BLE001 - re-raised on the calling thread
+            failure.append(error)
+
+    thread = threading.Thread(target=target, name="openapi-fetch")
+    thread.start()
+    thread.join()
+    if failure:
+        raise failure[0]
+    return outcome[0]
 
 
 def _as_document(parsed: Any, label: str) -> dict[str, Any]:
@@ -218,9 +288,15 @@ def _parameters(
 ) -> dict[str, dict[str, Any]]:
     merged: dict[tuple[str, str], Any] = {}
     for source in (item.get("parameters", []), operation.get("parameters", [])):
+        if not isinstance(source, list):
+            raise _fail(label, "parameters must be a list")
         for raw in source:
             param = resolver.resolve(raw, label)
-            merged[(str(param.get("name")), str(param.get("in")))] = param
+            if not isinstance(param, Mapping):
+                raise _fail(label, f"a parameter must be an object, not {type(param).__name__}")
+            if not isinstance(param.get("name"), str) or not isinstance(param.get("in"), str):
+                raise _fail(label, "a parameter needs a text 'name' and a text 'in'")
+            merged[(param["name"], param["in"])] = param
     arguments: dict[str, dict[str, Any]] = {}
     for (name, location), param in merged.items():
         if location == "header":
@@ -251,12 +327,16 @@ def _body(
         return {}
     body = resolver.resolve(operation["requestBody"], label)
     content = body.get("content", {}) if isinstance(body, Mapping) else {}
+    if not isinstance(content, Mapping):
+        raise _fail(label, "the request body 'content' must be an object")
     media = next(
         (v for k, v in content.items() if k.split(";")[0].strip().lower() == "application/json"),
         None,
     )
     if media is None:
         raise _fail(label, "the request body needs an application/json content type")
+    if not isinstance(media, Mapping):
+        raise _fail(label, "the request body's application/json entry must be an object")
     schema = _plain(resolver, media.get("schema", {}), f"{label}: request body")
     if schema.get("type") != "object":
         raise _fail(label, "the request body must be a JSON object")
@@ -387,6 +467,38 @@ def _load_overlay(overlay: Path | Mapping[str, Any]) -> dict[str, Any]:
     return parsed
 
 
+def _check_overlay(overlay: dict[str, Any]) -> None:
+    """The overlay has the shape a manual manifest has; anything else is named, not raised raw."""
+    unknown = sorted(set(overlay) - _OVERLAY_KEYS)
+    if unknown:
+        raise _fail("overlay", f"unknown key {unknown[0]!r} (allowed: api_prefix, defaults, tools)")
+    if "api_prefix" in overlay and not isinstance(overlay["api_prefix"], str):
+        raise _fail("overlay", "api_prefix must be text")
+    if "defaults" in overlay and not isinstance(overlay["defaults"], Mapping):
+        raise _fail("overlay", "defaults must be an object")
+    tools = overlay.get("tools", [])
+    if not isinstance(tools, list):
+        raise _fail("overlay", "tools must be a list")
+    for position, entry in enumerate(tools):
+        if not isinstance(entry, Mapping):
+            raise _fail(f"overlay tool #{position + 1}", "must be an object")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise _fail(f"overlay tool #{position + 1}", "needs a text 'name'")
+        where = f"overlay tool {name!r}"
+        if "operation" in entry and not isinstance(entry["operation"], str):
+            raise _fail(where, "operation must be text like 'GET /path'")
+        if "response" in entry and not isinstance(entry["response"], Mapping):
+            raise _fail(where, "response must be an object")
+        arguments = entry.get("arguments")
+        if arguments is not None:
+            if not isinstance(arguments, Mapping):
+                raise _fail(where, "arguments must be an object")
+            for argument, spec in arguments.items():
+                if not isinstance(spec, Mapping):
+                    raise _fail(where, f"argument {argument!r} must be an object")
+
+
 def _patch(twin: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
     merged = dict(twin)
     for key, value in entry.items():
@@ -409,9 +521,7 @@ def _patch(twin: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
 def _overlay_onto(
     generated: dict[str, dict[str, Any]], origin: Mapping[str, str], overlay: dict[str, Any]
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    unknown = sorted(set(overlay) - _OVERLAY_KEYS)
-    if unknown:
-        raise _fail("overlay", f"unknown key {unknown[0]!r} (allowed: api_prefix, defaults, tools)")
+    _check_overlay(overlay)
     prefix = str(overlay.get("api_prefix", "")).rstrip("/")
     tools = dict(generated)
     for raw in overlay.get("tools", []):
@@ -450,13 +560,14 @@ def load_openapi_manifest(
     overlay: Path | Mapping[str, Any] | None = None,
     expect: Sequence[str] = (),
     timeout: float = 10.0,
-    transport: httpx.BaseTransport | None = None,
+    transport: Transport | None = None,
 ) -> BridgeManifest:
     """The tools of an OpenAPI 3.x document (a mapping, a file path or an http(s) URL).
 
-    A URL is fetched once, here, with `timeout`. `overlay` is a manual manifest (file or mapping)
-    patched over / added to the generated tools. `expect` names tools that must exist after the
-    merge. Raises `OpenApiContractError` naming the operation or tool.
+    A URL is fetched once per process (cached by URL, `clear_openapi_cache()` forgets it) with
+    `timeout`, through `transport` (sync or async) when one is given. `overlay` is a manual
+    manifest (file or mapping) patched over / added to the generated tools. `expect` names tools
+    that must exist after the merge. Raises `OpenApiContractError` naming the operation or tool.
     """
     document, label = _load_document(source, timeout, transport)
     tools, origin = _generate(document, label)
