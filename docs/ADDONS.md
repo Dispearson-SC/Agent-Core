@@ -1,0 +1,245 @@
+# Writing an addon
+
+An addon is how a vertical adds to Agent-Core without patching it: tools, policy, audit entries,
+prompt text, profiles, channels, tool wrappers and database tables, all declared in one manifest.
+This is the authoring guide. The operator's side (variables, startup errors) is
+[OPERATIONS.md](OPERATIONS.md#addons-enabling-them-and-setting-them-phase-2-d70-d72); the design is
+[ARCHITECTURE.md](ARCHITECTURE.md#addons-phase-2); the decisions are D70-D82 in
+[DECISIONS.md](DECISIONS.md). The shipped samples in `addons/sample_*` are the worked examples and
+are loaded by the contract tests, so they cannot drift from the rules below.
+
+## The rules in four lines
+
+1. **Explicit.** An addon runs only if it is listed in `AGENT_CORE_ADDONS` (or is a bridge whose
+   dependencies are all listed). Nothing scans a directory. Installing or removing needs a restart.
+2. **Declared.** An addon contributes what its `provides` declares, through the extension points
+   below, and nothing else. A name that collides, a rule about a tool it does not own, or a file it
+   did not declare stops startup naming the addon.
+3. **Outside the kernel.** Addon Python never imports `agent_core.domain`, `.application` or
+   `.ports` (one small exception, see "What addon code may import").
+4. **Reviewed like code.** Addon code runs inside the Core process with the Core's privileges.
+   Enabling an addon is the same decision as deploying code.
+
+## Layout
+
+```
+addons/shop/
+  addon.yaml            # the manifest (required)
+  toolsets/cart.py      # provides.toolsets: [cart]
+  wrappers/stamp.py     # provides.wrappers
+  fragments/note.md     # provides.fragments: fragments/
+  profiles/clerk.yaml   # provides.profiles: profiles/
+  policy/rules.yaml     # provides.policy
+  migrations/0001_cart.sql
+  hooks.py              # hooks.post_init: hooks:post_init
+```
+
+The directory name IS the addon name: lower case words joined by single underscores
+(`decision_desk`; never a double underscore, it separates the setting variables).
+
+## Manifest reference
+
+```yaml
+name: shop                       # = directory name
+version: 1.2.0                   # a PEP 440 version; compared by number ("1.10" > "1.9")
+core: ">=1.0,<2"                 # the Core versions this addon works with
+depends: [http_tool_bridge]      # addons that must also be enabled; never enabled for you
+auto_install: false              # true = bridge (needs at least one dependency)
+provides: { ... }                # the extension points, below
+settings: { ... }                # the schema of what an operator may set
+hooks: { post_init: "hooks:post_init" }
+migrations: migrations/
+```
+
+Unknown keys are errors everywhere except inside `settings`, which is the addon's own schema (a typo must not silently drop an extension point). A
+version that is not a version, or a `core` range that is not a range, fails at manifest load.
+
+### `provides`
+
+| Key | Declares | Lives in | The rule |
+|---|---|---|---|
+| `toolsets: [name]` | a toolset a profile can list in `toolsets:` | `toolsets/<name>.py` with a zero-argument `build_toolset()` returning a `FunctionToolset` | tool and toolset names are global: a clash with Core or another addon stops startup |
+| `audit.allow` / `audit.presence_only` | which arguments of YOUR tools the audit trail keeps (`tool: [argument]`) | `addon.yaml` only; a toolset module declaring `AUDIT_ALLOW` is refused | only your own tools; a tool with no decision records no arguments (and logs a warning) |
+| `policy: path` | rules for your tools | one YAML file, the format of `Core/policy/*.yaml` | an `allow` may reach only YOUR tools (wildcards included); `deny` and `needs_approval` may narrow any tool. Needs a deployment that manages policy from files |
+| `fragments: dir/` | prompt text a profile names in `include:` | `<name>.md` files | names are global |
+| `profiles: dir/` | profile templates served beside Core's | `*.yaml` files | ids are global; a profile may `inherit` |
+| `inserts: [{profile, slot, fragment}]` | where your fragment goes in someone else's profile | nothing (uses one of your `fragments`) | your own fragments only; the slot must exist |
+| `wrappers: [{tool, wrapper}]` | a wrapper around an existing tool | `wrappers/<wrapper>.py` with `wrap(original, arguments, ctx)` | a tool of Core or of an addon you depend on (directly or not); never your own |
+| `channels: [id]` | pull-mode channel ids a backend can start turns on | nothing (no code) | not an id Core or `AGENT_CORE_PULL_CHANNELS` owns |
+
+A declared directory that is missing or empty is an error, not an empty contribution.
+
+## Toolsets and audit
+
+```python
+# toolsets/cart.py
+from pydantic_ai.tools import Tool
+from pydantic_ai.toolsets import FunctionToolset
+
+def cart_add(sku: str, note: str) -> str:
+    """Add an item to the cart."""
+    return f"added {sku}"
+
+def build_toolset() -> FunctionToolset[None]:
+    return FunctionToolset([Tool(cart_add)])
+```
+
+```yaml
+provides:
+  toolsets: [cart]
+  audit:
+    allow: {cart_add: [sku]}            # recorded by value
+    presence_only: {cart_add: [note]}   # recorded as "present, value not recorded"
+```
+
+A new tool is journaled (a crash mid-call answers `interrupted` instead of running it twice) unless
+it declares itself replay-safe, see `agent_core.domain.tool_replay.safe_tool_metadata`.
+
+## Policy
+
+```yaml
+# policy/rules.yaml
+rules:
+  - rule_id: shop-allow-cart-add     # global
+    tool_pattern: cart_add
+    effect: allow                    # allow | needs_approval | deny
+    reason: Adding an item to the cart is reversible.
+```
+
+The rules join the set Core reconciles at startup, so removing the addon from the list and
+restarting revokes them, exactly like deleting a rule from `Core/policy/`. Policy is decided on the
+tool NAME before any wrapper runs.
+
+## Profiles, inheritance, fragments and slots
+
+A profile file works as any profile does, plus:
+
+```yaml
+id: shop_specialist
+inherit: shop_assistant        # a Core profile or any addon template; at most 4 levels
+max_iterations: 3              # scalars replace
+toolsets: [refunds]            # lists append (parent first, no repeats); mappings merge
+replace: [skill_namespaces]    # swap these top-level fields wholesale (never id, approval_rules)
+slots: {before_tools: [house_style]}   # add default fragments to an inherited slot
+```
+
+`id`, `public_alias` and `peers.topology` are never inherited. A profile that wants other addons to
+extend it declares a slot and marks where it goes, on a line of its own:
+
+```yaml
+slots: {before_tools: []}
+persona: |
+  You help with orders.
+
+  {{slot:before_tools}}
+```
+
+Another addon fills it with `provides.inserts`; the text lands after the slot's defaults, in
+activation order. A child that sets its own `persona` must keep the marker line of every inherited
+slot that has content. The merged profile is validated like any profile, so inheritance grants no
+authority. Details: OPERATIONS.md, "Profile inheritance and slots".
+
+## Wrappers (the `super()` analogue)
+
+```python
+# wrappers/stamp.py
+async def wrap(original, arguments, ctx):
+    result = await original()        # the tool, or the wrapper loaded before this one
+    return f"{result} (checked)"
+```
+
+The tool keeps its name, schema and replay class. Policy, approvals and the audit row still apply
+to the tool name and run BEFORE the wrapper, so a refused or pending call never reaches it. The
+audit row is written once and lists the wrapping addons as `_wrapped_by`, a key only the runner
+sets. `original()` takes no arguments (it runs with the arguments the policy decided on); `arguments`
+is read-only. Wrappers on one tool nest in activation order, the last loaded outermost. An
+exception from wrapper code reaches the model as a tool error with the text kept in the log. If a
+tool itself takes an argument called `_wrapped_by` (reserved), the audit records it as
+`_wrapped_by_received`, under the tool's own audit decision for that name (D81).
+
+## Settings
+
+`settings:` in the manifest is the schema; it is the only thing a vertical edits.
+
+```yaml
+settings:
+  greeting: hello                       # a scalar: that type, that default
+  limits:                               # a mapping without `type`: a group
+    max_items: {type: int, default: 3, minimum: 1, maximum: 10}
+  tags: {type: list, items: str, default: []}
+  api_key: {type: str}                  # no default: the deployment must set it
+```
+
+Types: `str`, `int`, `float`, `bool`, `list`, `object`; `minimum`/`maximum` for numbers, `choices`
+for `str`/`int`, `description` for the operator. Values are validated strictly at startup (a string
+is not a number) and never echoed in an error. Precedence: manifest default < the file named by
+`AGENT_CORE_ADDONS_CONFIG` < `AGENT_CORE_ADDON__<ADDON>__<KEY>` variables. A value for an inactive
+addon or an undeclared key is an error. The validated values reach `post_init` as
+`context.settings`.
+
+## Migrations and `post_init`
+
+```yaml
+version: 1.1.0
+migrations: migrations/        # 0001_cart.sql, 0002_label.sql
+hooks: { post_init: "hooks:post_init" }   # addons/shop/hooks.py
+```
+
+```python
+# hooks.py  (synchronous: an async hook is refused when the addon is loaded)
+def post_init(context):
+    context.connection.execute("INSERT INTO shop_labels VALUES (%s)", (context.version,))
+```
+
+On every start, after Core's schema, each enabled addon is brought up to its manifest, dependencies
+first: every `migrations/*.sql` file not yet recorded runs in file-name order, one transaction per
+file; then, only if the addon is new or its version changed, `post_init` runs and the version is
+recorded in one transaction. `context` has `name`, `version`, `previous_version` (`None` on first
+install), `settings` and `connection` (inside that transaction: do not commit or close it). A hook
+must be safe to repeat, because a failure re-runs it. Never edit a migration that already ran:
+add a new file.
+
+## Lifecycle
+
+1. Read `AGENT_CORE_ADDONS`; load each `addon.yaml` (no addon code is imported yet).
+2. Resolve: dependency order, cycle / missing dependency / incompatible Core version fail.
+3. Activate bridges whose dependencies are all enabled.
+4. Validate settings.
+5. Register: import the declared toolset and wrapper modules; seam by seam, validate and merge.
+6. Install: migrations, then `post_init`, then record versions (one process at a time).
+7. Reconcile policy, build the container.
+
+Everything above happens at startup; an error never appears mid-turn. With no addon enabled each
+step is a no-op and Core starts exactly as it did before.
+
+## Errors
+
+All are raised at startup and name the addon and the field: `ManifestError` (invalid manifest),
+`AddonResolutionError` (graph), `AddonSettingsError`, `AddonRegistrationError` (an extension point
+refused or colliding), `AddonInstallError` (a migration or hook failed, a downgrade, an unreachable
+database during the install pass). `python -m agent_core addons list` shows what is installed and
+what the next start does.
+
+## What addon code may import
+
+The contract test `tests/contract/test_addon_boundary.py` scans every `.py` under `addons/`.
+Forbidden: `agent_core.domain`, `agent_core.application`, `agent_core.ports` and anything under
+them, and the routes around an import (`__import__`, `importlib`, `import_module`, `exec`, `eval`,
+`sys.modules`, `builtins`). Allowed: the standard library, `pydantic_ai`, other third-party
+packages, `agent_core.adapters.*` (for example `AddonInstallContext`), and the one allowed
+inner-layer surface, `agent_core.domain.tool_replay` (pure helpers to mark a tool replay-safe).
+Widening that list is a reviewed change to the test helper and to this section.
+
+## Limitations and open defaults
+
+- The boundary check is static and best effort; it is not a sandbox. Addon code can still do
+  anything Python can. Review addons like code.
+- Install and removal need a restart. Removing an addon keeps its rows and tables (a returning
+  addon continues); uninstalling is a documented manual step. A downgrade refuses startup.
+- Migrations are a flat ordered directory, not `migrations/<version>/`; they are not checksummed,
+  and a failing file rolls back alone (the earlier ones stay). One `post_init`, synchronous.
+- Wrapper `arguments` are read-only; an addon cannot wrap its own tool; the last loaded wrapper is
+  outermost; the `{{slot:x}}` marker has no escape.
+- An addon policy file needs a policy directory; a channel id clashing with the operator's
+  `AGENT_CORE_PULL_CHANNELS` is a collision.
+- Each of these is a reversible default recorded in DECISIONS.md.

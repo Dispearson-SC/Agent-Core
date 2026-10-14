@@ -245,6 +245,7 @@ workflow this mode skips.
 |----------|-------------|
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Every decision, each carrying the evidence that produced it. **Read this first.** |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The fifteen ports, layer rules, and every subsystem design |
+| [docs/ADDONS.md](docs/ADDONS.md) | Writing an addon: manifest, every extension point, settings, wrappers, migrations, limits |
 | [docs/TASKS.md](docs/TASKS.md) | The task spine — the anchored task every code stub points at |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases F0→F10 and D2, each with a verifiable done-criterion, plus sizing and effort |
 | [docs/GAPS.md](docs/GAPS.md) | What is still undesigned, grouped by what it blocks |

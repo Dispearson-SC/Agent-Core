@@ -97,7 +97,7 @@ Core/
         context/           # ContextEngine: the compaction ladder
         skills_fs/         # SkillRegistry over SKILL.md files
         profiles_fs/       # reads and parses profile YAML; the domain never does
-        addons_fs/         # addon.yaml manifests, resolution, settings, install state (Phase 2, D70-D80)
+        addons_fs/         # addon.yaml manifests, resolution, settings, install state (Phase 2, D70-D82)
         mcp/               # MCPToolset composed into ToolProvider
         human/             # HumanGateway: channel + evidence
         media_fs/          # MediaStore
@@ -146,7 +146,8 @@ Install state (A7, D80) is the last step and the only one that writes: after Cor
 bumped version, then records the version in `addons`; a session advisory lock makes concurrent
 starts do each step once, and a recorded version newer than the manifest refuses startup. It never
 uninstalls. `python -m agent_core addons list` reads the same tables.
-Authoring: see `docs/OPERATIONS.md`, "Addons", and the samples in `addons/sample_*`.
+Authoring: see [ADDONS.md](ADDONS.md) (the guide), `docs/OPERATIONS.md`, "Addons" (the operator's side), and the samples in `addons/sample_*`.
+What keeps addons honest (D82): `tests/contract/test_addon_boundary.py` scans every addon `.py` and fails on an import of `domain/`, `application/` or `ports/` (bar one pure helper), and on the inner layers importing the addon machinery; `test_addon_phase2_contract.py` and `_install.py` prove the bridge, the samples and the install against Postgres.
 
 Profile inheritance and named slots (A5, D76) are resolved by `load_profiles` before a profile
 reaches the domain: `inherit: <id>` plus a patch (scalars replace, lists append, mappings merge,

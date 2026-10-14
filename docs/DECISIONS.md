@@ -2933,3 +2933,57 @@ decision 2026-10-13) and are described by `addon.yaml`.
   installs, upgrades, refuses, kept). Uninstalling is a documented manual step: a destructive path
   nobody asked for is not worth shipping.
 - `PINNED_DBOS_APPLICATION_VERSION` is unchanged: no workflow shape moved.
+
+## D81 - Slice 23 advisories: no un-run hook is recorded, the received argument is audited, database failures are named (A7b)
+
+- **An async `post_init` is refused when the addon is loaded.** A coroutine function called
+  without being awaited "succeeds", runs nothing and the version was then recorded as installed.
+  The hook is synchronous by contract (D80), so `_import_hook` rejects a coroutine function (also
+  one wrapped in `functools.partial`) with an `AddonInstallError` that says what to write. Chosen
+  over awaiting it: awaiting would need an event loop inside the install thread and a second
+  transaction story for no addon that needs it. Reversible if an addon ever needs async I/O.
+- **The audit shows what the tool received.** The runner owns `_wrapped_by` (D79) and used to drop
+  whatever the call carried under that name, so a tool that really received such an argument had
+  it missing from the trail. The runner now audits it as `_wrapped_by_received`
+  (`WRAPPED_BY_RECEIVED_AUDIT_KEY`), and the sink applies the tool's own audit decision for
+  `_wrapped_by` to it (by value, presence only, or dropped). Both reserved keys stay the runner's:
+  a model-sent `_wrapped_by_received` is dropped. Rejected: refusing the call (changes tool
+  behavior), and a new audit port parameter (touches `ports/`).
+- **Install-time database failures are `AddonInstallError`s naming the step.** An
+  `OperationalError` while connecting, locking, reading the recorded versions or running one
+  addon's steps used to escape as the driver's exception. It is wrapped (field `database`, the
+  addon when one was running); Core's own migrations keep `_refused_to_start`.
+- **Versions are compared by number everywhere.** The downgrade check already used
+  `packaging.version`; the "unchanged" test compared strings, so `1.0` against `1.0.0` re-ran the
+  hook. Both now use `Version`; an invalid recorded version stops startup; an invalid manifest
+  version already failed at manifest load.
+
+## D82 - The Phase 2 contract: what an addon is, what proves it (A8)
+
+- **The exit criterion is met by tests, not by prose.** `tests/contract/`:
+  `test_addon_phase2_contract.py` (a bridge activates only when ALL its dependencies are enabled,
+  the samples together exercise every extension point and reach every seam of the composition
+  root, an addon cannot allow, audit, wrap, insert or name beyond what it owns, an undeclared
+  file is never imported), `test_addon_phase2_install.py` (a sample installs against Postgres:
+  migration and `post_init` recorded, bridge recorded, a restart changes nothing, a version bump
+  runs only the new file and the hook again) and `test_addon_boundary.py`.
+- **"No addon touches `domain/`, `application/`, `ports/`" is a static AST scan of every `.py`
+  under `addons/`**, plus the reverse check that those layers never import the addon adapter.
+  Forbidden: importing the three packages or anything under them, and `__import__`, `importlib`,
+  `import_module`, `exec`, `eval`, `sys.modules`, `builtins`. The ALLOWED SURFACE is exactly
+  `agent_core.domain.tool_replay` (pure helpers to mark a tool replay-safe); adding to it is a
+  reviewed change to `tests/contract/addon_boundary.py` and `docs/ADDONS.md`. This is a guard
+  against careless addons, not a sandbox: addon code runs in the Core process, so enabling an
+  addon is a deploy-level decision and addons are reviewed like code. Rejected: runtime import
+  hooks or subinterpreters (a large new mechanism that would still not make arbitrary Python safe).
+- **The sample addons are the fixture and the documentation.** `sample_install` joins
+  `sample_base` (toolsets, audit, policy, fragments, profiles, inheritance, slots, settings),
+  `sample_extra` (channels, a list setting), `sample_shout` (wrapper) and `sample_bridge`
+  (auto_install, inserts) so the set carries migrations and `post_init` too; a contract test fails
+  when an extension point is no longer exercised.
+- **The addon contract in one place:** [ADDONS.md](ADDONS.md). Open, reversible defaults of the
+  phase (D74-D82): an addon policy without a policy directory is refused; an operator channel id
+  clashing with an addon's is a collision; wrapper arguments are read-only, own tools cannot be
+  wrapped and the last loaded wrapper is outermost; the `{{slot:x}}` marker has no escape;
+  migrations are a flat ordered directory, not checksummed, a failing file rolls back alone;
+  one synchronous `post_init`; no uninstall; install and removal need a restart.

@@ -482,6 +482,8 @@ opt-in, because against a real model it takes minutes and costs money.
 
 ## Addons: enabling them and setting them (Phase 2, D70-D72)
 
+This section is the operator's side. Writing an addon: [ADDONS.md](ADDONS.md).
+
 | Variable | Meaning |
 |---|---|
 | `AGENT_CORE_ADDONS` | Comma list of the addons to enable (`sample_base,sample_extra`). Default: none. |
@@ -549,7 +551,7 @@ of an addon it depends on (directly or not), never its own or an unrelated addon
 naming the addon otherwise. An exception from wrapper code reaches the model as a tool error (the
 exception text goes to the log, not to the model); the original tool's own errors are unchanged,
 even when the wrapper retries `original()` and lets the last failure through (D79). The audit key
-`_wrapped_by` is set by the runner only: a value the model sends under that name is dropped.
+`_wrapped_by` is set by the runner only: a value the model sends under that name never takes its place. A tool that really receives an argument by that name has it audited as `_wrapped_by_received`, under the tool's own audit decision for `_wrapped_by` (D81).
 
 ### Install state: versioned migrations and `post_init` (A7, D80)
 
@@ -575,7 +577,9 @@ to its manifest:
    `connection` (inside that transaction: write through it, do not commit or close it). A hook must
    be safe to run twice, because a failure re-runs it on the next start.
 
-Startup stops, naming the addon and the file or hook, when: a migration file fails (that file is
+`post_init` must be a plain function: an `async def` hook is refused when the addon is loaded (it would be called without being awaited). Versions are compared by number (`1.10` is newer than `1.9`, `1.0` equals `1.0.0`).
+
+Startup stops, naming the addon and the file or hook, when: the database becomes unreachable during the install pass (`AddonInstallError`, field `database`); a migration file fails (that file is
 rolled back, the earlier ones stay, the next start resumes there); `post_init` raises, is missing
 or does not import (the version is not recorded); or the database holds a NEWER version than the
 manifest (a downgrade: nothing runs for any addon, deploy the installed version or restore a
