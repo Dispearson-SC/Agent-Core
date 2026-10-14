@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from agent_core.application.route_turn import RouteTurn
+from agent_core.application.route_turn import MAX_AUDIT_TEXT, RouteTurn
 from agent_core.domain.agent_mode import AgentMode
 from agent_core.domain.profile import AgentProfile, ProfileValidationError
 from agent_core.domain.routing import (
@@ -365,3 +365,26 @@ def test_a_turn_the_router_does_not_apply_to_is_returned_unchanged_without_a_cal
 
     assert routed.request == _request("plain") and routed.record is None
     assert router.seen == [] and audit.calls == []
+
+
+def test_what_a_router_says_is_recorded_bounded_however_long_it_is() -> None:
+    # Any `TurnRouter` adapter may answer; the audit row must not grow with what it says.
+    long = "x" * 10_000
+    decision = RouteDecision(kind=RouteKind.INTENT, intent=long, label=long, model=long)
+    use_case, audit = _use_case(ScriptedRouter(decision))
+
+    record = _run(use_case).record
+
+    for value in (record.label, record.model, record.intent):
+        assert value is not None and len(value) == MAX_AUDIT_TEXT and value.startswith("xxx")
+    assert audit.calls[0][2] == record
+
+
+def test_the_error_class_a_router_raised_is_recorded_bounded() -> None:
+    error_type = type("E" * 500, (RuntimeError,), {})
+    use_case, _ = _use_case(ScriptedRouter(error=error_type("boom")))
+
+    reason = _run(use_case).record.fallback_reason
+
+    assert reason is not None and reason.startswith("error:EEE")
+    assert len(reason) == MAX_AUDIT_TEXT

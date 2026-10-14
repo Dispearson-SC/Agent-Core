@@ -22,6 +22,8 @@ WHAT IT GUARANTEES
     * Never fails the turn. A router slower than `timeout_ms`, one that raises, a decision that
       cannot land and a route that cannot be audited all run the requested profile, with the
       reason recorded. A route is applied only once its audit row is written.
+    * The audit row is bounded: the label, model, intent and fallback reason a router produced
+      are cut to `MAX_AUDIT_TEXT` characters, whichever adapter answered.
 """
 
 from __future__ import annotations
@@ -46,11 +48,13 @@ from agent_core.domain.turn import TurnId, TurnRequest
 from agent_core.ports.route_audit import RouteAudit
 from agent_core.ports.turn_router import TurnRouter
 
-__all__ = ["DEFAULT_ROUTER_TIMEOUT_MS", "RouteTurn", "RoutedTurn"]
+__all__ = ["DEFAULT_ROUTER_TIMEOUT_MS", "MAX_AUDIT_TEXT", "RouteTurn", "RoutedTurn"]
 
 _LOG = logging.getLogger(__name__)
 
 DEFAULT_ROUTER_TIMEOUT_MS = 1500
+# The longest text field of a route's audit row (label, model, intent, fallback reason).
+MAX_AUDIT_TEXT = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +107,7 @@ class RouteTurn:
         except TimeoutError:
             failure = FALLBACK_TIMEOUT
         except Exception as error:
-            failure = error_reason(error)
+            failure = _bounded(error_reason(error))
             _LOG.warning(
                 "router %r failed for turn %s; running the requested profile",
                 policy.router,
@@ -126,11 +130,11 @@ class RouteTurn:
             profile_id=target,
             decision=None if decision is None else decision.kind,
             elapsed_ms=elapsed_ms,
-            label=None if decision is None else decision.label,
+            label=None if decision is None else _bounded(decision.label),
             confidence=None if decision is None else decision.confidence,
             calibrated=False if decision is None else decision.calibrated,
-            model=None if decision is None else decision.model,
-            intent=None if decision is None else decision.intent,
+            model=None if decision is None else _bounded(decision.model),
+            intent=None if decision is None else _bounded(decision.intent),
             fallback_reason=reason,
         )
         try:
@@ -153,6 +157,12 @@ class RouteTurn:
         return frozenset(
             pid for pid, profile in self._profiles.items() if profile.mode.startable_by_channel
         )
+
+
+def _bounded(text: str | None) -> str | None:
+    """`text` cut to `MAX_AUDIT_TEXT`: any `TurnRouter` adapter may answer, and an audit row must
+    not grow with whatever it said."""
+    return None if text is None else text[:MAX_AUDIT_TEXT]
 
 
 def _route_request(request: TurnRequest) -> RouteRequest:
