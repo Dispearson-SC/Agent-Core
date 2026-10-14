@@ -825,3 +825,74 @@ def test_an_overlay_of_the_wrong_shape_is_a_contract_error_naming_what_is_wrong(
 ) -> None:
     with pytest.raises(OpenApiContractError, match=needle):
         load_openapi_manifest(_spec(), overlay=overlay)
+
+
+# --- G2: an overlay can hide and fix arguments and pin a manual tool to a document operation ---
+
+
+def test_an_overlay_null_argument_removes_it_from_the_tool() -> None:
+    overlay = {"tools": [{"name": "list_books", "arguments": {"genre": None}}]}
+
+    tool = _tools(load_openapi_manifest(_spec(), overlay=overlay))["list_books"]
+
+    assert "genre" not in tool.arguments and "limit" in tool.arguments
+
+
+def test_an_overlay_cannot_remove_an_argument_the_operation_does_not_have() -> None:
+    overlay = {"tools": [{"name": "list_books", "arguments": {"store_id": None}}]}
+
+    with pytest.raises(OpenApiContractError, match="list_books.*store_id"):
+        load_openapi_manifest(_spec(), overlay=overlay)
+
+
+def test_an_overlay_can_fix_an_argument_the_operation_has() -> None:
+    overlay = {"tools": [{"name": "list_books", "arguments": {"limit": {"fixed": 10}}}]}
+
+    tool = _tools(load_openapi_manifest(_spec(), overlay=overlay))["list_books"]
+
+    assert tool.arguments["limit"].fixed == 10 and tool.arguments["limit"].where == "query"
+
+
+def _twin_of_list_books(**extra: Any) -> dict[str, Any]:
+    return {
+        "name": "list_fiction",
+        "description": "Fiction only.",
+        "method": "GET",
+        "route": "/books",
+        "kind": "read",
+        "arguments": {"genre": {"type": "string", "in": "query", "fixed": "fiction"}},
+        **extra,
+    }
+
+
+def test_a_manual_overlay_tool_may_be_pinned_to_an_operation_the_document_declares() -> None:
+    overlay = {
+        "api_prefix": "/internal/v1",
+        "tools": [_twin_of_list_books(operation="GET /internal/v1/books")],
+    }
+
+    tools = _tools(load_openapi_manifest(_spec(), overlay=overlay))
+
+    assert tools["list_fiction"].route == "/internal/v1/books"
+    assert tools["list_fiction"].arguments["genre"].fixed == "fiction"
+    assert "list_books" in tools
+
+
+def test_a_manual_tool_pinned_to_an_operation_the_document_lacks_fails() -> None:
+    overlay = {
+        "api_prefix": "/internal/v1",
+        "tools": [_twin_of_list_books(operation="GET /internal/v1/shelves", route="/shelves")],
+    }
+
+    with pytest.raises(OpenApiContractError, match="list_fiction.*GET /internal/v1/shelves"):
+        load_openapi_manifest(_spec(), overlay=overlay)
+
+
+def test_a_manual_tool_pin_must_agree_with_its_own_method_and_route() -> None:
+    overlay = {
+        "api_prefix": "/internal/v1",
+        "tools": [_twin_of_list_books(operation="POST /internal/v1/books")],
+    }
+
+    with pytest.raises(OpenApiContractError, match="list_fiction.*POST /internal/v1/books"):
+        load_openapi_manifest(_spec(), overlay=overlay)

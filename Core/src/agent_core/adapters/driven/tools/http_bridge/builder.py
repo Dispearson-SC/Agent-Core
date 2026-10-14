@@ -117,6 +117,9 @@ def _prepare(tool: ToolSpec, raw: dict[str, Any]) -> dict[str, Any]:
     """The arguments to send, defaults applied. Raises `ValueError` with a message for the model."""
     values: dict[str, Any] = {}
     for name, spec in tool.arguments.items():
+        if spec.fixed is not None:
+            values[name] = spec.fixed  # the manifest's value, whatever the model sent
+            continue
         value = raw.get(name)
         if value is None:
             value = spec.default
@@ -136,6 +139,8 @@ def _prepare(tool: ToolSpec, raw: dict[str, Any]) -> dict[str, Any]:
 def _schema(tool: ToolSpec) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     for name, spec in tool.arguments.items():
+        if spec.fixed is not None:
+            continue  # sent by the bridge, not part of what the model may choose
         entry: dict[str, Any] = {"type": spec.type}
         if spec.description:
             entry["description"] = spec.description

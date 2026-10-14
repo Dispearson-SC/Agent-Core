@@ -29,7 +29,7 @@ from __future__ import annotations
 import math
 import re
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, cast
 
 import yaml  # type: ignore[import-untyped]  # no stub package installed; see pyproject.toml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -58,6 +58,16 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
 
+_JSON_TYPES: dict[str, tuple[type, ...]] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "array": (list, tuple),
+    "object": (dict,),
+}
+
+
 class ArgumentSpec(_Strict):
     type: Literal["string", "integer", "number", "boolean", "array", "object"]
     where: Literal["path", "query", "body"] = Field(alias="in")
@@ -67,10 +77,15 @@ class ArgumentSpec(_Strict):
     enum: tuple[Any, ...] | None = None
     minimum: float | None = None
     maximum: float | None = None
+    # A value the bridge sends on every call. The model never sees the argument and cannot change
+    # it (a constant the caller needs but the model must not choose, such as a page size).
+    fixed: Any = None
 
     @model_validator(mode="after")
     def _coherent(self) -> Self:
-        if self.where == "path" and not self.required:
+        if self.fixed is not None:
+            self._check_fixed()
+        if self.where == "path" and not self.required and self.fixed is None:
             raise ValueError("a path argument is always required")
         if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
             raise ValueError("minimum is above maximum")
@@ -83,6 +98,23 @@ class ArgumentSpec(_Strict):
             if math.ceil(self.minimum) > math.floor(self.maximum):
                 raise ValueError("no integer lies between minimum and maximum")
         return self
+
+    def _check_fixed(self) -> None:
+        if self.required or self.default is not None:
+            raise ValueError("a fixed argument is never required and has no default")
+        wanted = _JSON_TYPES[self.type]
+        if not isinstance(self.fixed, wanted) or (
+            isinstance(self.fixed, bool) and self.type != "boolean"
+        ):
+            raise ValueError(f"fixed value is not a {self.type}")
+        if self.enum is not None and self.fixed not in self.enum:
+            raise ValueError("fixed value is not in the enum")
+        if self.type in ("integer", "number"):
+            value = float(cast(float, self.fixed))
+            if self.minimum is not None and value < self.minimum:
+                raise ValueError("fixed value is below minimum")
+            if self.maximum is not None and value > self.maximum:
+                raise ValueError("fixed value is above maximum")
 
 
 class ResponseSpec(_Strict):

@@ -312,6 +312,15 @@ the startup when the document moved it. An entry with no twin must be a complete
 route gets the overlay's `api_prefix`); a partial entry that matches nothing is an error listing what
 the document does mark.
 
+Three overlay features exist for a backend whose operations expose more than the model should see
+(D87). In a patch, `arguments: {store_id: null}` REMOVES an argument (it is not in the schema and is
+never sent; removing one the operation does not have is an error). `fixed: 10` on an argument (also in
+a manual `tools.yaml`) sends that value on every call and keeps the argument out of the model's schema;
+the model cannot override it, and a `fixed` value replaces the document's bounds, default and required
+flag for that argument. A complete manual tool may carry `operation: "GET /internal/v1/issues"`: the
+document must declare that operation and it must be the tool's own method and route, so a second tool
+over one operation (another name, a fixed filter) still stops the startup when the backend moves it.
+
 ### Migrating from `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*` (D86)
 
 Before D84 the bridge keys were set on the bridge itself. They now belong to the consumer addon that

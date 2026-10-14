@@ -404,3 +404,51 @@ def test_the_schema_the_model_sees_carries_each_type_its_enum_and_bounds(tmp_pat
     assert props["flag"] == {"type": "boolean"} and props["tags"] == {"type": "array"}
     assert props["level"]["enum"] == [1, 2, 3] and props["mode"]["enum"] == ["fast", "slow"]
     assert props["count"] == {"type": "integer", "default": 7}
+
+
+# --- a fixed argument (G2) ---
+
+
+def _fixed_manifest(tmp_path: Path) -> Path:
+    path = tmp_path / "fixed.yaml"
+    path.write_text(
+        """\
+tools:
+  - name: list_things
+    description: Things.
+    method: GET
+    route: /things
+    kind: read
+    arguments:
+      days: {type: integer, in: query, default: 7, minimum: 1, maximum: 30}
+      limit: {type: integer, in: query, fixed: 10}
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_fixed_argument_is_sent_on_every_call_and_is_not_in_the_model_schema(
+    tmp_path: Path,
+) -> None:
+    backend = Backend([])
+    toolset = build_bridge_toolset(
+        SETTINGS, manifest=_fixed_manifest(tmp_path), transport=httpx.MockTransport(backend)
+    )
+
+    _run(toolset, "list_things", days=3)
+
+    assert dict(backend.requests[0].url.params) == {"days": "3", "limit": "10"}
+    schema = toolset.tools["list_things"].function_schema.json_schema
+    assert set(schema["properties"]) == {"days"}
+
+
+def test_the_model_cannot_override_a_fixed_argument_or_send_a_hidden_one(tmp_path: Path) -> None:
+    backend = Backend([])
+    toolset = build_bridge_toolset(
+        SETTINGS, manifest=_fixed_manifest(tmp_path), transport=httpx.MockTransport(backend)
+    )
+
+    _run(toolset, "list_things", days=3, limit=500, store_id="S9")
+
+    assert dict(backend.requests[0].url.params) == {"days": "3", "limit": "10"}

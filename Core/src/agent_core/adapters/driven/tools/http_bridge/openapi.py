@@ -495,31 +495,71 @@ def _check_overlay(overlay: dict[str, Any]) -> None:
             if not isinstance(arguments, Mapping):
                 raise _fail(where, "arguments must be an object")
             for argument, spec in arguments.items():
-                if not isinstance(spec, Mapping):
-                    raise _fail(where, f"argument {argument!r} must be an object")
+                if spec is not None and not isinstance(spec, Mapping):
+                    raise _fail(where, f"argument {argument!r} must be an object (or null)")
 
 
-def _patch(twin: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+def _patch(twin: dict[str, Any], entry: dict[str, Any], where: str) -> dict[str, Any]:
     merged = dict(twin)
     for key, value in entry.items():
         current = merged.get(key)
         if key == "response" and isinstance(value, dict):
             merged[key] = {**(current or {}), **value}
         elif key == "arguments" and isinstance(value, dict):
-            merged[key] = {
-                **(current or {}),
-                **{
-                    a: {**(current or {}).get(a, {}), **spec} if isinstance(spec, dict) else spec
-                    for a, spec in value.items()
-                },
-            }
+            arguments = dict(current or {})
+            for argument, spec in value.items():
+                if spec is None:  # hidden from the model and never sent
+                    if argument not in arguments:
+                        raise _fail(
+                            where,
+                            f"removes argument {argument!r}, which the document's operation "
+                            "does not have",
+                        )
+                    del arguments[argument]
+                elif spec.get("fixed") is not None:
+                    # a fixed value replaces the document's constraints (bounds, default, required)
+                    base = arguments.get(argument, {})
+                    kept = {k: base[k] for k in ("type", "in", "description") if k in base}
+                    arguments[argument] = {**kept, **spec}
+                else:
+                    arguments[argument] = {**arguments.get(argument, {}), **spec}
+            merged[key] = arguments
         else:
             merged[key] = value
     return merged
 
 
+def _declared(document: Mapping[str, Any]) -> frozenset[str]:
+    """Every `METHOD /path` the document declares, marked as a tool or not."""
+    found: set[str] = set()
+    for path, item in (document.get("paths") or {}).items():
+        if isinstance(item, Mapping):
+            found.update(
+                f"{m.upper()} {path}" for m in _METHODS if isinstance(item.get(m), Mapping)
+            )
+    return frozenset(found)
+
+
+def _pinned_manual_tool(
+    entry: dict[str, Any], pin: str, declared: frozenset[str], where: str
+) -> None:
+    """A manual tool pinned to `METHOD /path` must be that operation, and the document must have it.
+
+    This is how an addon builds a second tool over an operation (a fixed argument, another name)
+    and still fails the startup when the backend moves or drops the operation under it.
+    """
+    own = f"{str(entry.get('method', '')).upper()} {entry['route']}"
+    if pin != own:
+        raise _fail(where, f"is pinned to {pin!r} but its own method and route are {own!r}")
+    if pin not in declared:
+        raise _fail(where, f"is pinned to {pin!r}, which the document does not declare")
+
+
 def _overlay_onto(
-    generated: dict[str, dict[str, Any]], origin: Mapping[str, str], overlay: dict[str, Any]
+    generated: dict[str, dict[str, Any]],
+    origin: Mapping[str, str],
+    overlay: dict[str, Any],
+    declared: frozenset[str],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     _check_overlay(overlay)
     prefix = str(overlay.get("api_prefix", "")).rstrip("/")
@@ -535,11 +575,13 @@ def _overlay_onto(
                     where,
                     f"is pinned to {pin!r} but the document's operation is {origin[name]!r}",
                 )
-            tools[name] = _patch(tools[name], entry)
+            tools[name] = _patch(tools[name], entry, where)
         elif name in tools:
             raise _fail(where, "is listed twice in the overlay")
-        elif pin is None and "route" in entry:
+        elif "route" in entry:
             entry["route"] = prefix + str(entry["route"])
+            if pin is not None:
+                _pinned_manual_tool(entry, pin, declared, where)
             tools[name] = entry
         else:
             marked = ", ".join(sorted(origin)) or "none"
@@ -573,7 +615,7 @@ def load_openapi_manifest(
     tools, origin = _generate(document, label)
     defaults: dict[str, Any] = {}
     if overlay is not None:
-        tools, defaults = _overlay_onto(tools, origin, _load_overlay(overlay))
+        tools, defaults = _overlay_onto(tools, origin, _load_overlay(overlay), _declared(document))
     for name in expect:
         if name not in tools:
             marked = ", ".join(sorted(origin)) or "none"

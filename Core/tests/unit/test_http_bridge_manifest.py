@@ -99,3 +99,28 @@ def test_a_manifest_can_come_from_any_source_as_a_plain_mapping() -> None:
 
     with pytest.raises(BridgeManifestError, match="openapi:/openapi.json"):
         parse_bridge_manifest({"tools": []}, source="openapi:/openapi.json")
+
+
+# --- a fixed argument: sent on every call, never shown to the model (G2) ---
+
+
+def test_a_fixed_argument_is_part_of_the_manifest() -> None:
+    manifest = parse_bridge_manifest(
+        {"tools": [_tool(arguments={"limit": {"type": "integer", "in": "query", "fixed": 10}})]}
+    )
+
+    assert manifest.tools[0].arguments["limit"].fixed == 10
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"type": "integer", "in": "query", "fixed": 10, "required": True},
+        {"type": "integer", "in": "query", "fixed": 10, "default": 3},
+        {"type": "string", "in": "query", "fixed": "a", "enum": ["b"]},
+        {"type": "integer", "in": "query", "fixed": 99, "maximum": 10},
+    ],
+)
+def test_a_fixed_argument_that_contradicts_its_own_spec_is_refused(spec: dict[str, Any]) -> None:
+    with pytest.raises(BridgeManifestError, match="fixed"):
+        parse_bridge_manifest({"tools": [_tool(arguments={"x": spec})]})

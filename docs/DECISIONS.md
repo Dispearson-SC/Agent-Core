@@ -3113,3 +3113,14 @@ decision 2026-10-13) and are described by `addon.yaml`.
   (`AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*`, or its section of the addons file) is still refused, but
   the message names the addons that depend on it and the variable to use. Rejected: honouring the old
   names as an alias (two sources for one value; D84 chose one).
+
+## D87 - Glazed tools through the bridge: overlay hide/fix/pin, shared helpers, one repeated tool set (Phase 3, G2)
+
+- **Overlay can hide, fix and pin (bridge library).** Glazed's internal API has query parameters the
+  model must never choose (`store_id`, `as_of`, `past_days`), constants the old tools sent
+  (`limit=10`) and one operation behind two tools (`/issues` for `get_issues` and
+  `get_integrity_issues`). Added: `arguments: {x: null}` in a patch removes an argument (an unknown
+  name is an error); `fixed: value` on an argument sends it on every call, hides it from the schema and
+  ignores whatever the model sends; a manual tool may be `operation:`-pinned to a document operation.
+  Rejected: marks in the backend (`x-agent-hide`), because what the model may see is the addon's
+  decision, not the backend's, and the backend would need a deploy to change it.
