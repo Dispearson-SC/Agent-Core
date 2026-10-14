@@ -303,9 +303,11 @@ def _decision(route: str, *, label: str, model: str) -> RouteDecision:
 
 class TurnDriver(Protocol):
     """Runs one whole turn for a question along the route it took (`pass`, `profile:<id>`,
-    `intent:<name>`), and returns when the turn is over. What it measures is wall time."""
+    `intent:<name>`), and returns when the turn is over. What it measures is wall time. For an
+    intent route it may return how the deployment's intent plan ended (`plan` or
+    `fallback:<reason>`, D97); None when it does not know or no plan ran."""
 
-    async def run(self, question: Question, route: str, entry_profile: str) -> None: ...
+    async def run(self, question: Question, route: str, entry_profile: str) -> str | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +322,8 @@ class Verdict:
     router_ms: float | None = None
     turn_ms: float | None = None
     turn_error: str | None = None
+    # D97. How the deployment's intent plan ended for this turn (`plan`, `fallback:<reason>`).
+    plan: str | None = None
 
     @property
     def correct(self) -> bool:
@@ -364,6 +368,18 @@ class RoutingRun:
     def confusion(self) -> dict[tuple[str, str], int]:
         """(expected, got) -> how many questions, wrong cells included."""
         return dict(sorted(Counter((v.expected, v.got) for v in self.verdicts).items()))
+
+    @property
+    def plans(self) -> dict[str, int]:
+        """Among the turns that ran on an intent route: how many the deployment answered with
+        the intent's plan, how many fell back to the model path, and how many reported no plan."""
+        ran = [
+            v for v in self.verdicts
+            if v.got.startswith("intent:") and v.turn_ms is not None and v.turn_error is None
+        ]
+        fallback = sum(1 for v in ran if (v.plan or "").startswith("fallback:"))
+        used = sum(1 for v in ran if v.plan == "plan")
+        return {"plan": used, "fallback": fallback, "no_plan": len(ran) - used - fallback}
 
     @property
     def turn_errors(self) -> int:
@@ -432,15 +448,17 @@ async def _verdict(
             got = route_of(decision)
             outcome = "abstained" if got == PASS else "answered"
         router_ms = (clock() - started) * 1000
-    turn_ms, turn_error = None, None
+    turn_ms, turn_error, plan = None, None, None
     if turn is not None:
         started = clock()
         try:
-            await turn.run(question, got, entry_profile)
+            plan = await turn.run(question, got, entry_profile)
         except Exception as error:
             turn_error = f"{type(error).__name__}: {error}"
         turn_ms = (clock() - started) * 1000 + (router_ms or 0.0)
-    return Verdict(question.id, question.expected, got, outcome, router_ms, turn_ms, turn_error)
+    return Verdict(
+        question.id, question.expected, got, outcome, router_ms, turn_ms, turn_error, plan
+    )
 
 
 async def run_routing(
@@ -493,6 +511,7 @@ def _run_json(run: RoutingRun) -> dict[str, Any]:
         "router_latency_ms": run.latency("router"),
         "turn_latency_ms": run.latency("turn"),
         "turn_errors": run.turn_errors,
+        "plans": run.plans,
         "confusion": [
             {"expected": expected, "got": got, "count": count}
             for (expected, got), count in run.confusion.items()
@@ -506,6 +525,7 @@ def _run_json(run: RoutingRun) -> dict[str, Any]:
                 "router_ms": v.router_ms,
                 "turn_ms": v.turn_ms,
                 "turn_error": v.turn_error,
+                "plan": v.plan,
             }
             for v in run.verdicts
         ],
@@ -561,6 +581,9 @@ def render_routing_markdown(comparison: RoutingComparison) -> str:
             )
     if any(v.turn_ms is not None for v in (*base.verdicts, *routed.verdicts)):
         lines.append(f"| failed turns | {base.turn_errors} | {routed.turn_errors} |")
+        counts = [" / ".join(str(run.plans[k]) for k in ("plan", "fallback", "no_plan"))
+                  for run in (base, routed)]
+        lines.append(f"| intent turns: plan / fallback / no plan | {counts[0]} | {counts[1]} |")
     lines += ["", "## Confusion (routing on)", "", "| expected | got | count |", "|---|---|---|"]
     lines.extend(
         f"| {expected} | {got}{'' if expected == got else ' (wrong)'} | {count} |"

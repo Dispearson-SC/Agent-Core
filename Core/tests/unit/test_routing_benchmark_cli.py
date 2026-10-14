@@ -236,3 +236,62 @@ def test_the_poll_statuses_are_an_explicit_allowlist() -> None:
     assert routing_cli.DONE_STATUSES == frozenset({"finished"})
     assert routing_cli.IN_PROGRESS_STATUSES == frozenset({"running"})
     assert routing_cli.STOPPED_STATUSES == frozenset({"waiting"})
+
+
+def _snapshot_stream(plan: object) -> bytes:
+    snapshot = {
+        "root_turn_id": "t1",
+        "last_seq": 4,
+        "settled": True,
+        "turns": [
+            {"turn_id": "t1", "agent": "billing", "state": "finished", "plan": plan},
+        ],
+    }
+    return (
+        f"event: snapshot\nid: 4\ndata: {json.dumps(snapshot)}\n\nevent: end\ndata: {{}}\n\n"
+    ).encode()
+
+
+@pytest.mark.parametrize("plan", ["plan", "fallback:tool_error", None])
+def test_an_intent_turn_is_posted_to_the_entry_profile_and_reports_its_plan(plan: object) -> None:
+    """D97: the deployment's router and plan answer an intent question; after the turn finished
+    the driver reads the turn's snapshot from its event feed and returns how the plan ended."""
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.method == "POST":
+            assert json.loads(request.content)["profile_id"] == "front_desk"
+            return httpx.Response(202, json={"turn_id": "t1", "status": "accepted"})
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, content=_snapshot_stream(plan))
+        return httpx.Response(200, json={"turn_id": "t1", "status": "finished", "text": "x"})
+
+    async def scenario() -> object:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport, base_url="http://core") as client:
+            driver = HttpTurnDriver(client, headers={}, poll_seconds=0)
+            question = Question("q", "low stock?", "intent:x")
+            return await driver.run(question, "intent:x", "front_desk")
+
+    assert asyncio.run(scenario()) == plan
+    assert seen == [("POST", "/turns"), ("GET", "/turns/t1"), ("GET", "/turns/t1/events")]
+
+
+def test_a_profile_or_pass_turn_never_reads_the_event_feed() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.method == "POST":
+            return httpx.Response(202, json={"turn_id": "t1", "status": "accepted"})
+        return httpx.Response(200, json={"turn_id": "t1", "status": "finished", "text": "x"})
+
+    async def scenario() -> object:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport, base_url="http://core") as client:
+            driver = HttpTurnDriver(client, headers={}, poll_seconds=0)
+            return await driver.run(Question("q", "x", "pass"), "profile:billing", "front_desk")
+
+    assert asyncio.run(scenario()) is None
+    assert "/turns/t1/events" not in seen

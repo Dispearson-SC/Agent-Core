@@ -420,3 +420,54 @@ def test_a_router_timeout_below_one_millisecond_is_refused() -> None:
                 _set(("a", "pass")), router=KeywordRouter([]), router_name="k", timeout_ms=0
             )
         )
+
+
+class PlanTurns(FakeTurns):
+    """A `TurnDriver` that reports how the deployment's intent plan ended for intent routes."""
+
+    def __init__(self, clock: FakeClock, plans: dict[str, str | None]) -> None:
+        super().__init__(clock)
+        self.plans = plans
+
+    async def run(self, question: Question, route: str, entry_profile: str) -> str | None:  # type: ignore[override]
+        await super().run(question, route, entry_profile)
+        return self.plans.get(question.id) if route.startswith("intent:") else None
+
+
+def test_intent_turns_report_how_many_ran_their_plan_and_how_many_fell_back(
+    tmp_path: Path,
+) -> None:
+    """D97: a whole intent turn runs through the deployment's plan; the run counts plan vs
+    fallback (and turns that reported no plan) among the turns routed to an intent."""
+    clock = FakeClock()
+    question_set = _set(
+        ("stock", "intent:stock"), ("dues", "intent:dues"), ("hours", "intent:hours"),
+        ("bill", "profile:billing"),
+    )
+    table: dict[str, object] = {
+        "stock": RouteDecision(kind=RouteKind.INTENT, intent="stock"),
+        "dues": RouteDecision(kind=RouteKind.INTENT, intent="dues"),
+        "hours": RouteDecision(kind=RouteKind.INTENT, intent="hours"),
+        "bill": RouteDecision(kind=RouteKind.ROUTE, profile_id="billing"),
+    }
+    turns = PlanTurns(clock, {"q1": "plan", "q2": "fallback:tool_error", "q3": None})
+
+    comparison = asyncio.run(
+        run_routing(
+            question_set, router=TableRouter(clock, table), router_name="t", turn=turns,
+            clock=clock,
+        )
+    )
+
+    assert [v.plan for v in comparison.routed.verdicts] == [
+        "plan", "fallback:tool_error", None, None,
+    ]
+    assert comparison.routed.plans == {"plan": 1, "fallback": 1, "no_plan": 1}
+    assert comparison.baseline.plans == {"plan": 0, "fallback": 0, "no_plan": 0}
+    json_path, markdown_path = write_routing_report(comparison, tmp_path)
+    report = json.loads(json_path.read_text(encoding="utf-8"))
+    assert report["router"]["plans"] == {"plan": 1, "fallback": 1, "no_plan": 1}
+    assert report["router"]["verdicts"][1]["plan"] == "fallback:tool_error"
+    assert "| intent turns: plan / fallback / no plan | 0 / 0 / 0 | 1 / 1 / 1 |" in (
+        markdown_path.read_text(encoding="utf-8")
+    )

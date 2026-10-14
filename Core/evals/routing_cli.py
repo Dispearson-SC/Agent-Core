@@ -27,13 +27,17 @@ and `routing.md`. Environment:
 
 A whole turn runs on the profile its route names (`profile:<id>`), else on the set's entry
 profile: production routing lands only on profiles a channel may start, so a target posted
-directly is the turn routing would have run. An `intent:` route runs the entry profile until
-intent executors exist.
+directly is the turn routing would have run. An `intent:` route is posted to the entry profile so
+the DEPLOYMENT's router and intent plan answer it (D97: routing and `routing.intents` on there);
+after it finished, the driver reads the turn's snapshot from `GET /turns/{id}/events` and the
+report counts plan / fallback / no plan. Routing on in the deployment also routes the baseline's
+turns, so compare turn latency across two runs (deployment routing off, then on).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import sys
@@ -107,7 +111,8 @@ class HttpTurnDriver:
         self._poll = poll_seconds
         self._timeout = timeout_seconds
 
-    async def run(self, question: Question, route: str, entry_profile: str) -> None:
+    async def run(self, question: Question, route: str, entry_profile: str) -> str | None:
+        """Run the turn; for an intent route, return how the deployment's plan ended."""
         profile = route.removeprefix("profile:") if route.startswith("profile:") else entry_profile
         started = await self._client.post(
             "/turns",
@@ -128,7 +133,7 @@ class HttpTurnDriver:
             if not isinstance(status, str):
                 raise UnknownTurnStatusError(f"turn {turn_id} has an unknown status {status!r}")
             if status in DONE_STATUSES:
-                return
+                return await self._plan_of(turn_id) if route.startswith("intent:") else None
             if status in STOPPED_STATUSES:
                 raise TurnNotFinishedError(f"turn {turn_id} stopped {status!r}, not finished")
             if status not in IN_PROGRESS_STATUSES:
@@ -136,6 +141,26 @@ class HttpTurnDriver:
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"turn {turn_id} still running after {self._timeout}s")
             await asyncio.sleep(self._poll)
+
+
+    async def _plan_of(self, turn_id: str) -> str | None:
+        """The `plan` of the turn in the first snapshot of its event feed (D97), or None."""
+        async with self._client.stream(
+            "GET", f"/turns/{turn_id}/events", headers=self._headers
+        ) as response:
+            response.raise_for_status()
+            event = ""
+            async for line in response.aiter_lines():
+                if line.startswith("event:"):
+                    event = line.removeprefix("event:").strip()
+                elif line.startswith("data:") and event == "snapshot":
+                    snapshot = json.loads(line.removeprefix("data:"))
+                    for turn in snapshot.get("turns", []):
+                        if turn.get("turn_id") == turn_id:
+                            plan = turn.get("plan")
+                            return plan if isinstance(plan, str) else None
+                    return None
+        return None
 
 
 def _number(env: Mapping[str, str], name: str, default: float, low: float, high: float) -> float:

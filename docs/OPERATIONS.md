@@ -548,14 +548,19 @@ questions replace it).
   `AGENT_CORE_ADDON__<ADDON>__<KEY>` settings). Without `AGENT_CORE_EVAL=1` it is a clean skip.
 - Whole turns: add `AGENT_CORE_EVAL_TURNS_URL=<a running Agent-Core>` (and
   `AGENT_CORE_EVAL_TURNS_TENANT`/`_SUBJECT`/`_CHANNEL`, `AGENT_CORE_EVAL_TURN_TIMEOUT`). Each
-  question is a real turn: on the profile its route names, else on the entry profile (an intent
-  runs the entry profile until intent executors exist). It costs model calls.
+  question is a real turn: on the profile its route names, else on the entry profile. An intent
+  question is posted to the entry profile so the deployment's router and intent plan answer it
+  (D97: routing and `routing.intents` on there); the driver then reads the turn's snapshot from
+  `GET /turns/{id}/events` and the report counts `plan / fallback / no plan` per run. A deployment
+  with routing on also routes the baseline run's turns: compare turn latency across two runs
+  (deployment routing off, then on). It costs model calls.
 - Knobs: `AGENT_CORE_EVAL_ROUTER_TIMEOUT_MS` (default 1500, as production),
   `AGENT_CORE_EVAL_REPORT_DIR` (default `Core/evals/reports`), `AGENT_CORE_EVAL_MIN_ACCURACY`
   (exit 1 when routing-on accuracy is below it).
 - The later real run (not done yet): a classifier router addon enabled, the glazed set, whole
-  turns against a deployment with the glazed vertical, routing off in that deployment (the
-  benchmark routes on the client side, posting each turn where the route lands).
+  turns against a deployment with the glazed vertical: once with routing off in that deployment
+  (the benchmark routes on the client side, posting each turn where the route lands), once with
+  routing and intents on (intent questions run their plans).
 
 ## Addons: enabling them and setting them (Phase 2, D70-D72)
 
