@@ -22,12 +22,15 @@ WHAT IT GUARANTEES
       call (`error:<Class>`, `timeout`), and the workflow then runs the normal model path from
       scratch, with the reason audited (`fall_back`).
     * The turn is persisted ONLY when the reply exists: the request, the reply message, the
-      turn-end audit. A request that cannot be written falls back (nothing was written); a reply
-      that cannot be written after it fails the turn (`PlanReplyNotPersistedError`); the turn-end
-      row and the context update after it are logged when they fail, never fatal. A compose that
-      fails leaves no trace in the conversation, so the normal path's `StartTurn` writes the
-      request exactly once. The calls before it were reads; their
-      audit rows stay, as a model's would.
+      turn-end audit. A request write that raises is not taken at its word (it may have failed
+      after its commit): the store is asked whether the turn exists (`request_persisted`). Absent,
+      the plan falls back (nothing was written); present, the reply follows it; unknowable (no
+      check, or the check fails) the turn fails (`PlanRequestUncertainError`), because the normal
+      path could write the request twice. A reply that cannot be written after it fails the turn
+      (`PlanReplyNotPersistedError`). The turn-end row and the context update after it are
+      independent, each logged when it fails, never fatal. A compose that fails leaves no trace in
+      the conversation, so the normal path's `StartTurn` writes the request exactly once. The calls
+      before it were reads; their audit rows stay, as a model's would.
     * A delegated plan (S8) audits both identities: the subject it ran as and the person.
     * The reply never invents data: `compose_reply` is told to use only the results (adapter), and
       a template only puts the results in.
@@ -39,7 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
@@ -66,7 +69,18 @@ from agent_core.ports.conversation_store import ConversationStore
 from agent_core.ports.intent_runner import IntentRunner
 from agent_core.ports.route_audit import RouteAudit
 
-__all__ = ["DEFAULT_TOOL_TIMEOUT_MS", "PlanReplyNotPersistedError", "PreparedPlan", "RunIntent"]
+__all__ = [
+    "DEFAULT_TOOL_TIMEOUT_MS",
+    "PlanReplyNotPersistedError",
+    "PlanRequestUncertainError",
+    "PreparedPlan",
+    "RequestPersisted",
+    "RunIntent",
+]
+
+RequestPersisted = Callable[[TurnId], Awaitable[bool]]
+"""Whether a turn's request is in the store. Composition binds it to the store's own table, like
+`DecideApproval`'s requester seat: one read the composition root can answer, not a port member."""
 
 _LOG = logging.getLogger(__name__)
 
@@ -81,6 +95,11 @@ def _today() -> date:
 class PlanReplyNotPersistedError(RuntimeError):
     """The planned reply could not be written after the turn's request was. The turn fails: the
     normal path cannot start it again without writing the request twice."""
+
+
+class PlanRequestUncertainError(RuntimeError):
+    """The request write raised and nothing can tell whether it committed. The turn fails: falling
+    back could write the request twice, carrying on could answer a turn with no request."""
 
 
 class _PlanMismatchError(LookupError):
@@ -109,6 +128,7 @@ class RunIntent:
         plans: Mapping[str, IntentPlan],
         tool_timeout_ms: int = DEFAULT_TOOL_TIMEOUT_MS,
         today: Callable[[], date] = _today,
+        request_persisted: RequestPersisted | None = None,
     ) -> None:
         if tool_timeout_ms < 1:
             raise ValueError(f"the plan tool timeout must be at least 1 ms, got {tool_timeout_ms}")
@@ -121,6 +141,7 @@ class RunIntent:
         self._plans = plans
         self._timeout = tool_timeout_ms / 1000
         self._today = today
+        self._request_persisted = request_persisted
 
     async def prepare(
         self, turn_id: TurnId, request: TurnRequest, call: IntentCall
@@ -192,14 +213,7 @@ class RunIntent:
         # The request is one transaction: when it fails nothing of the turn exists and the normal
         # path starts it from scratch. Once it is written, the normal path would write it twice, so
         # a reply that cannot follow it fails the turn with a named error instead (slice 36).
-        try:
-            await self._store.append_request(turn_id, request)
-        except Exception:
-            _LOG.warning(
-                "could not persist the request of turn %s; the turn falls back",
-                turn_id,
-                exc_info=True,
-            )
+        if not await self._write_request(turn_id, request):
             return None
         try:
             await self._store.append_outcome(turn_id, outcome)
@@ -208,16 +222,16 @@ class RunIntent:
                 f"the planned reply of turn {turn_id} could not be persisted after its request "
                 f"was: {type(error).__name__}"
             ) from error
-        # The turn answered; what follows is bookkeeping and never fails it.
+        # The turn answered; what follows is bookkeeping, each part independent, never fatal.
+        usage = outcome.result.usage
         try:
-            self._context.update_from_response(request.session, outcome.result.usage)
-            await self._audit.record_turn_end(
-                turn_id, outcome.result.usage, outcome.result.usage.cost_usd
-            )
+            self._context.update_from_response(request.session, usage)
         except Exception:
-            _LOG.warning(
-                "could not account the planned reply of turn %s", turn_id, exc_info=True
-            )
+            _LOG.warning("could not update the context of turn %s", turn_id, exc_info=True)
+        try:
+            await self._audit.record_turn_end(turn_id, usage, usage.cost_usd)
+        except Exception:
+            _LOG.warning("could not audit the end of turn %s", turn_id, exc_info=True)
         await self._record(
             turn_id,
             request,
@@ -231,6 +245,29 @@ class RunIntent:
             ),
         )
         return outcome
+
+    async def _write_request(self, turn_id: TurnId, request: TurnRequest) -> bool:
+        """Write the turn's request: True when it is in the store, False when it certainly is not
+        (the plan falls back). Raises `PlanRequestUncertainError` when nothing can tell."""
+        try:
+            await self._store.append_request(turn_id, request)
+            return True
+        except Exception as error:
+            failure = error
+        _LOG.warning(
+            "the request write of turn %s raised; asking the store whether it committed",
+            turn_id,
+            exc_info=True,
+        )
+        if self._request_persisted is not None:
+            try:
+                return await self._request_persisted(turn_id)
+            except Exception:
+                _LOG.warning("could not read back the request of turn %s", turn_id, exc_info=True)
+        raise PlanRequestUncertainError(
+            f"the request of turn {turn_id} may or may not be persisted after "
+            f"{type(failure).__name__}; the turn cannot fall back safely"
+        ) from failure
 
     async def fall_back(
         self,

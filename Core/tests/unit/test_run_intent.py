@@ -21,7 +21,11 @@ from typing import Any
 
 import pytest
 
-from agent_core.application.run_intent import PlanReplyNotPersistedError, RunIntent
+from agent_core.application.run_intent import (
+    PlanReplyNotPersistedError,
+    PlanRequestUncertainError,
+    RunIntent,
+)
 from agent_core.domain.intents import (
     PLAN_ARGUMENT_INVALID,
     PLAN_OVER_BUDGET,
@@ -298,10 +302,19 @@ def _one_result() -> tuple[PlanToolResult, ...]:
     return (PlanToolResult("quote", "t", content="x"),)
 
 
+async def _not_written(turn_id: TurnId) -> bool:
+    return False
+
+
+async def _written(turn_id: TurnId) -> bool:
+    return True
+
+
 def test_a_request_that_cannot_be_persisted_falls_back_with_nothing_written() -> None:
-    """Slice 36: the request write is one transaction, so when it fails nothing of the turn exists
-    and the normal path can start it from scratch; no turn end, no plan audited as used."""
-    world = World(Runner())
+    """Slice 36: the request write is one transaction, so when it fails AND the store confirms
+    nothing of the turn exists, the normal path can start it from scratch; no turn end, no plan
+    audited as used."""
+    world = World(Runner(), request_persisted=_not_written)
     world.store.append_request = _down  # type: ignore[method-assign]
 
     outcome = _run(world.use_case.reply(TURN, _request(), IntentCall("quote"), _one_result()))
@@ -310,6 +323,61 @@ def test_a_request_that_cannot_be_persisted_falls_back_with_nothing_written() ->
     assert world.store.outcomes == []
     assert world.audit.calls == [] and world.routes.intents == []
     assert world.context.updates == []
+
+
+def test_a_request_write_that_failed_after_its_commit_is_read_back_and_the_reply_follows() -> None:
+    """Gm/37: a write can fail after it committed (the connection drops on the way back). The store
+    is asked whether the turn exists; it does, so the normal path must not write it again: the
+    reply follows the request it already has."""
+    world = World(Runner(), request_persisted=_written)
+    world.store.append_request = _down  # type: ignore[method-assign]
+
+    outcome = _run(world.use_case.reply(TURN, _request(), IntentCall("quote"), _one_result()))
+
+    assert outcome is not None
+    assert world.store.outcomes == [(TURN, outcome)]
+    assert world.routes.intents[0][2].plan_used is True
+
+
+@pytest.mark.parametrize("check", [None, _down])
+def test_a_request_write_nobody_can_confirm_either_way_fails_the_turn_never_falls_back(
+    check: Any,
+) -> None:
+    """Gm/37: when it cannot be told whether the request was written (no check, or the check
+    fails too), falling back could write the request twice: the turn fails with a named error."""
+    kwargs = {} if check is None else {"request_persisted": check}
+    world = World(Runner(), **kwargs)
+    world.store.append_request = _down  # type: ignore[method-assign]
+
+    with pytest.raises(PlanRequestUncertainError, match="turn-1"):
+        _run(world.use_case.reply(TURN, _request(), IntentCall("quote"), _one_result()))
+
+    assert world.store.outcomes == [] and world.routes.intents == []
+
+
+def test_a_context_update_that_fails_never_skips_the_turn_end_audit() -> None:
+    """Gm/37: the two bookkeeping writes after the reply are independent."""
+    world = World(Runner())
+
+    def broken(*args: Any) -> None:
+        raise RuntimeError("context down")
+
+    world.context.update_from_response = broken  # type: ignore[method-assign]
+
+    outcome = _run(world.use_case.reply(TURN, _request(), IntentCall("quote"), _one_result()))
+
+    assert outcome is not None
+    assert [c.kind for c in world.audit.calls] == ["turn_end"]
+
+
+def test_a_turn_end_audit_that_fails_never_skips_the_context_update() -> None:
+    world = World(Runner())
+    world.audit.record_turn_end = _down  # type: ignore[method-assign]
+
+    outcome = _run(world.use_case.reply(TURN, _request(), IntentCall("quote"), _one_result()))
+
+    assert outcome is not None
+    assert world.context.updates == [outcome.result.usage]
 
 
 def test_a_delegated_plan_audits_both_identities() -> None:

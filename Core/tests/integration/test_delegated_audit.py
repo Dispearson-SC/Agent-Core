@@ -1,7 +1,7 @@
 """Both identities of a delegated turn on a REAL Postgres (S8, migration 0048).
 
 Covers: persistence_pg/delegation_audit_migration.py, audit_repository.py (`record_tool_call`),
-        route_audit.py, composition's requester lookup.
+        route_audit.py, composition's requester and request-persisted lookups.
 
 WHAT IS BEING DEFENDED
     1. A tool call made under a delegated identity keeps the subject it ran as in `caller` (as a
@@ -9,6 +9,8 @@ WHAT IS BEING DEFENDED
        a peer turn's call act for nobody (NULL).
     2. The approval requester of a delegated turn is the PERSON, so four-eyes still compares the
        approver with the human who asked, never with the peer identity.
+    3. Whether a turn's request is in the store can be read back by turn id (the intent plan's
+       unambiguous fallback, slice 37).
 """
 
 from __future__ import annotations
@@ -92,3 +94,16 @@ def test_the_requester_of_a_delegated_turn_is_the_person_and_of_a_peer_turn_unch
     assert asyncio.run(lookup(TurnId(PEER))) == "peer-agent"
     assert asyncio.run(lookup(TurnId(NOBODY))) is None
 
+
+def test_whether_a_turns_request_is_persisted_is_read_back_by_its_id() -> None:
+    asyncio.run(w.fresh_databases(_DATABASE))
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO turns (turn_id, session_id, tenant_id, profile_id, state, "
+            "profile_version, profile_snapshot) VALUES (%s, 's', 't', 'p', 'started', '1', '{}')",
+            (ROUTED,),
+        )
+
+    persisted = composition._pg_request_persisted(w.conninfo(_DATABASE))  # noqa: SLF001
+    assert asyncio.run(persisted(TurnId(ROUTED))) is True
+    assert asyncio.run(persisted(TurnId(NOBODY))) is False

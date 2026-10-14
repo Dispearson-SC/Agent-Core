@@ -270,7 +270,7 @@ from agent_core.application.event_feed import EventFeed
 from agent_core.application.ingest_media import IngestMedia
 from agent_core.application.resume_turn import ResumeTurn
 from agent_core.application.route_turn import DEFAULT_ROUTER_TIMEOUT_MS, RouteTurn
-from agent_core.application.run_intent import RunIntent
+from agent_core.application.run_intent import RequestPersisted, RunIntent
 from agent_core.application.start_turn import StartTurn
 from agent_core.domain.intents import IntentPlan
 from agent_core.domain.media import MediaRef
@@ -1723,6 +1723,27 @@ def _requester_lookup_sync(conninfo: str, turn_id: TurnId) -> str | None:
     return None if row is None else str(row[0])
 
 
+# Slice 37. Whether a turn's request is in the store, for `RunIntent`'s request write that raised
+# (it may have failed after its commit). The `turns` row and the request message are one
+# transaction (`PgConversationStore.append_request`), so the row is the answer. Same reasoning as
+# the requester seat above: one read the composition root can answer, not a new port member.
+_REQUEST_PERSISTED_SQL = "SELECT 1 FROM turns WHERE turn_id = %s"
+
+
+def _request_persisted_sync(conninfo: str, turn_id: TurnId) -> bool:
+    with psycopg.connect(conninfo) as conn:
+        return conn.execute(_REQUEST_PERSISTED_SQL, (str(turn_id),)).fetchone() is not None
+
+
+def _pg_request_persisted(conninfo: str) -> RequestPersisted:
+    """Bind `RunIntent`'s `request_persisted` seat to the app database's `turns` table."""
+
+    async def persisted(turn_id: TurnId) -> bool:
+        return await asyncio.to_thread(_request_persisted_sync, conninfo, turn_id)
+
+    return persisted
+
+
 def route_peer_gate(
     entry: AgentProfile, target: AgentProfile, hop: int
 ) -> tuple[int | None, str | None]:
@@ -2320,6 +2341,7 @@ def build_container(
             context=context,
             profiles=profiles,
             plans=plans,
+            request_persisted=_pg_request_persisted(resolved.app_conninfo),
         )
     )
     container = Container(
