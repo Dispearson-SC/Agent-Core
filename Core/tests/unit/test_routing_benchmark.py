@@ -14,6 +14,7 @@ No network, no model: the routers here are scripted and the clock is fake.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from pathlib import Path
 from textwrap import dedent
@@ -344,7 +345,54 @@ def test_with_a_turn_driver_the_whole_turn_is_timed_and_compared() -> None:
     assert [v.turn_ms for v in comparison.baseline.verdicts] == pytest.approx([100.0] * 3)
     assert [v.turn_ms for v in comparison.routed.verdicts] == pytest.approx([50.0, 110.0, 110.0])
     assert comparison.routed.verdicts[2].turn_error == "RuntimeError: the turn failed"
-    assert comparison.turn_delta() == pytest.approx({"p50": 10.0, "p95": 10.0})
+    # A failed turn is not a turn time: it is counted apart and left out of p50/p95.
+    assert comparison.baseline.turn_errors == comparison.routed.turn_errors == 1
+    assert comparison.baseline.latency("turn") == pytest.approx({"p50": 100.0, "p95": 100.0})
+    assert comparison.routed.latency("turn") == pytest.approx({"p50": 50.0, "p95": 110.0})
+    assert comparison.turn_delta() == pytest.approx({"p50": -50.0, "p95": 10.0})
+
+
+def test_failed_turns_are_reported_apart_from_the_turn_latency(tmp_path: Path) -> None:
+    clock = FakeClock()
+    question_set = _set(("hello", "pass"), ("fails", "pass"))
+    table: dict[str, object] = {
+        "hello": RouteDecision(kind=RouteKind.PASS),
+        "fails": RouteDecision(kind=RouteKind.PASS),
+    }
+    comparison = asyncio.run(
+        run_routing(
+            question_set,
+            router=TableRouter(clock, table),
+            router_name="table",
+            turn=FakeTurns(clock, failing="q2"),
+            clock=clock,
+        )
+    )
+
+    json_path, markdown_path = write_routing_report(comparison, tmp_path)
+
+    report = json.loads(json_path.read_text(encoding="utf-8"))
+    assert report["router"]["turn_errors"] == 1 and report["baseline"]["turn_errors"] == 1
+    assert "| failed turns | 1 | 1 |" in markdown_path.read_text(encoding="utf-8")
+
+
+def test_the_report_files_are_written_as_utf8_whatever_the_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    encodings: list[str | None] = []
+    original = Path.write_text
+
+    def spy(self: Path, data: str, encoding: str | None = None, **kwargs: object) -> int:
+        encodings.append(encoding)
+        return original(self, data, encoding=encoding, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", spy)
+    comparison = dataclasses.replace(_scored()[0], notes=("año",))
+
+    json_path, markdown_path = write_routing_report(comparison, tmp_path)
+
+    assert encodings == ["utf-8", "utf-8"]
+    assert "año" in markdown_path.read_text(encoding="utf-8")
 
 
 def test_the_report_is_written_as_json_and_markdown(tmp_path: Path) -> None:

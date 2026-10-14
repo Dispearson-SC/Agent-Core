@@ -16,7 +16,8 @@ routing ON. The report carries, per run:
     confusion           expected route x route taken, counted,
     fallback rate       share where the router gave no answer (timeout, error): the normal path,
     abstention rate     share where the router answered `pass` (it declined to route),
-    latency p50/p95     of the router, and of the whole turn when a `TurnDriver` runs each turn.
+    latency p50/p95     of the router, and of the whole turn when a `TurnDriver` runs each turn
+                        (a turn that failed is counted in `failed turns`, never timed),
 
 Nothing here knows a vertical. A set file is data; the scripted router (`KeywordRouter`) reads its
 rules from the set; a real router is an addon's (`provides.routers`), loaded by the CLI.
@@ -364,12 +365,18 @@ class RoutingRun:
         """(expected, got) -> how many questions, wrong cells included."""
         return dict(sorted(Counter((v.expected, v.got) for v in self.verdicts).items()))
 
+    @property
+    def turn_errors(self) -> int:
+        """Turns that failed (or never finished): reported apart, left out of the turn latency."""
+        return sum(1 for v in self.verdicts if v.turn_error is not None)
+
     def latency(self, which: str) -> dict[str, float | None]:
-        values = [
-            value
-            for v in self.verdicts
-            if (value := v.router_ms if which == "router" else v.turn_ms) is not None
-        ]
+        if which == "router":
+            values = [v.router_ms for v in self.verdicts if v.router_ms is not None]
+        else:
+            values = [
+                v.turn_ms for v in self.verdicts if v.turn_ms is not None and v.turn_error is None
+            ]
         return {"p50": percentile(values, 50), "p95": percentile(values, 95)}
 
 
@@ -485,6 +492,7 @@ def _run_json(run: RoutingRun) -> dict[str, Any]:
         "abstention_rate": run.abstention_rate,
         "router_latency_ms": run.latency("router"),
         "turn_latency_ms": run.latency("turn"),
+        "turn_errors": run.turn_errors,
         "confusion": [
             {"expected": expected, "got": got, "count": count}
             for (expected, got), count in run.confusion.items()
@@ -551,6 +559,8 @@ def render_routing_markdown(comparison: RoutingComparison) -> str:
                 f"| {which} latency {key} (ms) | {_ms(base.latency(which)[key])} "
                 f"| {_ms(routed.latency(which)[key])} |"
             )
+    if any(v.turn_ms is not None for v in (*base.verdicts, *routed.verdicts)):
+        lines.append(f"| failed turns | {base.turn_errors} | {routed.turn_errors} |")
     lines += ["", "## Confusion (routing on)", "", "| expected | got | count |", "|---|---|---|"]
     lines.extend(
         f"| {expected} | {got}{'' if expected == got else ' (wrong)'} | {count} |"
@@ -569,6 +579,9 @@ def write_routing_report(comparison: RoutingComparison, directory: Path) -> tupl
     """`routing.json` and `routing.md` in `directory` (created)."""
     directory.mkdir(parents=True, exist_ok=True)
     json_path, markdown_path = directory / "routing.json", directory / "routing.md"
-    json_path.write_text(json.dumps(render_routing_json(comparison), indent=2) + "\n")
-    markdown_path.write_text(render_routing_markdown(comparison))
+    json_path.write_text(
+        json.dumps(render_routing_json(comparison), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    markdown_path.write_text(render_routing_markdown(comparison), encoding="utf-8")
     return json_path, markdown_path

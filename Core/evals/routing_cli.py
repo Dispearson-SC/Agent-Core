@@ -14,7 +14,9 @@ and `routing.md`. Environment:
     AGENT_CORE_EVAL_ROUTER_TIMEOUT_MS=<n>  the router timeout (default 1500, as production)
     AGENT_CORE_EVAL_TURNS_URL=<url>        optional: ALSO run every question as a whole turn
                                            against a running Agent-Core (POST /turns, poll
-                                           GET /turns/{id}) to time the whole turn. Needs
+                                           GET /turns/{id} until `finished`; `waiting` or an
+                                           unknown status is a failed turn, never timed) to
+                                           time the whole turn. Needs
                                            AGENT_CORE_EVAL=1 (a real model answers; it costs).
     AGENT_CORE_EVAL_TURNS_TENANT / _SUBJECT / _CHANNEL
                                            the identity headers of those turns (default `eval`,
@@ -56,17 +58,25 @@ from evals.routing import (
     write_routing_report,
 )
 
-__all__ = ["HttpTurnDriver", "main"]
+__all__ = ["HttpTurnDriver", "TurnNotFinishedError", "main"]
 
 KEYWORD: Final = "keyword"
 DEFAULT_REPORT_DIR: Final = "evals/reports"
 DEFAULT_TURN_TIMEOUT: Final = 180.0
-_DONE: Final = frozenset({"finished", "waiting"})
+_FINISHED: Final = "finished"
+_RUNNING: Final = "running"
+
+
+class TurnNotFinishedError(RuntimeError):
+    """The turn stopped somewhere other than `finished`: waiting on a person, or a status this
+    driver does not know. Not a turn time; the benchmark counts it as a failed turn."""
 
 
 class HttpTurnDriver:
-    """A `TurnDriver` over a running Agent-Core's HTTP API: start the turn, poll until it is
-    finished (or waiting on a person, which ends what a benchmark can time)."""
+    """A `TurnDriver` over a running Agent-Core's HTTP API: start the turn, poll until it reaches
+    a terminal status. Only `finished` is a timed turn; `waiting` (on a person, who will not come
+    during a benchmark) or an unknown status raises `TurnNotFinishedError`, so the run records it
+    as a failed turn instead of timing half a turn."""
 
     def __init__(
         self,
@@ -98,8 +108,11 @@ class HttpTurnDriver:
         while True:
             polled = await self._client.get(f"/turns/{turn_id}", headers=self._headers)
             polled.raise_for_status()
-            if polled.json().get("status") in _DONE:
+            status = polled.json().get("status")
+            if status == _FINISHED:
                 return
+            if status != _RUNNING:
+                raise TurnNotFinishedError(f"turn {turn_id} stopped {status!r}, not finished")
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"turn {turn_id} still running after {self._timeout}s")
             await asyncio.sleep(self._poll)

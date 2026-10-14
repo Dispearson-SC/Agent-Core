@@ -16,11 +16,12 @@ import asyncio
 import json
 from pathlib import Path
 from textwrap import dedent
+from typing import Any
 
 import httpx
 import pytest
 from evals.routing import Question
-from evals.routing_cli import HttpTurnDriver, main
+from evals.routing_cli import HttpTurnDriver, TurnNotFinishedError, main
 
 SET = """\
 name: tiny
@@ -173,3 +174,34 @@ def test_a_turn_that_never_finishes_times_out() -> None:
 
     with pytest.raises(TimeoutError, match="still running"):
         asyncio.run(scenario())
+
+
+def _driver_against(statuses: list[str]) -> Any:
+    polls = iter(statuses)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"turn_id": "t1", "status": "accepted"})
+        return httpx.Response(200, json={"turn_id": "t1", "status": next(polls), "text": None})
+
+    async def scenario() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport, base_url="http://core") as client:
+            driver = HttpTurnDriver(client, headers={}, poll_seconds=0, timeout_seconds=5)
+            await driver.run(Question("q", "x", "pass"), "pass", "front_desk")
+
+    return scenario
+
+
+def test_a_turn_waiting_on_a_person_is_not_a_finished_turn() -> None:
+    with pytest.raises(TurnNotFinishedError, match="waiting"):
+        asyncio.run(_driver_against(["running", "waiting"])())
+
+
+def test_an_unknown_turn_status_stops_the_poll_naming_it() -> None:
+    with pytest.raises(TurnNotFinishedError, match="exploded"):
+        asyncio.run(_driver_against(["exploded"])())
+
+
+def test_only_a_finished_turn_ends_the_poll_successfully() -> None:
+    asyncio.run(_driver_against(["running", "running", "finished"])())
