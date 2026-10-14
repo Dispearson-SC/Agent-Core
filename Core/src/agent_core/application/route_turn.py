@@ -22,8 +22,9 @@ WHAT IT GUARANTEES
     * Never fails the turn. A router slower than `timeout_ms`, one that raises, a decision that
       cannot land and a route that cannot be audited all run the requested profile, with the
       reason recorded. A route is applied only once its audit row is written.
-    * The audit row is bounded: the label, model, intent and fallback reason a router produced
-      are cut to `MAX_AUDIT_TEXT` characters, whichever adapter answered.
+    * The audit row is bounded: the label, model, intent, reason and fallback reason a router
+      produced are cut to `MAX_AUDIT_TEXT` characters, whichever adapter answered. Its token usage
+      is recorded as input and output tokens (L12).
 """
 
 from __future__ import annotations
@@ -136,6 +137,9 @@ class RouteTurn:
             model=None if decision is None else _bounded(decision.model),
             intent=None if decision is None else _bounded(decision.intent),
             fallback_reason=reason,
+            reason=None if decision is None else _bounded(decision.reason),
+            input_tokens=None if decision is None else _tokens(decision.usage, _INPUT_KEYS),
+            output_tokens=None if decision is None else _tokens(decision.usage, _OUTPUT_KEYS),
         )
         try:
             await self._audit.record_route(turn_id, str(request.session.tenant_id), record)
@@ -157,6 +161,15 @@ class RouteTurn:
         return frozenset(
             pid for pid, profile in self._profiles.items() if profile.mode.startable_by_channel
         )
+
+
+# The names a router may give its token counts (its provider's words), in order of preference.
+_INPUT_KEYS = ("input_tokens", "prompt_tokens")
+_OUTPUT_KEYS = ("output_tokens", "completion_tokens")
+
+
+def _tokens(usage: Mapping[str, int], keys: tuple[str, ...]) -> int | None:
+    return next((usage[key] for key in keys if key in usage), None)
 
 
 def _bounded(text: str | None) -> str | None:

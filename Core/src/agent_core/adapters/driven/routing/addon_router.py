@@ -251,6 +251,7 @@ def decision_from_mapping(answer: object) -> RouteDecision:
     if not isinstance(arguments, Mapping):
         raise ValueError("router answer 'arguments' must be a mapping")
     _check_diagnostics(answer)
+    usage = answer.get("usage") or {}
     return RouteDecision(
         kind=kind,
         profile_id=_optional_text(answer, "profile_id"),
@@ -260,6 +261,8 @@ def decision_from_mapping(answer: object) -> RouteDecision:
         confidence=None if confidence is None else float(confidence),
         calibrated=calibrated,
         model=_optional_text(answer, "model"),
+        reason=_optional_text(answer, "reason"),
+        usage={str(key): int(value) for key, value in usage.items()},
     )
 
 

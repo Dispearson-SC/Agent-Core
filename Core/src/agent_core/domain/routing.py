@@ -23,7 +23,9 @@ WHAT IS RECORDED
     answered nothing), its label, confidence, whether that confidence is calibrated, the model
     that produced it, how long it took, the profile the turn runs under and why it fell back.
     It holds no model text and no argument values: a label is a class name, a fallback reason is
-    a fixed code or `error:<ExceptionClass>`.
+    a fixed code or `error:<ExceptionClass>`. The router's own `reason` (why it passed: `escape`,
+    `below_threshold`, `http_429`...) and its token usage are recorded too (L12), so a router that
+    abstains or costs is visible in the trail and not only in a log line.
 """
 
 from __future__ import annotations
@@ -91,6 +93,9 @@ class RouteDecision:
     confidence: float | None = None
     calibrated: bool = False
     model: str | None = None
+    # L12. Why the router answered what it did (a fixed code, never text) and what it spent.
+    reason: str | None = None
+    usage: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.kind is RouteKind.ROUTE and not (self.profile_id or "").strip():
@@ -99,8 +104,12 @@ class RouteDecision:
             raise ValueError("an intent decision must name the intent")
         if self.confidence is not None and not 0.0 <= self.confidence <= 1.0:
             raise ValueError(f"confidence must be between 0 and 1, got {self.confidence!r}")
-        # A plain dict copy: the record is pickled into the workflow's operation log.
+        for name, count in self.usage.items():
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError(f"usage {name!r} must be a whole number of at least 0")
+        # Plain dict copies: the record is pickled into the workflow's operation log.
         object.__setattr__(self, "arguments", dict(self.arguments))
+        object.__setattr__(self, "usage", dict(self.usage))
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +139,10 @@ class RouteRecord:
     model: str | None = None
     intent: str | None = None
     fallback_reason: str | None = None
+    # L12. The router's reason and token usage (None when it said nothing).
+    reason: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
     @property
     def routed(self) -> bool:

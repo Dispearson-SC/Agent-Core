@@ -1,4 +1,4 @@
-"""Driven adapter: `RouteAudit` on Postgres (`audit_turn_routes`, migration 0045, D95).
+"""Driven adapter: `RouteAudit` on Postgres (`audit_turn_routes`, migrations 0045-0046, D95).
 
 Phase:   Phase 5 (fast communication), P1
 Tests:   Core/tests/integration/test_route_audit.py
@@ -20,8 +20,9 @@ __all__ = ["PgRouteAudit"]
 
 _INSERT = (
     "INSERT INTO audit_turn_routes (turn_id, tenant_id, router, requested_profile, profile_id, "
-    "decision, label, confidence, calibrated, model, intent, elapsed_ms, fallback_reason) "
-    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "decision, label, confidence, calibrated, model, intent, elapsed_ms, fallback_reason, "
+    "reason, input_tokens, output_tokens) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 
@@ -44,6 +45,9 @@ class PgRouteAudit:
             record.intent,
             record.elapsed_ms,
             record.fallback_reason,
+            record.reason,
+            record.input_tokens,
+            record.output_tokens,
         )
         await asyncio.to_thread(self._insert, params)
 

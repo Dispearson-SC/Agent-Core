@@ -388,3 +388,35 @@ def test_the_error_class_a_router_raised_is_recorded_bounded() -> None:
 
     assert reason is not None and reason.startswith("error:EEE")
     assert len(reason) == MAX_AUDIT_TEXT
+
+
+# --- the router's reason and usage are audited (L12) --------------------------------------------
+
+
+def test_the_routers_reason_and_token_usage_are_audited_bounded() -> None:
+    decision = RouteDecision(
+        kind=RouteKind.PASS, label="billing", confidence=0.31, reason="below_threshold" + "x" * 500,
+        usage={"input_tokens": 318, "output_tokens": 34, "cached": 2},
+    )
+    use_case, audit = _use_case(ScriptedRouter(decision))
+
+    record = _run(use_case).record
+
+    assert record.reason is not None and record.reason.startswith("below_threshold")
+    assert len(record.reason) == MAX_AUDIT_TEXT
+    assert (record.input_tokens, record.output_tokens) == (318, 34)
+    assert audit.calls[0][2] == record
+
+
+def test_a_router_that_says_no_reason_and_no_usage_records_none() -> None:
+    use_case, _ = _use_case(ScriptedRouter(RouteDecision(kind=RouteKind.PASS)))
+
+    record = _run(use_case).record
+
+    assert (record.reason, record.input_tokens, record.output_tokens) == (None, None, None)
+
+
+def test_a_decision_refuses_negative_or_non_integer_usage() -> None:
+    for usage in ({"input_tokens": -1}, {"input_tokens": 1.5}, {"output_tokens": True}):
+        with pytest.raises(ValueError, match="usage"):
+            RouteDecision(kind=RouteKind.PASS, usage=usage)  # type: ignore[arg-type]

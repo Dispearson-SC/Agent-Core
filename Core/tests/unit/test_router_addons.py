@@ -388,6 +388,9 @@ def test_an_answer_may_carry_its_reason_elapsed_time_and_usage_which_are_logged_
         decision = asyncio.run(router.route("diagnosed", _request("secret customer words")))
 
     assert decision.kind is RouteKind.PASS and decision.label == "none_of_these"
+    # L12: the reason and the usage reach the decision, so they are audited, not only logged.
+    assert decision.reason == "below_threshold"
+    assert decision.usage == {"input_tokens": 300, "output_tokens": 20}
     logged = caplog.text
     assert "below_threshold" in logged and "elapsed_ms=123" in logged
     assert "input_tokens" in logged and "secret customer words" not in logged

@@ -52,8 +52,8 @@ def _routes() -> list[tuple[Any, ...]]:
     with _connect() as conn:
         return conn.execute(
             "SELECT turn_id, tenant_id, router, requested_profile, profile_id, decision, label, "
-            "confidence, calibrated, model, intent, elapsed_ms, fallback_reason "
-            "FROM audit_turn_routes ORDER BY id"
+            "confidence, calibrated, model, intent, elapsed_ms, fallback_reason, reason, "
+            "input_tokens, output_tokens FROM audit_turn_routes ORDER BY id"
         ).fetchall()
 
 
@@ -67,7 +67,8 @@ def test_a_consultation_is_one_audit_row_with_its_evidence() -> None:
             RouteRecord(
                 router="keyword", requested_profile="front", profile_id="billing",
                 decision=RouteKind.ROUTE, elapsed_ms=12, label="billing", confidence=0.9,
-                calibrated=True, model="clf-1",
+                calibrated=True, model="clf-1", reason="confident", input_tokens=318,
+                output_tokens=34,
             ),
         )
         await audit.record_route(
@@ -83,9 +84,9 @@ def test_a_consultation_is_one_audit_row_with_its_evidence() -> None:
 
     assert _routes() == [
         ("turn-1", "t", "keyword", "front", "billing", "route", "billing", 0.9, True, "clf-1",
-         None, 12, None),
+         None, 12, None, "confident", 318, 34),
         ("turn-2", "t", "keyword", "front", "front", None, None, None, False, None,
-         None, 1500, "timeout"),
+         None, 1500, "timeout", None, None, None),
     ]
 
 

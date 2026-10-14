@@ -3402,3 +3402,14 @@ decision 2026-10-13) and are described by `addon.yaml`.
   fallback reason. The feed fold ignores `routed` (it changes no turn's state).
 - **Reversible defaults.** Off by default; one router per profile; the timeout is per deployment,
   not per profile; the confidence threshold lives in the router (P2), not in Core.
+
+## D96 - A router's reason and usage are audited, not only logged (Phase 5, L12)
+
+- **What.** `RouteDecision` carries the router's `reason` (a fixed code: why it passed) and its
+  `usage` (token counts by name, whole numbers of at least 0); `RouteRecord` keeps the reason
+  (bounded to `MAX_AUDIT_TEXT`) and `input_tokens` / `output_tokens` (from `input_tokens` or
+  `prompt_tokens`, `output_tokens` or `completion_tokens`). Migration 0046 adds the three nullable
+  columns to `audit_turn_routes`. Before, P2's router reported both and Core only logged them.
+- **Why the columns and not a JSON blob.** The two numbers are what an operator sums (the cost of
+  routing) and the reason is what they group by (abstentions); a blob would need a query per key.
+

@@ -205,9 +205,14 @@ What the router did, per turn:
 
 ```postgresql
 SELECT turn_id, requested_profile, profile_id, decision, label, confidence, calibrated, model,
-       elapsed_ms, fallback_reason, at
+       elapsed_ms, fallback_reason, reason, input_tokens, output_tokens, at
 FROM audit_turn_routes ORDER BY id DESC LIMIT 50;
 ```
+
+`reason` is the router's own code for what it answered (the System One router: `escape`,
+`below_threshold`, `missing_api_key`, `http_<n>`, `timeout`...) and `input_tokens` /
+`output_tokens` what the consultation spent; NULL when the router said nothing (migration `0046`,
+additive).
 
 `fallback_reason` is `timeout`, `error:<ExceptionClass>`, `target_not_allowed`,
 `target_not_startable`, `intent_not_supported` or `audit_unavailable` (a route is applied only after
