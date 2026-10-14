@@ -475,7 +475,8 @@ _SHAPES: dict[str, After] = {
 def _before(name: str, tool: Tool[Any]) -> Before | None:
     if name in ("forecast_demand", "forecast_daily_flow"):
         return _chain(_required_are_present(tool), _target)
-    if name in ("get_inventory_status", "get_promos"):
+    if name in ("get_inventory_status", "get_promos", "classify_text"):
+        # `classify_text`: the bridge's own enum message lacked the old tool's final period (G6)
         return _enums_are_respected(tool)
     if name == "get_issue_analysis":
         return _required_are_present(tool)

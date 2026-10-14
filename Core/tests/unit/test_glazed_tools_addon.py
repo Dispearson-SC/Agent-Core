@@ -524,6 +524,15 @@ def test_classify_text_rejects_an_unknown_kind_without_calling_the_backend(
     assert backend.requests == []
 
 
+def test_classify_text_refuses_an_unknown_kind_in_the_old_tools_words(
+    gt: Glazed, backend: Backend
+) -> None:
+    """G6 golden turn: the bridge's generic enum message dropped the old tool's final period."""
+    result = _run(gt.classify_text(_ctx(), kind="mood", text="x"))
+
+    assert result == {"error": "kind must be one of rejection_reason, deviation_cause."}
+
+
 def test_audit_promo_posts_department_and_discount(gt: Glazed, backend: Backend) -> None:
     _run(gt.audit_promo(_ctx(agent="glazed_strategist"), department="bakery", discount_pct=15))
 
