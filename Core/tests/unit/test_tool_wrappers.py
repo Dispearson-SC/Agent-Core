@@ -39,7 +39,10 @@ from agent_core.adapters.driven.addons_fs.loader import load_addons
 from agent_core.adapters.driven.addons_fs.manifest import parse_manifest
 from agent_core.adapters.driven.addons_fs.registration import EMPTY, register_addons
 from agent_core.adapters.driven.agent_pydantic import runner as runner_module
-from agent_core.adapters.driven.persistence_pg.audit_repository import PgAuditSink
+from agent_core.adapters.driven.persistence_pg.audit_repository import (
+    PRESENCE_RECORDED,
+    PgAuditSink,
+)
 from agent_core.adapters.driven.tools.provider import LocalToolProvider, build_tool_provider
 from agent_core.adapters.driven.tools.wrapping import CallOriginal, ToolWrapper, wrap_toolsets
 from agent_core.composition import TOOL_PACKAGES
@@ -49,6 +52,7 @@ from agent_core.domain.tool_replay import ReplayPolicy, replay_policy, safe_tool
 from agent_core.domain.tool_wrapping import (
     WRAPPED_BY_AUDIT_KEY,
     WRAPPED_BY_METADATA_KEY,
+    WRAPPED_BY_RECEIVED_AUDIT_KEY,
     wrapped_by,
 )
 from agent_core.domain.turn import CallerIdentity, TenantId, TurnId
@@ -470,7 +474,7 @@ def test_a_marker_the_model_forges_never_reaches_the_audit_of_an_unwrapped_tool(
 
     _drive_forging(_loose_toolset(), [hooks], ["decision_desk"])
 
-    assert audit.calls[0].payload[3] == {"text": "hi"}
+    assert WRAPPED_BY_AUDIT_KEY not in audit.calls[0].payload[3]
 
 
 def test_the_marker_the_runner_sets_replaces_one_the_model_forges() -> None:
@@ -483,7 +487,71 @@ def test_the_marker_the_runner_sets_replaces_one_the_model_forges() -> None:
 
     _drive_forging(wrapped, [hooks], ["evil_addon"])
 
-    assert audit.calls[0].payload[3] == {"text": "hi", WRAPPED_BY_AUDIT_KEY: ["shop"]}
+    assert audit.calls[0].payload[3][WRAPPED_BY_AUDIT_KEY] == ["shop"]
+
+
+def _received_toolset(received: list[dict[str, Any]]) -> FunctionToolset[None]:
+    """A tool that records the keyword arguments it actually got."""
+
+    def echo(text: str, **extra: Any) -> str:
+        """Return the text."""
+        received.append(dict(extra))
+        return text
+
+    return FunctionToolset([Tool(echo, metadata=safe_tool_metadata())])
+
+
+def test_the_audit_carries_an_argument_the_tool_received_under_the_reserved_name() -> None:
+    """A7b: the runner's marker owns `_wrapped_by`; what the tool was handed under that name is
+    not lost, it is audited as `_wrapped_by_received`."""
+    received: list[dict[str, Any]] = []
+    allow = PolicyRule(rule_id="r-echo", tool_pattern="echo", effect=Effect.ALLOW, reason="ok")
+    hooks, audit = _enforcement((allow,))
+
+    _drive_forging(_received_toolset(received), [hooks], ["decision_desk"])
+
+    assert received == [{WRAPPED_BY_AUDIT_KEY: ["decision_desk"]}]  # the tool did receive it
+    assert audit.calls[0].payload[3] == {
+        "text": "hi",
+        WRAPPED_BY_RECEIVED_AUDIT_KEY: ["decision_desk"],
+    }
+
+
+def test_the_audit_of_a_wrapped_call_has_the_runner_marker_and_the_received_argument() -> None:
+    async def passthrough(original: CallOriginal, arguments: Mapping[str, Any], ctx: Any) -> Any:
+        return await original()
+
+    received: list[dict[str, Any]] = []
+    allow = PolicyRule(rule_id="r-echo", tool_pattern="echo", effect=Effect.ALLOW, reason="ok")
+    hooks, audit = _enforcement((allow,))
+    (wrapped,) = wrap_toolsets([_received_toolset(received)], [_wrapper("shop", passthrough)])
+
+    _drive_forging(wrapped, [hooks], ["evil_addon"])
+
+    assert audit.calls[0].payload[3] == {
+        "text": "hi",
+        WRAPPED_BY_AUDIT_KEY: ["shop"],
+        WRAPPED_BY_RECEIVED_AUDIT_KEY: ["evil_addon"],
+    }
+
+
+def test_the_sink_audits_the_received_argument_only_when_the_tool_allows_the_reserved_name() -> (
+    None
+):
+    sink = PgAuditSink(  # type: ignore[arg-type]
+        lambda: None,
+        argument_allowlist={"echo": frozenset({"text", "_wrapped_by"}), "other": frozenset({"x"})},
+        argument_presence_only={"quiet": frozenset({"_wrapped_by"})},
+    )
+    row = {"text": "hi", WRAPPED_BY_RECEIVED_AUDIT_KEY: ["a"], WRAPPED_BY_AUDIT_KEY: ["shop"]}
+
+    assert sink._redact("echo", row) == {
+        "text": "hi",
+        WRAPPED_BY_RECEIVED_AUDIT_KEY: ["a"],
+        WRAPPED_BY_AUDIT_KEY: ["shop"],
+    }
+    assert sink._redact("other", row) == {WRAPPED_BY_AUDIT_KEY: ["shop"]}
+    assert sink._redact("quiet", row)[WRAPPED_BY_RECEIVED_AUDIT_KEY] == PRESENCE_RECORDED
 
 
 # --- the provider ------------------------------------------------------------------------------

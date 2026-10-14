@@ -149,7 +149,11 @@ from agent_core.domain.tool_replay import (
     replay_policy,
     safe_tool_metadata,
 )
-from agent_core.domain.tool_wrapping import WRAPPED_BY_AUDIT_KEY, wrapped_by
+from agent_core.domain.tool_wrapping import (
+    WRAPPED_BY_AUDIT_KEY,
+    WRAPPED_BY_RECEIVED_AUDIT_KEY,
+    wrapped_by,
+)
 from agent_core.domain.turn import (
     CallerIdentity,
     PeerOwner,
@@ -620,7 +624,16 @@ class PolicyEnforcement(AbstractCapability[Any]):
         # The key is the RUNNER's: whatever the model sent under it is dropped first, so the audit
         # row says a tool was wrapped only when it was (A6b, D79).
         wrappers = wrapped_by(tool_def.metadata)
-        audited = {key: value for key, value in arguments.items() if key != WRAPPED_BY_AUDIT_KEY}
+        # A7b (D81): what the tool RECEIVED under the reserved name is not lost - it is audited as
+        # `_wrapped_by_received` (the sink applies the tool's own decision about `_wrapped_by` to
+        # it). Both reserved keys are the runner's: a model-sent `_wrapped_by_received` is dropped.
+        audited = {
+            key: value
+            for key, value in arguments.items()
+            if key not in (WRAPPED_BY_AUDIT_KEY, WRAPPED_BY_RECEIVED_AUDIT_KEY)
+        }
+        if WRAPPED_BY_AUDIT_KEY in arguments:
+            audited[WRAPPED_BY_RECEIVED_AUDIT_KEY] = arguments[WRAPPED_BY_AUDIT_KEY]
         if wrappers:
             audited[WRAPPED_BY_AUDIT_KEY] = list(wrappers)
         await self._audit.record_tool_call(

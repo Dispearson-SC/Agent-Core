@@ -79,6 +79,7 @@ from agent_core.domain.policy import PolicyDecision
 from agent_core.domain.tool_wrapping import (
     WRAPPED_BY_AUDIT_KEY,
     WRAPPED_BY_METADATA_KEY,
+    WRAPPED_BY_RECEIVED_AUDIT_KEY,
     wrapped_by,
 )
 from agent_core.domain.turn import CallerIdentity, ToolCallId, TurnId, Usage
@@ -517,10 +518,13 @@ class PgAuditSink:
         for name, value in arguments.items():
             if name == WRAPPED_BY_AUDIT_KEY:
                 continue  # not an argument: see below
-            if name in allowed:
+            # A7b (D81): an argument the tool received under the reserved name, escaped by the
+            # runner, follows the tool's own decision about `_wrapped_by`.
+            lookup = WRAPPED_BY_AUDIT_KEY if name == WRAPPED_BY_RECEIVED_AUDIT_KEY else name
+            if lookup in allowed:
                 # Typed tool params (a `date`) must survive the jsonb dump.
                 redacted[name] = value.isoformat() if isinstance(value, (date, datetime)) else value
-            elif name in presence:
+            elif lookup in presence:
                 redacted[name] = PRESENCE_RECORDED
         # A6 (D78). Which addons wrap this tool: set by the runner from the tool's metadata, kept
         # whatever the allowlist says, and only if every entry is shaped like an addon name.

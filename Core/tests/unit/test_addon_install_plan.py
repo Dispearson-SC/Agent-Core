@@ -139,3 +139,27 @@ def test_the_addons_migration_creates_the_install_state_and_never_touches_audit(
     assert "CREATE TABLE IF NOT EXISTS addons" in sql
     assert "CREATE TABLE IF NOT EXISTS addon_migrations" in sql
     assert ADDONS_MIGRATION in migrations.discover_app_migrations()
+
+
+# --- A7b: advisories of the slice 23 review ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [
+        "async def post_init(context):\n    pass\n",
+        "import functools\nasync def _inner(context):\n    pass\n"
+        "post_init = functools.partial(_inner)\n",
+    ],
+    ids=["async-def", "partial-of-async"],
+)
+def test_an_async_post_init_is_refused_at_load_instead_of_recorded_without_running(
+    tmp_path: Path, hooks: str
+) -> None:
+    _addon(tmp_path, "shop", hooks=hooks)
+
+    with pytest.raises(AddonInstallError, match="async") as caught:
+        _plans(tmp_path, ["shop"])
+
+    assert caught.value.addon == "shop" and caught.value.field == "hooks.post_init"
+    assert "def post_init" in caught.value.reason  # says what to write instead

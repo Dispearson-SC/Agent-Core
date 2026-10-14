@@ -44,7 +44,9 @@ WHAT IT NEVER DOES
 from __future__ import annotations
 
 import asyncio
+import functools
 import importlib.util
+import inspect
 import logging
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -128,7 +130,7 @@ class InstalledAddon:
     upgraded_at: datetime | None
 
 
-def _fail(addon: str, field_name: str, reason: str) -> AddonInstallError:
+def _fail(addon: str | None, field_name: str, reason: str) -> AddonInstallError:
     return AddonInstallError(addon, field_name, reason)
 
 
@@ -144,6 +146,13 @@ def _migration_files(addon: ResolvedAddon) -> tuple[MigrationFile, ...]:
         except (OSError, UnicodeDecodeError) as error:
             raise _fail(owner, "migrations", f"{path.name} cannot be read: {error}") from error
     return tuple(files)
+
+
+def _is_async(function: object) -> bool:
+    unwrapped = function
+    while isinstance(unwrapped, functools.partial):
+        unwrapped = unwrapped.func
+    return inspect.iscoroutinefunction(unwrapped)
 
 
 def _import_hook(addon: ResolvedAddon, reference: str) -> PostInit:
@@ -170,6 +179,15 @@ def _import_hook(addon: ResolvedAddon, reference: str) -> PostInit:
     function = getattr(module, function_name, None)
     if not callable(function):
         raise _fail(owner, _HOOK_FIELD, f"{relative} has no function {function_name!r}")
+    if _is_async(function):
+        # A coroutine function called without being awaited "succeeds" and runs nothing, and the
+        # version would then be recorded as installed (A7b). The hook is synchronous by contract.
+        raise _fail(
+            owner,
+            _HOOK_FIELD,
+            f"{function_name!r} in {relative} is async, and post_init is synchronous: write "
+            "`def post_init(context)`; use context.connection for database work",
+        )
     return function  # type: ignore[no-any-return]
 
 
@@ -266,7 +284,11 @@ def _install_one(
     connection: psycopg.Connection[Any], plan: AddonInstallPlan, previous: str | None
 ) -> InstallResult:
     applied = _run_migrations(connection, plan)
-    if previous == plan.version:
+    # Semantic, not textual: "1.0" and "1.0.0" are the same version (A7b); the manifest validated
+    # `plan.version` at load, the recorded one is checked in `_refuse_downgrades` before this.
+    if previous is not None and _version(plan.name, previous, "the recorded version") == _version(
+        plan.name, plan.version, "the manifest version"
+    ):
         return InstallResult(plan.name, "unchanged", previous, applied)
     try:
         with connection.transaction():
@@ -289,15 +311,41 @@ def _install_one(
     return InstallResult(plan.name, action, previous, applied)
 
 
+def _database_failure(
+    addon: str | None, step: str, error: psycopg.OperationalError
+) -> AddonInstallError:
+    """The database became unreachable or dropped the connection DURING the install pass (A7b)."""
+    return _fail(
+        addon,
+        "database",
+        f"could not {step} ({type(error).__name__}: {str(error).strip()}); nothing past this "
+        "step ran. Check that the database is reachable and start again",
+    )
+
+
 def _install_sync(conninfo: str, plans: Sequence[AddonInstallPlan]) -> tuple[InstallResult, ...]:
-    with psycopg.connect(conninfo, autocommit=True) as connection:
-        connection.execute(_LOCK_SQL)  # released when the connection closes
-        recorded = {
-            name: version
-            for name, version in connection.execute("SELECT name, version FROM addons").fetchall()
-        }
+    try:
+        connection = psycopg.connect(conninfo, autocommit=True)
+    except psycopg.OperationalError as error:
+        raise _database_failure(None, "connect to install the addons", error) from error
+    with connection:
+        try:
+            connection.execute(_LOCK_SQL)  # released when the connection closes
+            recorded = {
+                name: version
+                for name, version in connection.execute(
+                    "SELECT name, version FROM addons"
+                ).fetchall()
+            }
+        except psycopg.OperationalError as error:
+            raise _database_failure(None, "read the recorded addon versions", error) from error
         _refuse_downgrades(plans, recorded)
-        results = [_install_one(connection, plan, recorded.get(plan.name)) for plan in plans]
+        results: list[InstallResult] = []
+        for plan in plans:
+            try:
+                results.append(_install_one(connection, plan, recorded.get(plan.name)))
+            except psycopg.OperationalError as error:
+                raise _database_failure(plan.name, "run this addon's migrations", error) from error
     for result in results:
         if result.action != "unchanged" or result.applied:
             _LOG.info(

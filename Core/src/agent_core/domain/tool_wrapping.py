@@ -19,10 +19,17 @@ import re
 from collections.abc import Mapping
 from typing import Any, Final
 
-__all__ = ["WRAPPED_BY_AUDIT_KEY", "WRAPPED_BY_METADATA_KEY", "wrapped_by"]
+__all__ = [
+    "WRAPPED_BY_AUDIT_KEY",
+    "WRAPPED_BY_METADATA_KEY",
+    "WRAPPED_BY_RECEIVED_AUDIT_KEY",
+    "wrapped_by",
+]
 
 WRAPPED_BY_METADATA_KEY: Final[str] = "wrapped_by"
 WRAPPED_BY_AUDIT_KEY: Final[str] = "_wrapped_by"
+# Where an argument the tool itself RECEIVED under the reserved name is audited (A7b, D81).
+WRAPPED_BY_RECEIVED_AUDIT_KEY: Final[str] = "_wrapped_by_received"
 
 # The shape of an addon name (manifest `name`), bounded: anything else is not a name.
 _ADDON_NAME: Final = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
