@@ -55,6 +55,7 @@ from agent_core.domain.peers import (
     PeerVisibility,
     Topology,
 )
+from agent_core.domain.routing import RoutingPolicy
 from agent_core.domain.subagents import SubagentPolicy
 from agent_core.domain.typed_answer import AnswerSchemaError, canonical_schema
 
@@ -728,6 +729,30 @@ def _build_fast_steps(data: object, model_fast: object) -> tuple[StepKind, ...]:
     return tuple(dict.fromkeys(steps))
 
 
+def _build_routing(data: object) -> RoutingPolicy | None:
+    """`routing` (D95): `{router: <name>, targets: [profile ids]}`, or None. The router is an
+    addon's `provides.routers` entry; `targets` are the only profiles it may send a turn to. Both
+    are required and non-empty: a routing block that could send nowhere is a misconfiguration,
+    and one with no router would never run."""
+    if data is None:
+        return None
+    mapping = _require_mapping(data, where="routing")
+    _reject_unknown_keys(mapping, {"router", "targets"}, where="routing")
+    router = mapping.get("router")
+    if not isinstance(router, str) or not router.strip():
+        raise ProfileValidationError("routing.router must name a router")
+    targets = mapping.get("targets")
+    if (
+        not isinstance(targets, (list, tuple))
+        or not targets
+        or not all(isinstance(t, str) and t.strip() for t in targets)
+    ):
+        raise ProfileValidationError("routing.targets must be a non-empty list of profile ids")
+    return RoutingPolicy(
+        router=router.strip(), targets=tuple(dict.fromkeys(t.strip() for t in targets))
+    )
+
+
 def _build_description(data: object) -> str:
     """The description as written, or `""`. Not blank-padded: it is shown to other agents."""
     if data is None:
@@ -849,6 +874,10 @@ class AgentProfile:
     # validated answer as `data`. Part of the content hash.
     answer_schema: str | None = None
 
+    # D95. The router this profile consults before the model when a channel starts its turn, and
+    # the only profiles it may route to. None (the default) never routes. Part of the content hash.
+    routing: RoutingPolicy | None = None
+
     # D20, docs/TASKS.md#t-f1-17. Derived at load time, never read from the YAML.
     # `version` is 0 until a `ProfileVersionRegistry` assigns one: a profile that never
     # passed through a registry must not be able to claim it is version 1, because a turn
@@ -941,6 +970,7 @@ class AgentProfile:
             description=_build_description(mapping.get("description")),
             mode=_agent_mode(mapping.get("mode", defaults.mode)),
             answer_schema=_build_answer_schema(mapping.get("answer_schema")),
+            routing=_build_routing(mapping.get("routing")),
             channel_instructions=_build_fragment_map(
                 mapping.get("channel_instructions"), where="channel_instructions"
             ),
