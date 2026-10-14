@@ -63,7 +63,7 @@ def test_a_bridge_does_not_activate_unless_every_dependency_is_enabled() -> None
             assert "sample_bridge" not in names, subset
 
 
-def test_nothing_is_enabled_by_default_and_a_bridge_cannot_enable_itself() -> None:
+def test_nothing_is_enabled_when_the_variable_is_unset_or_empty() -> None:
     assert load_addons_from_environment({}) == ()
     assert load_addons_from_environment({"AGENT_CORE_ADDONS": ""}) == ()
 

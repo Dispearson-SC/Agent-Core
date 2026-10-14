@@ -229,7 +229,8 @@ what the next start does.
 The contract test `tests/contract/test_addon_boundary.py` scans every `.py` under `addons/`.
 Forbidden: `agent_core.domain`, `agent_core.application`, `agent_core.ports` and anything under
 them, and the routes around an import (`__import__`, `importlib`, `import_module`, `exec`, `eval`,
-`sys.modules`, `builtins`). Allowed: the standard library, `pydantic_ai`, other third-party
+`sys.modules`, `builtins`), including reaching a protected package through an alias or attribute
+(`import agent_core as c; c.domain`). Methods that only share a name (`obj.exec()`) are fine. Allowed: the standard library, `pydantic_ai`, other third-party
 packages, `agent_core.adapters.*` (for example `AddonInstallContext`), and the one allowed
 inner-layer surface, `agent_core.domain.tool_replay` (pure helpers to mark a tool replay-safe).
 Widening that list is a reviewed change to the test helper and to this section.

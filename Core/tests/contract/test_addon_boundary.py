@@ -39,8 +39,13 @@ SRC = REPOSITORY / "Core" / "src" / "agent_core"
         "from agent_core import domain\n",
         "from agent_core import ports as p\n",
         "import agent_core.ports.tool_policy\n",
+        "import agent_core.domain as d\n",
+        "from agent_core import domain as d\n",
+        "from agent_core import (\n    adapters,\n    ports,\n)\n",
+        "from agent_core.domain import *\n",
+        "from ..agent_core.domain import policy\n",
     ],
-    ids=lambda s: s.strip(),
+    ids=lambda s: s.strip().replace("\n", " "),
 )
 def test_the_scan_rejects_every_way_of_importing_a_protected_package(source: str) -> None:
     assert scan_source(source), source
@@ -67,6 +72,25 @@ def test_the_scan_rejects_the_dynamic_routes_around_an_import(source: str) -> No
 @pytest.mark.parametrize(
     "source",
     [
+        "import agent_core\nx = agent_core.domain.policy.PolicyRule\n",
+        "import agent_core as core\ncore.ports.audit_sink\n",
+        "import agent_core.adapters\nagent_core.application.run_turn\n",
+        "from agent_core import adapters, ports\nadapters.x\n",
+        "import sys as s\ns.modules['x'] = 1\n",
+        "import builtins as b\n",
+        "import importlib as il\nil.import_module('agent_core.domain')\n",
+    ],
+    ids=lambda s: s.strip().splitlines()[-1],
+)
+def test_the_scan_rejects_reaching_a_protected_package_without_an_import_of_it(
+    source: str,
+) -> None:
+    assert scan_source(source), source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
         "from pydantic_ai.tools import Tool\n",
         "from agent_core.adapters.driven.addons_fs.install import AddonInstallContext\n",
         "from agent_core.domain.tool_replay import safe_tool_metadata\n",
@@ -74,8 +98,19 @@ def test_the_scan_rejects_the_dynamic_routes_around_an_import(source: str) -> No
         "from agent_core import adapters\n",
         "import agent_core_addons_helper\n",
         "import json, asyncio\n",
+        # Attributes and methods that only share a name with something forbidden:
+        "class A:\n    def f(self):\n        return self.exec(1) + self.eval(2)\n",
+        "def f(connection):\n    return connection.import_module('x')\n",
+        "def f(config):\n    return config.modules, config.domain.policy, config.ports\n",
+        "def f(sys):\n    return sys.modules\n",  # a parameter, not the stdlib module
+        "def f(s):\n    return s.modules\n",
+        "import agent_core.domain.tool_replay as t\nt.safe_tool_metadata()\n",
+        "import agent_core.domain.tool_replay\nagent_core.domain.tool_replay.safe_tool_metadata\n",
+        "import agent_core\nagent_core.__version__\n",
+        "from agent_core import adapters as a\na.domain\n",  # agent_core.adapters.domain
+        "from . import helpers\nfrom .sub import x\n",
     ],
-    ids=lambda s: s.strip(),
+    ids=lambda s: s.strip().replace("\n", " "),
 )
 def test_the_scan_accepts_what_an_addon_may_use(source: str) -> None:
     assert scan_source(source) == [], source
