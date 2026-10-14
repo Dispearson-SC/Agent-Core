@@ -11,7 +11,8 @@ WHY THIS EXISTS
     where an operator already edits those. So a fragment may read the settings of the addon that
     ships it, through a deliberately small language:
 
-        {{setting:name}}                   inline; replaced by the setting's value
+        {{setting:name}}                   inline; replaced by the setting's value (a list as
+                                       `a, b, c`)
         {{if:name}}                        a block, each marker alone on its line;
         ...                                kept when the setting is true (a non-empty string, a
         {{endif}}                          non-zero number, `true`), dropped with its markers if not
@@ -56,6 +57,13 @@ def _value(settings: Mapping[str, Any], name: str) -> Any:
     return settings[name]
 
 
+def _text(value: Any) -> str:
+    """A setting as prose: a list reads as an enumeration, anything else as `str()`."""
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value)
+    return str(value)
+
+
 def render_fragment(text: str, settings: Mapping[str, Any]) -> str:
     """`text` with `{{setting:x}}` replaced and `{{if:x}}` blocks kept or dropped."""
     out: list[str] = []
@@ -82,7 +90,7 @@ def render_fragment(text: str, settings: Mapping[str, Any]) -> str:
                 f"{{{{if:...}}}} and {{{{endif}}}} must each be alone on their line: {line!r}"
             )
         if keep:
-            out.append(_SETTING.sub(lambda m: str(_value(settings, m.group(1))), line))
+            out.append(_SETTING.sub(lambda m: _text(_value(settings, m.group(1))), line))
     if open_block is not None:
         raise ValueError(f"{{{{if:{open_block}}}}} is never closed by {{{{endif}}}}")
     return "\n".join(out)

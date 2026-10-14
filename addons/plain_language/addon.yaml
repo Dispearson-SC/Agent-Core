@@ -1,0 +1,44 @@
+# Plain language (Phase 3, G4): a generic prompt addon. It gives an agent the habit of talking to a reader
+# who is not an expert: everyday words, no jargon, depth only when asked, and, when the deployment turns
+# it on, a short spoken style for answers that are read aloud. It names no vertical, no domain and no
+# language: the audience, the language, the terms to avoid and the voice marker are settings.
+#
+# HOW A PROFILE USES IT. The profile declares the slot and marks where the text goes:
+#
+#     slots: {plain_language: []}
+#     persona: |
+#       ...
+#       {{slot:plain_language}}
+#
+# and the fragment is inserted into every profile that declares that slot (`profile: "*"`, D89). A profile
+# that does not declare the slot is untouched. Enabling the addon when no profile declares the slot stops
+# startup naming it.
+name: plain_language
+version: 1.0.0
+core: ">=0.0,<1"
+provides:
+  fragments: fragments/
+  inserts:
+    - {profile: "*", slot: plain_language, fragment: plain_language}
+settings:
+  audience:
+    type: str
+    default: someone without a technical background
+    description: Who reads the answers, in a few words ("a school teacher", "a night-shift nurse").
+  language:
+    type: str
+    default: ""
+    description: The language every answer is written in, by name. Empty adds no language rule.
+  avoided_terms:
+    type: list
+    items: str
+    default: []
+    description: Technical words the agent must never use, in the answer's language. Empty adds no list.
+  voice_style:
+    type: bool
+    default: false
+    description: Add the short spoken style for answers that are read aloud.
+  voice_marker:
+    type: str
+    default: "[voice]"
+    description: The tag that starts a message when the reader is talking and the answer will be spoken.

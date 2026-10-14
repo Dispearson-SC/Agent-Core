@@ -3236,3 +3236,18 @@ decision 2026-10-13) and are described by `addon.yaml`.
   reviewer can hold), and rendering at read time with the environment (the settings are already
   validated at startup). Consequence: a literal `{{setting:...}}` or `{{if:...}}` in an addon fragment
   cannot be written; no escape is added (reversible: add one if an author needs it).
+- **The addon `plain_language`.** One fragment, no code, inserted at the slot `plain_language` of every
+  profile that declares it. It is the "How to talk to the manager" section of the glazed orchestrator,
+  generalized: plain vocabulary in every channel, depth kept in text, adaptive depth when the reader asks,
+  and (setting `voice_style`) a short spoken style keyed on a tag that starts the message
+  (`voice_marker`, default `[voice]`; the glazed addon will set `[canal: voz]`). Settings: `audience`,
+  `language` (empty = no language rule), `avoided_terms` (the jargon list; glazed's Spanish list is G5's),
+  `voice_style`, `voice_marker`. Not carried over because they are glazed's: the Spanish jargon list, the
+  "rounded dollars" example, the Spanish examples and the "manager" wording. The voice cue is a tag in the
+  message, as glazed's was, not the runner's `modality` hint: a modality hint is selected by a profile's
+  own `modality_instructions`, which an addon cannot add to another's profile. Open: a profile that
+  already has `modality_instructions.voice` can use those instead and leave `voice_style` off.
+- **Ported tests.** `test_glazed_prompts.py` has 33 tests; one concerns this text
+  (`test_orchestrator_has_the_manager_communication_section`) and is ported in generic form to
+  `test_plain_language_addon.py`. The other 32 are about the eight glazed personas (and the tool
+  docstrings) and stay for G5 (docstrings are already covered by the contract tests of G2).

@@ -26,13 +26,27 @@ from agent_core.adapters.driven.profiles_fs.fragments import AddonFragment, rend
 from agent_core.adapters.driven.profiles_fs.loader import fragment_reader, parse_profile
 from agent_core.composition import TOOL_PACKAGES
 
-SETTINGS = {"audience": "a shop manager", "voice": True, "quiet": False, "limit": 3, "empty": ""}
+SETTINGS = {
+    "audience": "a shop manager",
+    "voice": True,
+    "quiet": False,
+    "limit": 3,
+    "empty": "",
+    "terms": ["alpha", "beta"],
+    "none": [],
+}
 
 
 def test_a_setting_replaces_its_placeholder_inline() -> None:
     text = "Write for {{setting:audience}}, at most {{setting:limit}} lines."
 
     assert render_fragment(text, SETTINGS) == "Write for a shop manager, at most 3 lines."
+
+
+def test_a_list_setting_reads_as_a_comma_separated_enumeration_and_empty_is_false() -> None:
+    assert render_fragment("Avoid: {{setting:terms}}.", SETTINGS) == "Avoid: alpha, beta."
+    assert render_fragment("{{if:none}}\nx\n{{endif}}\ny", SETTINGS) == "y"
+    assert render_fragment("{{if:terms}}\nx\n{{endif}}", SETTINGS) == "x"
 
 
 def test_text_without_markers_comes_back_unchanged() -> None:

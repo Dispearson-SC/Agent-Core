@@ -4,7 +4,7 @@ An addon is how a vertical adds to Agent-Core without patching it: tools, policy
 prompt text, profiles, channels, tool wrappers and database tables, all declared in one manifest.
 This is the authoring guide. The operator's side (variables, startup errors) is
 [OPERATIONS.md](OPERATIONS.md#addons-enabling-them-and-setting-them-phase-2-d70-d72); the design is
-[ARCHITECTURE.md](ARCHITECTURE.md#addons-phase-2); the decisions are D70-D88 in
+[ARCHITECTURE.md](ARCHITECTURE.md#addons-phase-2); the decisions are D70-D89 in
 [DECISIONS.md](DECISIONS.md). The shipped samples in `addons/sample_*` are the worked examples and
 are loaded by the contract tests, so they cannot drift from the rules below.
 
@@ -170,6 +170,21 @@ A fragment of an addon may use the addon's own validated settings through two fo
 each sit alone on a line (kept when the setting is true: a non-empty string, a non-zero number, `true`).
 An undeclared name, an unclosed or nested block and a stray `{{endif}}` stop startup naming the addon and
 the file. Core's own fragments are never rendered.
+
+`addons/plain_language` (D89) is the shipped example of both: a generic addon with one fragment, no code
+and no vertical in it. A profile opts in by declaring the slot:
+
+```yaml
+slots: {plain_language: []}
+persona: |
+  You help with orders.
+
+  {{slot:plain_language}}
+```
+
+and the operator edits the style in settings (`AGENT_CORE_ADDON__PLAIN_LANGUAGE__AUDIENCE`, `__LANGUAGE`,
+`__AVOIDED_TERMS`, `__VOICE_STYLE`, `__VOICE_MARKER`). With `voice_style` on, a message that starts with
+the marker is answered in short spoken sentences with no markdown.
 
 ## Wrappers (the `super()` analogue)
 
