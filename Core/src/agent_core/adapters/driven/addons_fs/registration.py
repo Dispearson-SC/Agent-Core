@@ -528,7 +528,7 @@ def _intents_of(
     try:
         document = yaml.safe_load((addon.root / relative).read_text(encoding="utf-8"))
         plans = parse_intent_plans(document, source=relative)
-    except (IntentPlanError, yaml.YAMLError, OSError) as error:
+    except (IntentPlanError, UnicodeDecodeError, yaml.YAMLError, OSError) as error:
         raise _refuse(owner, "provides.intents", str(error)) from error
     for intent, plan in plans.items():
         if intent in taken:

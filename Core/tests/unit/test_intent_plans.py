@@ -412,6 +412,15 @@ def test_a_malformed_plans_file_stops_startup_naming_the_addon(tmp_path: Path) -
         _register(tmp_path, ["shop"])
 
 
+def test_a_plans_file_that_is_not_utf8_stops_startup_naming_the_addon(tmp_path: Path) -> None:
+    """Slice 36 warning: a plans file that does not decode is the addon's mistake, refused naming
+    the addon like any other malformed plan, never a bare UnicodeDecodeError out of startup."""
+    _addon(tmp_path, "shop", _one("pricing_quote"))
+    (tmp_path / "shop" / "plans.yaml").write_bytes(b"intents:\n  x: \xff\xfe\n")
+    with pytest.raises(AddonRegistrationError, match="shop"):
+        _register(tmp_path, ["shop"])
+
+
 def test_a_declared_plans_file_must_exist(tmp_path: Path) -> None:
     _addon(tmp_path, "shop", _one("pricing_quote"))
     (tmp_path / "shop" / "plans.yaml").unlink()

@@ -295,3 +295,34 @@ def test_a_profile_or_pass_turn_never_reads_the_event_feed() -> None:
 
     assert asyncio.run(scenario()) is None
     assert "/turns/t1/events" not in seen
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        httpx.Response(500, text="boom"),
+        httpx.Response(200, content=b"event: snapshot\ndata: {not json\n\n"),
+        httpx.Response(200, content=b"event: snapshot\ndata: [1, 2]\n\n"),
+    ],
+    ids=["http_500", "bad_json", "not_a_mapping"],
+)
+def test_a_finished_turn_whose_plan_cannot_be_read_is_still_finished(
+    events: httpx.Response,
+) -> None:
+    """Slice 36 warning: the turn finished; reading HOW its plan ended is a diagnostic, and a
+    failure reading it reports no plan instead of turning a finished turn into a failed one."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"turn_id": "t1", "status": "accepted"})
+        if request.url.path.endswith("/events"):
+            return events
+        return httpx.Response(200, json={"turn_id": "t1", "status": "finished", "text": "x"})
+
+    async def scenario() -> object:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport, base_url="http://core") as client:
+            driver = HttpTurnDriver(client, headers={}, poll_seconds=0)
+            return await driver.run(Question("q", "x", "intent:x"), "intent:x", "front_desk")
+
+    assert asyncio.run(scenario()) is None

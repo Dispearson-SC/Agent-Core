@@ -405,6 +405,13 @@ def test_an_answer_may_carry_its_reason_elapsed_time_and_usage_which_are_logged_
         {"decision": "pass", "elapsed_ms": True},
         {"decision": "pass", "usage": ["tokens"]},
         {"decision": "pass", "usage": {"input_tokens": "many"}},
+        # Slice 36 warning: a count the audit column cannot hold, or a usage map that grows with
+        # whatever the router said, is malformed here, not an audit write that fails later and
+        # leaves the route unapplied for a reason that names the audit.
+        {"decision": "pass", "usage": {"input_tokens": 2**31}},
+        {"decision": "pass", "usage": {"input_tokens": -1}},
+        {"decision": "pass", "usage": {f"k{i}": 1 for i in range(17)}},
+        {"decision": "pass", "usage": {"x" * 65: 1}},
     ],
 )
 def test_malformed_diagnostics_are_a_malformed_answer(answer: dict[str, Any]) -> None:

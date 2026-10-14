@@ -231,6 +231,14 @@ def _optional_text(answer: Mapping[str, Any], key: str) -> str | None:
     return value
 
 
+# The usage an answer may carry: what the audit row's INTEGER columns hold, and a map that does not
+# grow with whatever the router said (slice 36). Past these the answer is malformed, like any other
+# bad diagnostic, rather than an audit write that fails after the route was decided.
+_MAX_USAGE_KEYS = 16
+_MAX_USAGE_NAME = 64
+_MAX_TOKEN_COUNT = 2**31 - 1
+
+
 def decision_from_mapping(answer: object) -> RouteDecision:
     """The `RouteDecision` a router's plain answer describes. Raises on anything malformed."""
     if not isinstance(answer, Mapping):
@@ -276,8 +284,19 @@ def _check_diagnostics(answer: Mapping[str, Any]) -> None:
     usage = answer.get("usage")
     if usage is None:
         return
-    if not isinstance(usage, Mapping) or not all(
-        isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool)
-        for key, value in usage.items()
+    if (
+        not isinstance(usage, Mapping)
+        or len(usage) > _MAX_USAGE_KEYS
+        or not all(
+            isinstance(key, str)
+            and len(key) <= _MAX_USAGE_NAME
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and 0 <= value <= _MAX_TOKEN_COUNT
+            for key, value in usage.items()
+        )
     ):
-        raise ValueError("router answer 'usage' must map names to whole numbers")
+        raise ValueError(
+            f"router answer 'usage' must map at most {_MAX_USAGE_KEYS} short names to whole "
+            f"numbers between 0 and {_MAX_TOKEN_COUNT}"
+        )

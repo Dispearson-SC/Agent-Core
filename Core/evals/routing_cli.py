@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import sys
@@ -80,6 +81,8 @@ DEFAULT_TURN_TIMEOUT: Final = 180.0
 DONE_STATUSES: Final = frozenset({"finished"})
 IN_PROGRESS_STATUSES: Final = frozenset({"running"})
 STOPPED_STATUSES: Final = frozenset({"waiting"})
+
+_LOG = logging.getLogger(__name__)
 
 
 class TurnNotFinishedError(RuntimeError):
@@ -133,7 +136,7 @@ class HttpTurnDriver:
             if not isinstance(status, str):
                 raise UnknownTurnStatusError(f"turn {turn_id} has an unknown status {status!r}")
             if status in DONE_STATUSES:
-                return await self._plan_of(turn_id) if route.startswith("intent:") else None
+                return await self._plan_or_none(turn_id) if route.startswith("intent:") else None
             if status in STOPPED_STATUSES:
                 raise TurnNotFinishedError(f"turn {turn_id} stopped {status!r}, not finished")
             if status not in IN_PROGRESS_STATUSES:
@@ -142,6 +145,15 @@ class HttpTurnDriver:
                 raise TimeoutError(f"turn {turn_id} still running after {self._timeout}s")
             await asyncio.sleep(self._poll)
 
+
+    async def _plan_or_none(self, turn_id: str) -> str | None:
+        """`_plan_of`, or None when the feed cannot be read: the turn already finished, and how its
+        plan ended is a diagnostic that must never turn a finished turn into a failed one."""
+        try:
+            return await self._plan_of(turn_id)
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+            _LOG.warning("could not read the plan of turn %s; reporting none", turn_id)
+            return None
 
     async def _plan_of(self, turn_id: str) -> str | None:
         """The `plan` of the turn in the first snapshot of its event feed (D97), or None."""
