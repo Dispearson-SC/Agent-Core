@@ -1,0 +1,83 @@
+# System One router (Phase 5, P2): a generic turn router (D95) that classifies what a person said with a
+# System One model through the official Typesafe API (`POST <base_url>/v1/systemone`, docs.typesafe.ai),
+# before the main model reasons about it. It names no vertical: the routes are data in a routes file the
+# deployment points at.
+#
+# WHAT IT ASKS. One `choice` question over the configured routes plus an escape option. Each route is
+# {label, description, target}: `profile:<id>` sends the turn to that profile, `intent:<name>` answers a
+# typed intent. The escape option or a confidence below `threshold` is a `pass`: the normal path runs.
+# A missing key, an HTTP error, a timeout or a malformed answer is a `pass` too, with its reason.
+# Typesafe's confidence is the sharpness of the distribution, not a calibrated probability, so every
+# answer says calibrated=false.
+#
+# THE KEY is read from the environment variable `api_key_env` names, at call time; it is never a setting,
+# never logged and never part of an answer.
+#
+# A router is not a safety barrier: a route only picks which profile runs, inside `routing.targets`, and
+# that profile runs with its full policy and approvals. Enable it with AGENT_CORE_ADDONS, opt a profile in
+# with `routing: {router: system_one, targets: [...]}` and turn routing on (AGENT_CORE_TURN_ROUTING).
+name: system_one_router
+version: 1.0.0
+core: ">=0.0,<1"
+provides:
+  # routers/system_one.py defines `async route(request, settings)` returning a plain mapping.
+  routers:
+    - system_one
+settings:
+  api_key_env:
+    type: str
+    default: TYPESAFE_API_KEY
+    description: Name of the environment variable that holds the API key (read at call time).
+  base_url:
+    type: str
+    default: https://api.typesafe.ai
+    description: Base URL of the Typesafe API; the router posts to <base_url>/v1/systemone.
+  model:
+    type: str
+    default: jev-latest
+    description: The System One model to ask.
+  timeout_ms:
+    type: int
+    default: 800
+    minimum: 50
+    maximum: 10000
+    description: >-
+      Total time budget of one classification, retry included. Keep it below Core's
+      AGENT_CORE_TURN_ROUTER_TIMEOUT_MS (default 1500) so the router answers `pass` itself.
+  threshold:
+    type: float
+    default: 0.5
+    minimum: 0.0
+    maximum: 1.0
+    description: A choice whose confidence is below this passes (the normal path runs).
+  escape_label:
+    type: str
+    default: none_of_these
+    description: The extra option meaning "no route fits"; choosing it passes.
+  escape_description:
+    type: str
+    default: >-
+      The message fits none of the other options, needs several of them at once, or is small talk.
+    description: The criteria text of the escape option (a routes file may override it).
+  instructions:
+    type: str
+    default: Which option best describes what this message asks for?
+    description: The question asked about the message (a routes file may override it).
+  routes_file:
+    type: str
+    description: >-
+      Required. YAML file with `routes: [{label, description, target}]` and optional `instructions`
+      and `escape_description`. A relative path is read from the addons root directory.
+  state_fields:
+    type: list
+    items: str
+    default: [text]
+    description: >-
+      What the classifier reads: any of text, profile_id, channel, modality. Only `text` sends the
+      plain text; more fields send an object of them.
+  retry_backoff_ms:
+    type: int
+    default: 100
+    minimum: 0
+    maximum: 5000
+    description: Wait before the one retry of a 429 or 529, taken only when the retry fits timeout_ms.

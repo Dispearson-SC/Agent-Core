@@ -241,6 +241,63 @@ or one that raises runs the turn as asked. Each consultation is one `audit_turn_
 `routed` progress event; the decision is a recorded workflow step, so a recovered turn never asks
 the router again. With `AGENT_CORE_TURN_ROUTING` off (the default) nothing is consulted.
 
+A router may add three diagnostic keys: `reason` (why it answered so, e.g. `below_threshold`),
+`elapsed_ms` and `usage` (`{name: whole number}`). They are validated like the rest and logged at
+INFO with the router's name, label, confidence and model (never the person's text); they do not
+change the decision. A sync `route` runs on a capped daemon thread in a copy of the caller's
+context; a call over the cap waits up to 0.25 s for a slot, then runs the turn as asked.
+
+### The System One router (`system_one_router`, Phase 5 P2)
+
+A generic router over a System One classifier through the official Typesafe API
+(`POST <base_url>/v1/systemone`, docs.typesafe.ai). It asks one `choice` question whose options
+are the routes of a routes file plus an escape option, and answers:
+
+| Typesafe said | Router answers |
+|---|---|
+| a route label, confidence >= `threshold` | `route` (`profile:<id>`) or `intent` (`intent:<name>`) |
+| the escape label | `pass`, reason `escape` |
+| a route label below `threshold` | `pass`, reason `below_threshold` (label and confidence kept) |
+| no key, HTTP error, timeout, transport error, malformed body | `pass`, reason `missing_api_key`, `http_<status>`, `timeout`, `network_error:<Class>`, `bad_response` |
+
+Every answer carries `calibrated: false` (Typesafe's confidence is distribution sharpness, with no
+calibration claim), `elapsed_ms`, and when the API answered, `model` and `usage`. 429 and 529 are
+retried once, only when the retry fits `timeout_ms`. A missing or malformed routes file raises, so
+Core records `error:SystemOneConfigError` instead of passing silently.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `api_key_env` | `TYPESAFE_API_KEY` | environment variable holding the key, read at call time; never a setting value, never logged |
+| `base_url` | `https://api.typesafe.ai` | API base URL |
+| `model` | `jev-latest` | System One model |
+| `timeout_ms` | 800 | whole-call budget, retry included; keep it below `AGENT_CORE_TURN_ROUTER_TIMEOUT_MS` |
+| `threshold` | 0.5 | below it the router passes (Typesafe's own example uses 0.5; 0.9 for high stakes) |
+| `escape_label` / `escape_description` | `none_of_these` / "fits none ..." | the "no route fits" option |
+| `instructions` | "Which option best describes ..." | the question asked |
+| `routes_file` | required | YAML routes file; relative paths are read from the addons root |
+| `state_fields` | `[text]` | what the classifier reads: `text`, `profile_id`, `channel`, `modality` (more than `text` sends an object) |
+| `retry_backoff_ms` | 100 | wait before the one 429/529 retry |
+
+```yaml
+# a routes file
+instructions: Which team should answer this message?   # optional, overrides the setting
+escape_description: Several teams, or small talk       # optional
+routes:
+  - {label: billing, description: Invoices, refunds and payments, target: "profile:billing"}
+  - {label: opening_hours, description: When the shop is open, target: "intent:opening_hours"}
+```
+
+```
+AGENT_CORE_ADDONS=...,system_one_router
+AGENT_CORE_ADDON__SYSTEM_ONE_ROUTER__ROUTES_FILE=<vertical>/routing/routes.yaml
+AGENT_CORE_ADDON__SYSTEM_ONE_ROUTER__API_KEY_ENV=TYPESAFE_API_KEY   # or the deployment's own name
+AGENT_CORE_TURN_ROUTING=true
+```
+
+and the entry profile opts in with `routing: {router: system_one, targets: [...]}`. httpx is used
+directly (already a Core dependency) rather than `typesafe-sdk`: the contract is one POST and the
+router owns its time budget.
+
 ## Settings
 
 `settings:` in the manifest is the schema; it is the only thing a vertical edits.
