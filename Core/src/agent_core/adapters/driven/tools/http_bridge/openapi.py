@@ -71,11 +71,28 @@ Transport = httpx.BaseTransport | httpx.AsyncBaseTransport
 # several toolsets builds the same bridge several times and the backend is asked once. The
 # transport is part of the key (G2b): a document fetched through one transport (a test double, a
 # second backend's own route) is never served to a build that uses another. A failed fetch is never
-# stored. Builds racing for one key wait on that key's lock, so the backend is still asked once
-# (slice 29); other keys are not held up. Tests call `clear_openapi_cache()`.
+# stored. Builds racing for one key wait for the one fetch in flight (`_Flight`), so the backend is
+# still asked once (slice 29); other keys are not held up. Tests call `clear_openapi_cache()`, which
+# forgets the stored documents but never a fetch in flight (slice 30): its builds still share it.
 _FETCHED: dict[tuple[str, Transport | None], dict[str, Any]] = {}
-_FETCHING: dict[tuple[str, Transport | None], threading.Lock] = {}
+_IN_FLIGHT: dict[tuple[str, Transport | None], _Flight] = {}
 _FETCH_LOCK = threading.Lock()
+
+
+class _Flight:
+    """One fetch in progress: the builds that find it wait for its outcome instead of fetching."""
+
+    def __init__(self) -> None:
+        self._done = threading.Event()
+        self.document: dict[str, Any] | None = None
+
+    def wait(self) -> None:
+        self._done.wait()
+
+    def finish(self, document: dict[str, Any] | None) -> None:
+        self.document = document
+        self._done.set()
+
 
 _METHODS = ("get", "post", "put", "patch", "delete")
 _TYPES = ("string", "integer", "number", "boolean", "array", "object")
@@ -83,10 +100,13 @@ _OVERLAY_KEYS = {"api_prefix", "defaults", "tools"}
 
 
 def clear_openapi_cache() -> None:
-    """Forget every fetched document, so the next build asks the backend again."""
+    """Forget every fetched document, so the next build asks the backend again.
+
+    A fetch still in flight is not forgotten: the builds waiting for it, and any that starts before
+    it ends, are answered by that one fetch (slice 30 advisory).
+    """
     with _FETCH_LOCK:
         _FETCHED.clear()
-        _FETCHING.clear()
 
 
 class OpenApiContractError(BridgeManifestError):
@@ -150,19 +170,31 @@ def _load_document(
 def _fetched(url: str, timeout: float, transport: Transport | None) -> dict[str, Any]:
     """The document at `url` through `transport`, asked for once per process (G1c)."""
     key = (url, transport)
-    with _FETCH_LOCK:
-        cached = _FETCHED.get(key)
-        if cached is not None:
-            return cached
-        fetching = _FETCHING.setdefault(key, threading.Lock())
-    with fetching:  # a build racing for the same key waits here instead of fetching again
+    while True:
         with _FETCH_LOCK:
             cached = _FETCHED.get(key)
-        if cached is not None:
-            return cached
+            if cached is not None:
+                return cached
+            flight = _IN_FLIGHT.get(key)
+            if flight is None:
+                flight = _IN_FLIGHT[key] = _Flight()
+                break  # this build fetches
+        flight.wait()  # a build racing for the same key waits here instead of fetching again
+        if flight.document is not None:
+            return flight.document
+        # that fetch failed (and raised in its own build): this build tries on its own
+    try:
         document = _fetch(url, timeout, transport)
+    except BaseException:
         with _FETCH_LOCK:
-            return _FETCHED.setdefault(key, document)
+            _IN_FLIGHT.pop(key, None)
+        flight.finish(None)
+        raise
+    with _FETCH_LOCK:
+        stored = _FETCHED.setdefault(key, document)
+        _IN_FLIGHT.pop(key, None)
+    flight.finish(stored)
+    return stored
 
 
 def _fetch(url: str, timeout: float, transport: Transport | None) -> dict[str, Any]:

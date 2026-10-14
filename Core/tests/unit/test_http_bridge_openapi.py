@@ -10,7 +10,6 @@ import asyncio
 import copy
 import json
 import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,6 +23,7 @@ from agent_core.adapters.driven.tools.http_bridge import (
     BridgeSettings,
     build_bridge_toolset,
 )
+from agent_core.adapters.driven.tools.http_bridge import openapi as openapi_module
 from agent_core.adapters.driven.tools.http_bridge.openapi import (
     OpenApiContractError,
     clear_openapi_cache,
@@ -914,32 +914,102 @@ def test_a_manual_tool_pin_must_agree_with_its_own_method_and_route() -> None:
         load_openapi_manifest(_spec(), overlay=overlay)
 
 
-def test_builds_racing_at_startup_ask_the_backend_once() -> None:
+class _Overlap:
+    """Two builds of one URL made to overlap deterministically (slice 30 advisory: no sleeps).
+
+    The backend holds the FIRST fetch until `release`. The second build then either waits for that
+    fetch (the module's `_Flight.wait`, patched to report it) or asks the backend itself (a second
+    request, answered at once); both set `second_arrived`, so the test releases the first fetch only
+    once the second build has committed to one of the two paths, whatever the scheduler does.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.fetched: list[str] = []
+        self.first_in_flight = threading.Event()
+        self.second_arrived = threading.Event()
+        self.release = threading.Event()
+        self.results: list[object] = []
+        self.transport = httpx.MockTransport(self._handler)
+        overlap = self
+        flight = getattr(openapi_module, "_Flight", None)
+        if flight is not None:
+
+            class _Reporting(flight):  # type: ignore[misc, valid-type]
+                def wait(self) -> None:
+                    overlap.second_arrived.set()
+                    super().wait()
+
+            monkeypatch.setattr(openapi_module, "_Flight", _Reporting)
+
+    def _handler(self, request: httpx.Request) -> httpx.Response:
+        self.fetched.append(str(request.url))
+        if len(self.fetched) == 1:
+            self.first_in_flight.set()
+            assert self.release.wait(10), "the test never released the first fetch"
+        else:
+            self.second_arrived.set()
+        return httpx.Response(200, json=_spec())
+
+    def build(self) -> threading.Thread:
+        thread = threading.Thread(
+            target=lambda: self.results.append(load_openapi_manifest(URL, transport=self.transport))
+        )
+        thread.start()
+        return thread
+
+
+def test_builds_racing_at_startup_ask_the_backend_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """Slice 29 advisory (openapi.py:147): the cache was checked, then the lock released for the
     fetch, so two toolsets built at the same time both missed and both asked the backend. One URL
-    and transport is fetched once even when the builds overlap; the second waits for the first."""
+    and transport is fetched once even when the builds overlap; the second waits for the first.
+    Slice 30 advisory: the overlap is forced by events, never by a sleep."""
+    race = _Overlap(monkeypatch)
+
+    first = race.build()
+    assert race.first_in_flight.wait(10)
+    second = race.build()
+    assert race.second_arrived.wait(10)
+    race.release.set()
+    first.join(10)
+    second.join(10)
+
+    assert len(race.results) == 2
+    assert race.fetched == [URL]
+
+
+def test_clearing_the_cache_mid_fetch_does_not_make_the_next_build_ask_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slice 30 advisory (openapi.py:90): `clear_openapi_cache` also dropped the per-key lock of a
+    fetch in flight, so a build started after the clear made a fresh lock and asked the backend a
+    second time. A clear forgets the documents already fetched; a fetch in flight still answers
+    every build that waits for it."""
+    race = _Overlap(monkeypatch)
+
+    first = race.build()
+    assert race.first_in_flight.wait(10)
+    clear_openapi_cache()
+    second = race.build()
+    assert race.second_arrived.wait(10)
+    race.release.set()
+    first.join(10)
+    second.join(10)
+
+    assert len(race.results) == 2
+    assert race.fetched == [URL]
+
+
+def test_a_clear_after_the_fetch_forgets_the_document() -> None:
     fetched: list[str] = []
-    release = threading.Event()
 
     def handler(request: httpx.Request) -> httpx.Response:
         fetched.append(str(request.url))
-        release.wait(5)  # the first fetch is still in flight while the second build starts
         return httpx.Response(200, json=_spec())
 
     transport = httpx.MockTransport(handler)
-    results: list[object] = []
-    builds = [
-        threading.Thread(
-            target=lambda: results.append(load_openapi_manifest(URL, transport=transport))
-        )
-        for _ in range(2)
-    ]
-    for build in builds:
-        build.start()
-    time.sleep(0.3)
-    release.set()
-    for build in builds:
-        build.join(10)
+    load_openapi_manifest(URL, transport=transport)
+    load_openapi_manifest(URL, transport=transport)
+    clear_openapi_cache()
+    load_openapi_manifest(URL, transport=transport)
 
-    assert len(results) == 2
-    assert fetched == [URL]
+    assert fetched == [URL, URL]
