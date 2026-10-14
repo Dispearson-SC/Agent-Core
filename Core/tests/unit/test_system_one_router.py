@@ -537,3 +537,45 @@ def test_the_manifest_documents_every_setting() -> None:
     ):
         assert f"  {key}:" in manifest, key
     assert manifest.count("description:") >= 11
+
+
+def test_an_edited_routes_file_is_reloaded_even_when_its_mtime_did_not_move(
+    tmp_path: Path,
+) -> None:
+    """Slice 35 advisory: the parsed table is cached per file version, and the version is more than
+    the modification time (a coarse clock, or an edit restoring the old time, keeps it)."""
+    import os
+
+    settings = _settings(tmp_path)
+    routes = Path(settings["routes_file"])
+    first = SYSTEM_ONE.load_routes(settings)
+    stamp = routes.stat().st_mtime_ns
+    routes.write_text(
+        ROUTES + "  - label: returns\n    description: Returns\n    target: profile:returns\n",
+        encoding="utf-8",
+    )
+    os.utime(routes, ns=(stamp, stamp))
+
+    second = SYSTEM_ONE.load_routes(settings)
+
+    assert [r.label for r in first.routes] == ["billing", "opening_hours"]
+    assert [r.label for r in second.routes] == ["billing", "opening_hours", "returns"]
+
+
+def test_an_unchanged_routes_file_is_parsed_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    SYSTEM_ONE.load_routes(settings)
+    parsed: list[object] = []
+    real = SYSTEM_ONE.parse_routes
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        parsed.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(SYSTEM_ONE, "parse_routes", counting)
+    SYSTEM_ONE.load_routes(settings)
+    SYSTEM_ONE.load_routes(settings)
+
+    assert parsed == []

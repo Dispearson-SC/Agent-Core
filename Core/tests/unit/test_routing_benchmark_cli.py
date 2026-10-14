@@ -205,3 +205,34 @@ def test_an_unknown_turn_status_stops_the_poll_naming_it() -> None:
 
 def test_only_a_finished_turn_ends_the_poll_successfully() -> None:
     asyncio.run(_driver_against(["running", "running", "finished"])())
+
+
+@pytest.mark.parametrize("status", [None, "", "Finished", "accepted", ["finished"]])
+def test_a_status_outside_the_known_ones_is_an_unknown_status_error(status: object) -> None:
+    """Slice 35 advisory: the poll knows its statuses explicitly (one done, one in progress, the
+    stopped ones); anything else is its own error, never read as done or as still running."""
+    from evals.routing_cli import UnknownTurnStatusError
+
+    polls = iter([status])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"turn_id": "t1", "status": "accepted"})
+        return httpx.Response(200, json={"turn_id": "t1", "status": next(polls), "text": None})
+
+    async def scenario() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport, base_url="http://core") as client:
+            driver = HttpTurnDriver(client, headers={}, poll_seconds=0, timeout_seconds=5)
+            await driver.run(Question("q", "x", "pass"), "pass", "front_desk")
+
+    with pytest.raises(UnknownTurnStatusError, match="unknown status"):
+        asyncio.run(scenario())
+
+
+def test_the_poll_statuses_are_an_explicit_allowlist() -> None:
+    from evals import routing_cli
+
+    assert routing_cli.DONE_STATUSES == frozenset({"finished"})
+    assert routing_cli.IN_PROGRESS_STATUSES == frozenset({"running"})
+    assert routing_cli.STOPPED_STATUSES == frozenset({"waiting"})

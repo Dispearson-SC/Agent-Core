@@ -89,7 +89,9 @@ class RouteTable:
         return {route.label: route for route in self.routes}
 
 
-_tables: dict[tuple[Path, int], RouteTable] = {}
+# Keyed by the file's version: modification time, size and inode. The time alone misses an edit
+# that lands within the clock's granularity or restores the old time (slice 35).
+_tables: dict[tuple[Path, int, int, int], RouteTable] = {}
 _clients: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = (
     weakref.WeakKeyDictionary()
 )
@@ -164,10 +166,11 @@ def load_routes(settings: Mapping[str, Any]) -> RouteTable:
         raise SystemOneConfigError("the routes file setting `routes_file` is not set")
     path = resolve_routes_file(raw)
     try:
-        stamp = path.stat().st_mtime_ns
+        status = path.stat()
     except OSError:
         raise SystemOneConfigError(f"routes file {path} cannot be read") from None
-    cached = _tables.get((path, stamp))
+    stamp = (path, status.st_mtime_ns, status.st_size, status.st_ino)
+    cached = _tables.get(stamp)
     if cached is not None:
         return cached
     try:
@@ -178,7 +181,7 @@ def load_routes(settings: Mapping[str, Any]) -> RouteTable:
         ) from None
     table = parse_routes(document, escape_label=settings["escape_label"], source=str(path))
     _tables.clear()
-    _tables[(path, stamp)] = table
+    _tables[stamp] = table
     return table
 
 

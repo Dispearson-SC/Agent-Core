@@ -58,18 +58,34 @@ from evals.routing import (
     write_routing_report,
 )
 
-__all__ = ["HttpTurnDriver", "TurnNotFinishedError", "main"]
+__all__ = [
+    "DONE_STATUSES",
+    "IN_PROGRESS_STATUSES",
+    "STOPPED_STATUSES",
+    "HttpTurnDriver",
+    "TurnNotFinishedError",
+    "UnknownTurnStatusError",
+    "main",
+]
 
 KEYWORD: Final = "keyword"
 DEFAULT_REPORT_DIR: Final = "evals/reports"
 DEFAULT_TURN_TIMEOUT: Final = 180.0
-_FINISHED: Final = "finished"
-_RUNNING: Final = "running"
+# What `GET /turns/{id}` may say, explicitly (slice 35): a turn is timed only when done, polled
+# again only while it is in progress, and a failed turn when it stopped or says anything else.
+DONE_STATUSES: Final = frozenset({"finished"})
+IN_PROGRESS_STATUSES: Final = frozenset({"running"})
+STOPPED_STATUSES: Final = frozenset({"waiting"})
 
 
 class TurnNotFinishedError(RuntimeError):
     """The turn stopped somewhere other than `finished`: waiting on a person, or a status this
     driver does not know. Not a turn time; the benchmark counts it as a failed turn."""
+
+
+class UnknownTurnStatusError(TurnNotFinishedError):
+    """The poll read a status outside `DONE_STATUSES`, `IN_PROGRESS_STATUSES` and
+    `STOPPED_STATUSES` (or none): a contract this driver does not know, never read as done."""
 
 
 class HttpTurnDriver:
@@ -109,10 +125,14 @@ class HttpTurnDriver:
             polled = await self._client.get(f"/turns/{turn_id}", headers=self._headers)
             polled.raise_for_status()
             status = polled.json().get("status")
-            if status == _FINISHED:
+            if not isinstance(status, str):
+                raise UnknownTurnStatusError(f"turn {turn_id} has an unknown status {status!r}")
+            if status in DONE_STATUSES:
                 return
-            if status != _RUNNING:
+            if status in STOPPED_STATUSES:
                 raise TurnNotFinishedError(f"turn {turn_id} stopped {status!r}, not finished")
+            if status not in IN_PROGRESS_STATUSES:
+                raise UnknownTurnStatusError(f"turn {turn_id} has an unknown status {status!r}")
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"turn {turn_id} still running after {self._timeout}s")
             await asyncio.sleep(self._poll)
