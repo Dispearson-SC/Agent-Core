@@ -21,6 +21,16 @@ WHAT A ROUTER IS NOT
     back to the requested profile with the reason recorded. A router never widens what a turn
     may do, and a misrouted turn is a wrong answer, never an escalation.
 
+WHO A ROUTED TURN RUNS AS (S8)
+    A route that lands runs its target the way an ask_peer from the requested profile to that
+    target runs: under the peer identity (`domain/turn.py::delegated_identity`), acting on behalf
+    of the person, one hop deep. So policy grants it what a peer turn of the target holds and
+    nothing the person holds, and the person's own identity keeps its rules. It lands only where
+    that ask could have been made: the two-sided peer gate allows the hop and the person's policy
+    allows `ask_peer` to the target (`application/route_turn.py`). Otherwise it falls back with
+    `peer_refused:<reason>`, `ask_peer_not_allowed:<effect>` or `delegation_unavailable`. A route
+    can never grant more than the requested profile's own ask_peer could.
+
 WHAT IS RECORDED
     `RouteRecord` is the audit row and the step result: what the router answered (or that it
     answered nothing), its label, confidence, whether that confidence is calibrated, the model
@@ -38,10 +48,15 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
 
+from agent_core.domain.turn import restore_state
+
 __all__ = [
+    "FALLBACK_ASK_PEER_NOT_ALLOWED",
     "FALLBACK_AUDIT_UNAVAILABLE",
+    "FALLBACK_DELEGATION_UNAVAILABLE",
     "FALLBACK_INTENT_NOT_SUPPORTED",
     "FALLBACK_INTENT_UNKNOWN",
+    "FALLBACK_PEER_REFUSED",
     "FALLBACK_TARGET_NOT_ALLOWED",
     "FALLBACK_TARGET_NOT_STARTABLE",
     "FALLBACK_TIMEOUT",
@@ -60,6 +75,13 @@ FALLBACK_TARGET_NOT_STARTABLE: Final[str] = "target_not_startable"
 FALLBACK_INTENT_NOT_SUPPORTED: Final[str] = "intent_not_supported"
 FALLBACK_INTENT_UNKNOWN: Final[str] = "intent_unknown"
 FALLBACK_AUDIT_UNAVAILABLE: Final[str] = "audit_unavailable"
+# S8. A route runs delegated, as an ask_peer from the requested profile to its target would. These
+# say why it could not: no peer gate or policy is wired (`delegation_unavailable`), the two-sided
+# peer gate refused the hop (`peer_refused:<gate reason>`) or the person's policy does not allow
+# `ask_peer` to that target (`ask_peer_not_allowed:<effect>`).
+FALLBACK_DELEGATION_UNAVAILABLE: Final[str] = "delegation_unavailable"
+FALLBACK_PEER_REFUSED: Final[str] = "peer_refused"
+FALLBACK_ASK_PEER_NOT_ALLOWED: Final[str] = "ask_peer_not_allowed"
 
 
 def error_reason(error: BaseException) -> str:
@@ -151,6 +173,14 @@ class RouteRecord:
     reason: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    # S8. Both identities of a delegated route: the subject the turn runs as (the peer identity)
+    # and the person it acts for. None when the route was not applied (the turn runs as the person).
+    actor: str | None = None
+    on_behalf_of: str | None = None
+
+    def __setstate__(self, state: list[object]) -> None:
+        """A record pickled by an older build reads back with the newer fields at their default."""
+        restore_state(self, state)
 
     @property
     def routed(self) -> bool:

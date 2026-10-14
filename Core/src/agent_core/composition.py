@@ -193,6 +193,7 @@ from agent_core.adapters.driven.llm_litellm.gateway import LiteLLMGateway
 from agent_core.adapters.driven.media_fs.store import FilesystemMediaStore
 from agent_core.adapters.driven.peers.answer_cache import PgAnswerCache
 from agent_core.adapters.driven.peers.asker_context import TranscriptAskerContext
+from agent_core.adapters.driven.peers.hop_limit import authorise_hop
 from agent_core.adapters.driven.peers.mailbox import PgAgentMailbox
 from agent_core.adapters.driven.peers.task_graph import PgTaskGraphReader
 from agent_core.adapters.driven.peers.typed_answer import check_answer_schema
@@ -273,6 +274,7 @@ from agent_core.application.run_intent import RunIntent
 from agent_core.application.start_turn import StartTurn
 from agent_core.domain.intents import IntentPlan
 from agent_core.domain.media import MediaRef
+from agent_core.domain.peers import AgentId
 from agent_core.domain.policy import PolicyRule
 from agent_core.domain.profile import AgentProfile, ProfileVersionRegistry
 from agent_core.domain.topology import validate_topology
@@ -1703,8 +1705,15 @@ def build_channel_registry(
 # `ORDER BY at ASC LIMIT 1` picks the EARLIEST row on purpose - the first tool call this
 # turn ever attempted - though any row would answer the same name: `self._caller` is bound
 # once per run (`PydanticAgentRunner.run`) and every row for one `turn_id` carries it.
+#
+# S8 (migration 0048). A ROUTED turn runs under the peer identity acting on behalf of the person,
+# so its rows carry `caller = peer-agent` and the person in `on_behalf_of`. The requester is the
+# person: read `on_behalf_of` first, so four-eyes still compares the approver with the human who
+# asked and a delegated turn never lets that human approve their own request. A peer turn's rows
+# act for nobody and read exactly as before.
 _REQUESTER_LOOKUP_SQL = (
-    "SELECT caller FROM audit_tool_calls WHERE turn_id = %s ORDER BY at ASC LIMIT 1"
+    "SELECT COALESCE(on_behalf_of, caller) FROM audit_tool_calls WHERE turn_id = %s "
+    "ORDER BY at ASC LIMIT 1"
 )
 
 
@@ -1712,6 +1721,23 @@ def _requester_lookup_sync(conninfo: str, turn_id: TurnId) -> str | None:
     with psycopg.connect(conninfo) as conn:
         row = conn.execute(_REQUESTER_LOOKUP_SQL, (str(turn_id),)).fetchone()
     return None if row is None else str(row[0])
+
+
+def route_peer_gate(
+    entry: AgentProfile, target: AgentProfile, hop: int
+) -> tuple[int | None, str | None]:
+    """`RouteTurn`'s peer gate (S8): the gate an ask_peer from `entry` to `target` meets,
+    unchanged (`hop_limit.authorise_hop`: both switches, the target's mode, the hop limit, both
+    allowlists)."""
+    decision = authorise_hop(
+        caller=AgentId(entry.id),
+        caller_policy=entry.peers,
+        callee=AgentId(target.id),
+        callee_policy=target.peers,
+        hop=hop,
+        callee_mode=target.mode,
+    )
+    return decision.next_hop, None if decision.reason is None else decision.reason.value
 
 
 def _pg_requester_lookup(conninfo: str) -> RequesterLookup:
@@ -2276,6 +2302,9 @@ def build_container(
             profiles=profiles,
             timeout_ms=resolved.turn_router_timeout_ms,
             plans=plans,
+            # S8. A route runs delegated, gated as the requested profile's own ask_peer would be.
+            peer_gate=route_peer_gate,
+            policy=policy,
         )
         if resolved.turn_routing
         else None

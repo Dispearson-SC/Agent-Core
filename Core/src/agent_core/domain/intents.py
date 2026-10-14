@@ -192,6 +192,10 @@ class IntentRecord:
     tool_count: int
     reply_mode: str | None = None
     fallback_reason: str | None = None
+    # S8. Both identities of a delegated plan (it runs as its owner's peer turn would): the subject
+    # it ran as and the person it acted for. None when the plan ran as the person.
+    actor: str | None = None
+    on_behalf_of: str | None = None
 
 
 # --- parsing --------------------------------------------------------------------------------------

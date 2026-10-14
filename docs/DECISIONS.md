@@ -3449,3 +3449,33 @@ decision 2026-10-13) and are described by `addon.yaml`.
 - **Observability.** `planned` progress event (`plan` / `fallback:<reason>`), folded onto the turn
   in the feed snapshot (`plan`), so a client (the routing benchmark) can count plan vs fallback.
 
+## D98 - A routed turn runs under a delegated identity, like an ask_peer to its target (Phase 5, S8)
+
+- **What.** A route (layer A) or an intent plan (layer B) that lands on another profile runs that
+  profile under `delegated_identity(person)`: the peer identity a peer turn has (`peer-agent`,
+  channel `peer`, role `peer`, the person's tenant) with `on_behalf_of` the person, at
+  `hop = 1`. Before, it ran as the person, and a policy that grants data reads only to peers (the
+  glazed one: the manager never reads directly) made every routed turn fall back.
+- **No new privilege.** The identity is the one ask_peer turns already run under, so policy judges
+  it by the existing `peer` rows; `on_behalf_of` is not a policy input. The person's own rows are
+  unchanged. A route lands only where the requested profile's own ask_peer could: the peer gate
+  (`hop_limit.authorise_hop`, bound by composition: switches, the target's mode, the hop limit,
+  both allowlists) and the PERSON's policy for `ask_peer` with that target must both allow (ALLOW
+  only: a route never asks for approval). Otherwise the requested profile runs as the person with
+  `peer_refused:<reason>`, `ask_peer_not_allowed:<effect>` or `delegation_unavailable`. The
+  entry-point rule of D95 stays, so delegation only narrows where a route may land.
+- **The person is still the person.** Delivery goes to `reply_identity(caller)` (the person's
+  channel); the approval requester reads `COALESCE(on_behalf_of, caller)`, so four-eyes still
+  compares the approver with the human (stricter than a peer turn, whose rows name `peer-agent`).
+- **Audit.** Migration 0048: `audit_tool_calls.on_behalf_of`, `audit_turn_routes.actor/on_behalf_of`,
+  `audit_turn_intents.actor/on_behalf_of`; `caller` keeps the subject that ran, as for peer turns.
+  `AuditSink` is unchanged (the person travels on `CallerIdentity`).
+- **Replay.** The delegated request is part of `_step_route`'s recorded result, so a recovered turn
+  never re-evaluates the gate or the policy. No step changes, so the pinned version stays
+  `agent-core-turns.12`. `CallerIdentity` (and `RouteRecord`) restore a shorter pickled state with
+  the new fields at their default, so a turn suspended by the previous build still compares.
+- **Known limit.** A BACKGROUND ask made from a routed turn keeps the delegated identity as its
+  return address; the mailbox row stores subject, channel and roles only, so the follow-up turn would
+  answer on the `peer` channel. Glazed specialists cannot ask (max_hops 1 and the peer-channel
+  `ask_peer` deny); a deployment that lets routed specialists ask in the background should not route.
+

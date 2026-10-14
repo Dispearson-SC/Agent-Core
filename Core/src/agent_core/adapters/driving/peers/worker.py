@@ -145,6 +145,9 @@ from agent_core.domain.peers import (
     peer_session_name,
 )
 from agent_core.domain.profile import AgentProfile
+from agent_core.domain.turn import PEER_CHANNEL as _PEER_CHANNEL
+from agent_core.domain.turn import PEER_ROLE as _PEER_ROLE
+from agent_core.domain.turn import PEER_SUBJECT_ID as _PEER_SUBJECT_ID
 from agent_core.domain.turn import (
     BackgroundReturn,
     CallerIdentity,
@@ -156,6 +159,7 @@ from agent_core.domain.turn import (
     TurnOutcome,
     TurnRequest,
     UserInput,
+    peer_identity,
 )
 
 logger = logging.getLogger(__name__)
@@ -188,9 +192,11 @@ __all__ = [
 # pass a subject would be a call site that could run a peer's turn under a human's
 # permissions, and CLAUDE.md non-negotiable #9 cuts both ways - a chat client is never
 # widened into an administrator, and an agent never borrows a person's identity either.
-PEER_CHANNEL: Final[str] = "peer"
-PEER_SUBJECT_ID: Final[str] = "peer-agent"
-PEER_ROLE: Final[str] = "peer"
+# They live in `domain/turn.py` since S8: a routed turn runs under the same identity
+# (`delegated_identity`), and the domain is the one place both can read them from.
+PEER_CHANNEL: Final[str] = _PEER_CHANNEL
+PEER_SUBJECT_ID: Final[str] = _PEER_SUBJECT_ID
+PEER_ROLE: Final[str] = _PEER_ROLE
 
 
 # THE RETURN LEG, AS A SEAT RATHER THAN AS AN IMPORT. t-f11-43 records the answer;
@@ -463,12 +469,7 @@ def build_peer_identity(tenant_id: TenantId) -> CallerIdentity:
     asking session's row rather than from a default, so an ask can never be answered in a
     tenant it did not come from.
     """
-    return CallerIdentity(
-        subject_id=PEER_SUBJECT_ID,
-        channel=PEER_CHANNEL,
-        tenant_id=tenant_id,
-        roles=frozenset({PEER_ROLE}),
-    )
+    return peer_identity(tenant_id)
 
 
 def peer_turn_request(ask: PeerAsk, *, session: SessionRef) -> TurnRequest:

@@ -64,6 +64,7 @@ from agent_core.domain.turn import (
     TurnRequest,
     UserInput,
 )
+from tests.fakes.delegation import delegation
 
 PLANS = """\
 intents:
@@ -271,7 +272,13 @@ def _route_turn(decision: RouteDecision, *, intents: bool = True) -> tuple[Route
     }
     audit = _Audit()
     return (
-        RouteTurn(routers=_Router(decision), audit=audit, profiles=profiles, plans=_plans()),
+        RouteTurn(
+            routers=_Router(decision),
+            audit=audit,
+            profiles=profiles,
+            plans=_plans(),
+            **delegation(),
+        ),
         audit,
     )
 

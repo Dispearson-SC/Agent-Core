@@ -51,9 +51,12 @@ from agent_core.domain.turn import (
     TurnResult,
 )
 from tests.fakes import fanout
+from tests.fakes.delegation import delegation
 from tests.fakes.ports import FakeAuditSink, FakeConversationStore
 
 OWNER = "billing"
+# S8. The plan runs as its owner's peer turn would, on behalf of the fanout person `u`.
+DELEGATED = {"actor": "peer-agent", "on_behalf_of": "u"}
 
 
 class Recorder:
@@ -162,7 +165,11 @@ class World:
             monkeypatch.setattr(turn_workflow, name, self._recording(name))
         profiles = _profiles()
         route_turn = RouteTurn(
-            routers=Router(decision), audit=self.routes, profiles=profiles, plans={"balance": PLAN}
+            routers=Router(decision),
+            audit=self.routes,
+            profiles=profiles,
+            plans={"balance": PLAN},
+            **delegation(),
         )
         run_intent = RunIntent(
             runner=runner,
@@ -224,7 +231,9 @@ def test_an_intent_turn_runs_its_plan_as_recorded_steps_and_never_the_model_path
     planned = world.recorder.events[2]
     assert (planned.agent, planned.detail) == (OWNER, "plan")
     assert planned.event_id == progress_event_id("turn-1", EventKind.PLANNED)
-    assert world.routes.intents == [IntentRecord("balance", OWNER, True, 2, "compose", None)]
+    assert world.routes.intents == [
+        IntentRecord("balance", OWNER, True, 2, "compose", None, **DELEGATED)
+    ]
 
 
 def test_a_failed_call_stops_the_plan_and_runs_the_normal_path_from_scratch(
@@ -241,7 +250,7 @@ def test_a_failed_call_stops_the_plan_and_runs_the_normal_path_from_scratch(
     assert world.kinds() == ["routed", "started", "planned", "finished"]
     assert world.recorder.events[2].detail == f"fallback:{PLAN_TOOL_ERROR}"
     assert world.routes.intents == [
-        IntentRecord("balance", OWNER, False, 1, "compose", PLAN_TOOL_ERROR)
+        IntentRecord("balance", OWNER, False, 1, "compose", PLAN_TOOL_ERROR, **DELEGATED)
     ]
 
 

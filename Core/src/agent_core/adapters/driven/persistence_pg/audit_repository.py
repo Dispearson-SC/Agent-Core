@@ -300,8 +300,8 @@ def collect_audit_policy(
 # the tenant would drop exactly the evidence #6 exists to keep.
 _INSERT_TOOL_CALL = (
     "INSERT INTO audit_tool_calls "
-    "(turn_id, caller, tenant_id, tool, arguments, effect, rule_id, reason) "
-    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+    "(turn_id, caller, tenant_id, tool, arguments, effect, rule_id, reason, on_behalf_of) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 _INSERT_HUMAN_DECISION = (
     "INSERT INTO audit_human_decisions (turn_id, tool_call_id, subject_id, approved, note) "
@@ -416,6 +416,9 @@ class PgAuditSink:
                 str(decision.effect.value),
                 decision.rule_id,
                 decision.reason,
+                # S8 (migration 0048). The person a delegated identity acted for; `caller` above
+                # is the subject the call ran as, exactly as a peer turn's row records it.
+                None if caller.on_behalf_of is None else caller.on_behalf_of.subject_id,
             ),
         )
 

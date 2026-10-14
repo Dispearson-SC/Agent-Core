@@ -237,7 +237,13 @@ routing:
 
 A router is not a safety barrier. A route only changes WHICH profile runs the turn, and only to a
 listed target that is loaded and that a channel may start; the routed turn runs that profile's
-full policy, approvals and budgets. Only turns a person or a channel started are routed (never a
+full policy, approvals and budgets. It runs DELEGATED (D98): as the peer identity (`peer-agent`,
+channel `peer`, role `peer`) acting on behalf of the person, one hop deep, exactly as an `ask_peer`
+from the requested profile to the target would run. So it lands only where that ask could be made:
+the two-sided peer allowlist and hop limit allow it, and the person's policy ALLOWs `ask_peer` with
+that target (`needs_approval` or `deny` falls back as `ask_peer_not_allowed:<effect>`; a gate
+refusal as `peer_refused:<reason>`). Policy judges the routed turn by the `peer` rows; the person's
+own rows are unchanged, and the reply still goes to the person. Only turns a person or a channel started are routed (never a
 peer's ask or a subagent). A router slower than `AGENT_CORE_TURN_ROUTER_TIMEOUT_MS` (default 1500)
 or one that raises runs the turn as asked. Each consultation is one `audit_turn_routes` row and a
 `routed` progress event; the decision is a recorded workflow step, so a recovered turn never asks

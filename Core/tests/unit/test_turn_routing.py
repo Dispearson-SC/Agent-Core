@@ -45,6 +45,7 @@ from agent_core.domain.turn import (
     TurnRequest,
     UserInput,
 )
+from tests.fakes.delegation import delegation
 
 FRONT = "front_desk"
 BILLING = "billing"
@@ -132,6 +133,7 @@ def _use_case(
             profiles=profiles or _profiles(),
             timeout_ms=timeout_ms,
             clock=lambda: next(ticks) / 1000,
+            **delegation(),
         ),
         sink,
     )

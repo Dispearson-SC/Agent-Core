@@ -28,6 +28,7 @@ WHAT IT GUARANTEES
       fails leaves no trace in the conversation, so the normal path's `StartTurn` writes the
       request exactly once. The calls before it were reads; their
       audit rows stay, as a model's would.
+    * A delegated plan (S8) audits both identities: the subject it ran as and the person.
     * The reply never invents data: `compose_reply` is told to use only the results (adapter), and
       a template only puts the results in.
     * An audit row that cannot be written is logged and never fails the turn: the plan already
@@ -226,6 +227,7 @@ class RunIntent:
                 plan_used=True,
                 tool_count=len(results),
                 reply_mode=plan.reply.value,
+                **_identities(request),
             ),
         )
         return outcome
@@ -250,6 +252,7 @@ class RunIntent:
                 tool_count=tool_count,
                 reply_mode=None if plan is None else plan.reply.value,
                 fallback_reason=reason,
+                **_identities(request),
             ),
         )
 
@@ -266,3 +269,11 @@ class RunIntent:
             await self._routes.record_intent(turn_id, str(request.session.tenant_id), record)
         except Exception:
             _LOG.warning("could not audit the intent plan of turn %s", turn_id, exc_info=True)
+
+
+def _identities(request: TurnRequest) -> dict[str, str | None]:
+    """Both identities of a delegated turn for its audit row (S8); none for a person's own turn."""
+    person = request.caller.on_behalf_of
+    if person is None:
+        return {"actor": None, "on_behalf_of": None}
+    return {"actor": request.caller.subject_id, "on_behalf_of": person.subject_id}

@@ -380,6 +380,10 @@ class _Audit(PgAuditSink):
         assert match is not None, sql
         columns = [c.strip() for c in match.group(2).split(",")]
         row = {c: getattr(v, "obj", v) for c, v in zip(columns, params, strict=True)}
+        # S8 (migration 0048): `on_behalf_of` postdates the oracle and is NULL for every turn the
+        # golden set plays (a person's or a peer's own); a delegated row would keep it and differ.
+        if row.get("on_behalf_of", "kept") is None:
+            del row["on_behalf_of"]
         self.rows.append({"table": match.group(1), **row})
 
 

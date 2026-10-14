@@ -37,8 +37,9 @@ from agent_core.domain.routing import (
     RouteRequest,
     RoutingPolicy,
 )
-from agent_core.domain.turn import TurnId
+from agent_core.domain.turn import TurnId, delegated_identity
 from tests.fakes import peer_world as w
+from tests.fakes.delegation import allowing_policy
 
 _DATABASE = "agent_core_route_audit_test"
 
@@ -54,7 +55,7 @@ def _routes() -> list[tuple[Any, ...]]:
         return conn.execute(
             "SELECT turn_id, tenant_id, router, requested_profile, profile_id, decision, label, "
             "confidence, calibrated, model, intent, elapsed_ms, fallback_reason, reason, "
-            "input_tokens, output_tokens FROM audit_turn_routes ORDER BY id"
+            "input_tokens, output_tokens, actor, on_behalf_of FROM audit_turn_routes ORDER BY id"
         ).fetchall()
 
 
@@ -69,7 +70,7 @@ def test_a_consultation_is_one_audit_row_with_its_evidence() -> None:
                 router="keyword", requested_profile="front", profile_id="billing",
                 decision=RouteKind.ROUTE, elapsed_ms=12, label="billing", confidence=0.9,
                 calibrated=True, model="clf-1", reason="confident", input_tokens=318,
-                output_tokens=34,
+                output_tokens=34, actor="peer-agent", on_behalf_of="u",
             ),
         )
         await audit.record_route(
@@ -85,9 +86,9 @@ def test_a_consultation_is_one_audit_row_with_its_evidence() -> None:
 
     assert _routes() == [
         ("turn-1", "t", "keyword", "front", "billing", "route", "billing", 0.9, True, "clf-1",
-         None, 12, None, "confident", 318, 34),
+         None, 12, None, "confident", 318, 34, "peer-agent", "u"),
         ("turn-2", "t", "keyword", "front", "front", None, None, None, False, None,
-         None, 1500, "timeout", None, None, None),
+         None, 1500, "timeout", None, None, None, None, None),
     ]
 
 
@@ -99,7 +100,11 @@ def test_an_intent_plan_is_one_audit_row_with_its_outcome() -> None:
         await w.fresh_databases(_DATABASE)
         audit = PgRouteAudit(_connect)
         await audit.record_intent(
-            TurnId("turn-1"), "t", IntentRecord("stock", "shop", True, 2, "compose", None)
+            TurnId("turn-1"),
+            "t",
+            IntentRecord(
+                "stock", "shop", True, 2, "compose", None, actor="peer-agent", on_behalf_of="u"
+            ),
         )
         await audit.record_intent(
             TurnId("turn-2"), "t", IntentRecord("stock", "shop", False, 1, "template", "tool_error")
@@ -110,11 +115,11 @@ def test_an_intent_plan_is_one_audit_row_with_its_outcome() -> None:
     with _connect() as conn:
         rows = conn.execute(
             "SELECT turn_id, tenant_id, intent, profile_id, plan_used, tool_count, reply_mode, "
-            "fallback_reason FROM audit_turn_intents ORDER BY id"
+            "fallback_reason, actor, on_behalf_of FROM audit_turn_intents ORDER BY id"
         ).fetchall()
     assert rows == [
-        ("turn-1", "t", "stock", "shop", True, 2, "compose", None),
-        ("turn-2", "t", "stock", "shop", False, 1, "template", "tool_error"),
+        ("turn-1", "t", "stock", "shop", True, 2, "compose", None, "peer-agent", "u"),
+        ("turn-2", "t", "stock", "shop", False, 1, "template", "tool_error", None, None),
     ]
 
 
@@ -128,7 +133,21 @@ class CountingRouter:
         return self.decision
 
 
-def _bind_routing(monkeypatch: pytest.MonkeyPatch, router: CountingRouter) -> None:
+class FlippingGate:
+    """A peer gate that allows the hop until told otherwise: a recovered turn must not ask it."""
+
+    def __init__(self) -> None:
+        self.allow = True
+        self.calls = 0
+
+    def __call__(self, entry: Any, target: Any, hop: int) -> tuple[int | None, str | None]:
+        self.calls += 1
+        return (hop + 1, None) if self.allow else (None, "caller_does_not_allow_callee")
+
+
+def _bind_routing(
+    monkeypatch: pytest.MonkeyPatch, router: CountingRouter, gate: FlippingGate
+) -> None:
     profiles = w.profiles()
     profiles[w.A] = dataclasses.replace(
         profiles[w.A], routing=RoutingPolicy(router="keyword", targets=(w.B,))
@@ -142,7 +161,11 @@ def _bind_routing(monkeypatch: pytest.MonkeyPatch, router: CountingRouter) -> No
             deps,
             events=PgEventPublisher(w.conninfo(_DATABASE)),
             route_turn=RouteTurn(
-                routers=router, audit=PgRouteAudit(_connect), profiles=profiles
+                routers=router,
+                audit=PgRouteAudit(_connect),
+                profiles=profiles,
+                peer_gate=gate,
+                policy=allowing_policy(),
             ),
         ),
     )
@@ -155,7 +178,8 @@ def test_a_route_recorded_before_a_crash_is_replayed_and_never_asked_again(
     world.start.b_answers_directly = True
     world.start.b_hangs = True  # the routed turn is running when the process dies
     router = CountingRouter(RouteDecision(kind=RouteKind.ROUTE, profile_id=w.B, label="b"))
-    _bind_routing(monkeypatch, router)
+    gate = FlippingGate()
+    _bind_routing(monkeypatch, router, gate)
     turn = str(w.ASKING_TURN)
     seen: dict[str, Any] = {}
 
@@ -168,6 +192,7 @@ def test_a_route_recorded_before_a_crash_is_replayed_and_never_asked_again(
     async def second_process() -> None:
         world.start.b_hangs = False
         router.decision = RouteDecision(kind=RouteKind.PASS)  # it would answer differently now
+        gate.allow = False  # and the delegation would now be refused
         async with w.Dbos(_DATABASE, drop=False):
             seen["outcome"] = await w.result_of(turn)
 
@@ -176,6 +201,8 @@ def test_a_route_recorded_before_a_crash_is_replayed_and_never_asked_again(
     asyncio.run(second_process())
 
     assert router.calls == 1, "the route is read back from the log, never re-classified"
+    assert gate.calls == 1, "the delegation is read back too, never re-evaluated (S8)"
+    assert {r.caller for r in world.start.requests} == {delegated_identity(w.request().caller)}
     assert [r.profile_id for r in world.start.requests] == [w.B, w.B]
     assert world.start.starts(w.A) == 0
     assert seen["outcome"].result is not None

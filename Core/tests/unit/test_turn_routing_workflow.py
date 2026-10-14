@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from agent_core.adapters.driving.channels.registry import ChannelRegistry, OutboundMessage
 from agent_core.adapters.driving.workflow import turn_workflow
 from agent_core.application.route_turn import RoutedTurn, RouteTurn
 from agent_core.domain.events import (
@@ -31,8 +32,17 @@ from agent_core.domain.events import (
 )
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.routing import RouteDecision, RouteKind, RouteRecord, RouteRequest
-from agent_core.domain.turn import TurnId, TurnOutcome, TurnRequest, TurnResult
+from agent_core.domain.turn import (
+    PEER_CHANNEL,
+    CallerIdentity,
+    TurnId,
+    TurnOutcome,
+    TurnRequest,
+    TurnResult,
+    delegated_identity,
+)
 from tests.fakes import fanout
+from tests.fakes.delegation import delegation
 
 BILLING = "billing"
 
@@ -89,7 +99,7 @@ def _install(
     route_turn = (
         None
         if router is None
-        else RouteTurn(routers=router, audit=Routes(), profiles=_profiles())
+        else RouteTurn(routers=router, audit=Routes(), profiles=_profiles(), **delegation())
     )
     deps = turn_workflow._dependencies  # noqa: SLF001
     assert deps is not None
@@ -202,3 +212,56 @@ def test_the_route_step_moved_the_pinned_application_version_to_twelve() -> None
     from agent_core import composition
 
     assert int(composition.PINNED_DBOS_APPLICATION_VERSION.rsplit(".", 1)[1]) >= 12
+
+
+# --- S8: a delegated turn answers the person -----------------------------------------------------
+
+
+class Inbox:
+    """A channel that keeps who it was asked to send to."""
+
+    def __init__(self) -> None:
+        self.to: list[CallerIdentity] = []
+
+    async def send(self, caller: CallerIdentity, message: OutboundMessage) -> None:
+        self.to.append(caller)
+
+
+def test_a_delegated_turns_reply_is_delivered_to_the_person_never_the_peer_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deliver = inspect.unwrap(turn_workflow._step_deliver)  # noqa: SLF001
+    fanout.install(monkeypatch, (), [])
+    person, peer = Inbox(), Inbox()
+    deps = turn_workflow._dependencies  # noqa: SLF001
+    assert deps is not None
+    monkeypatch.setattr(
+        turn_workflow,
+        "_dependencies",
+        dataclasses.replace(
+            deps, channels=ChannelRegistry((("http", person), (PEER_CHANNEL, peer)))
+        ),
+    )
+    asker = fanout.request()
+    delegated = dataclasses.replace(
+        asker, profile_id=BILLING, caller=delegated_identity(asker.caller), hop=1
+    )
+
+    asyncio.run(deliver(delegated, TurnResult(text="done")))
+    asyncio.run(deliver(asker, TurnResult(text="done")))
+
+    assert person.to == [asker.caller, asker.caller]
+    assert peer.to == []
+
+
+def test_a_routed_turn_starts_delegated_on_behalf_of_the_person(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = Router(RouteDecision(kind=RouteKind.ROUTE, profile_id=BILLING, label="billing"))
+    started, _ = _install(monkeypatch, router)
+
+    asyncio.run(fanout.body()(fanout.request()))
+
+    (request,) = started
+    assert request.caller == delegated_identity(fanout.request().caller)
+    assert request.hop == 1 and request.owner is None

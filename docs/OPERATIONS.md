@@ -209,6 +209,19 @@ SELECT turn_id, requested_profile, profile_id, decision, label, confidence, cali
 FROM audit_turn_routes ORDER BY id DESC LIMIT 50;
 ```
 
+A route that lands runs delegated (D98): the routed turn is policed as a peer turn of the target
+(`peer-agent` on the `peer` channel), on behalf of the person. Both identities are on the trail
+(migration `0048`, additive): `audit_turn_routes.actor` / `on_behalf_of`,
+`audit_turn_intents.actor` / `on_behalf_of` and `audit_tool_calls.on_behalf_of` (its `caller` is
+the subject the call ran as). An approval in a routed turn is requested by the person
+(`COALESCE(on_behalf_of, caller)`), so four-eyes is unchanged. No new step and no new pinned
+version: a turn recovered across this deploy reads its recorded identity back.
+
+```postgresql
+SELECT turn_id, caller, on_behalf_of, tool, effect, rule_id, at
+FROM audit_tool_calls WHERE on_behalf_of IS NOT NULL ORDER BY at DESC LIMIT 50;
+```
+
 `reason` is the router's own code for what it answered (the System One router: `escape`,
 `below_threshold`, `missing_api_key`, `http_<n>`, `timeout`...) and `input_tokens` /
 `output_tokens` what the consultation spent; NULL when the router said nothing (migration `0046`,

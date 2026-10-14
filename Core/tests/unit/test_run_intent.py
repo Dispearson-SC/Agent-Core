@@ -15,6 +15,7 @@ reply that fails persists nothing, so the normal path can start the turn from sc
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import date
 from typing import Any
 
@@ -38,6 +39,7 @@ from agent_core.domain.intents import (
 )
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.turn import (
+    PEER_SUBJECT_ID,
     CallerIdentity,
     SessionId,
     SessionRef,
@@ -48,6 +50,7 @@ from agent_core.domain.turn import (
     TurnResult,
     Usage,
     UserInput,
+    delegated_identity,
 )
 from tests.fakes.ports import FakeAuditSink, FakeConversationStore
 
@@ -307,6 +310,30 @@ def test_a_request_that_cannot_be_persisted_falls_back_with_nothing_written() ->
     assert world.store.outcomes == []
     assert world.audit.calls == [] and world.routes.intents == []
     assert world.context.updates == []
+
+
+def test_a_delegated_plan_audits_both_identities() -> None:
+    """S8: a plan the router sent to its owner runs delegated; its audit row names the subject it
+    ran as and the person it acted for, used or fallen back."""
+    world = World(Runner())
+    request = replace(_request(), caller=delegated_identity(_request().caller))
+
+    _run(world.use_case.reply(TURN, request, IntentCall("quote"), _one_result()))
+    _run(world.use_case.fall_back(TURN, request, IntentCall("quote"), PLAN_TOOL_ERROR, 1))
+
+    for _, _, record in world.routes.intents:
+        assert (record.actor, record.on_behalf_of) == (PEER_SUBJECT_ID, "u")
+
+
+def test_a_plan_run_as_the_person_names_no_delegation() -> None:
+    world = World(Runner())
+
+    _run(world.use_case.fall_back(TURN, _request(), IntentCall("quote"), PLAN_TOOL_ERROR, 1))
+
+    assert (world.routes.intents[0][2].actor, world.routes.intents[0][2].on_behalf_of) == (
+        None,
+        None,
+    )
 
 
 def test_a_reply_that_cannot_be_persisted_after_its_request_fails_the_turn_cleanly() -> None:

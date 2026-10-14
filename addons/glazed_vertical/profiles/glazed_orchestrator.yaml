@@ -155,6 +155,10 @@ max_cost_usd: "0.50"
 # one of the ten frequent read-only intents with its fixed plan (layer B, `intents: true`,
 # routing/intent_plans.yaml); anything else, a timeout or an error runs this orchestrator as before.
 # The router is not a safety barrier: the routed profile runs with its full policy and approvals.
+# A routed turn runs DELEGATED (Core D98): as the specialist's peer turn would (the `peer` identity,
+# on behalf of the manager), and only where this orchestrator's own ask_peer could go (the peers
+# allowlist below and the deployment's `glazed-orchestrator-asks-specialists` rule). The manager
+# identity itself still reads nothing.
 routing:
   router: system_one
   targets:

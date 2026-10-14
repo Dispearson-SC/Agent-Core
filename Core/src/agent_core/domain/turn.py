@@ -35,7 +35,7 @@ INVARIANTS (assert in tests)
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -78,6 +78,86 @@ class CallerIdentity:
     # because `resume` already receives the caller, so a resumed turn keeps the same
     # style without a second channel for it to travel on.
     modality: str | None = None
+    # S8. The person a DELEGATED identity acts for: set only by `delegated_identity`, for a turn
+    # the router sent to another profile (it runs as that profile's peer turn would). NOT an input
+    # to `ToolPolicy` - a rule judges `subject_id`, `channel`, `roles` and `tenant_id` only, so the
+    # delegated identity is judged exactly as a peer turn's. Its readers are the audit (both
+    # identities on every row), the approval requester (the person, for four-eyes) and delivery
+    # (the reply goes to the person). None for every other identity.
+    on_behalf_of: CallerIdentity | None = None
+
+    def __setstate__(self, state: list[object]) -> None:
+        """Restore a pickled identity, filling the fields an OLDER build did not have.
+
+        Every in-flight turn holds its caller pickled in the operation log; a build that adds a
+        field must still read the shorter state, or a recovered turn fails on its first compare.
+        """
+        restore_state(self, state)
+
+
+def restore_state(instance: object, state: list[object]) -> None:
+    """Set a slotted frozen dataclass from its pickled field list, a shorter list included: the
+    fields it lacks (added by a later build) take their defaults. A field with no default missing
+    from the state is a corrupt record and raises."""
+    values = dict(zip([f.name for f in fields(instance)], state, strict=False))  # type: ignore[arg-type]
+    for f in fields(instance):  # type: ignore[arg-type]
+        if f.name in values:
+            value = values[f.name]
+        elif f.default is not MISSING:
+            value = f.default
+        elif f.default_factory is not MISSING:
+            value = f.default_factory()
+        else:
+            raise ValueError(f"the pickled {type(instance).__name__} has no {f.name!r}")
+        object.__setattr__(instance, f.name, value)
+
+
+# S8. WHO an agent-to-agent turn is FROM. Constants, never parameters: a call site that could pass a
+# subject would be a call site that could run a peer's turn under a human's permissions. A peer
+# turn (`adapters/driving/peers/worker.py`) and a routed turn (`delegated_identity`) carry the same
+# identity, so a deployment writes policy rows for the `peer` channel once and both are judged by
+# them.
+PEER_CHANNEL = "peer"
+PEER_SUBJECT_ID = "peer-agent"
+PEER_ROLE = "peer"
+
+
+def peer_identity(
+    tenant_id: TenantId,
+    *,
+    on_behalf_of: CallerIdentity | None = None,
+    modality: str | None = None,
+) -> CallerIdentity:
+    """The identity an agent's turn runs under when another agent (or a route) started it.
+
+    A `CallerIdentity`, never an `AdminIdentity` (CLAUDE.md #9); the tenant is the caller's own.
+    """
+    return CallerIdentity(
+        subject_id=PEER_SUBJECT_ID,
+        channel=PEER_CHANNEL,
+        tenant_id=tenant_id,
+        roles=frozenset({PEER_ROLE}),
+        modality=modality,
+        on_behalf_of=on_behalf_of,
+    )
+
+
+def delegated_identity(person: CallerIdentity) -> CallerIdentity:
+    """The identity a ROUTED turn runs under (S8): the peer identity, acting for `person`.
+
+    The same identity an ask_peer to the target runs under, so policy grants it exactly what a
+    peer turn holds and nothing the person holds. The tenant and the modality hint are the
+    person's. An identity that already acts for somebody is refused: delegation never nests.
+    """
+    if person.on_behalf_of is not None:
+        raise ValueError("an identity that already acts on behalf of a person cannot delegate")
+    return peer_identity(person.tenant_id, on_behalf_of=person, modality=person.modality)
+
+
+def reply_identity(caller: CallerIdentity) -> CallerIdentity:
+    """Who a turn's reply and its approvals belong to: the person a delegated identity acts for,
+    else the caller itself."""
+    return caller.on_behalf_of if caller.on_behalf_of is not None else caller
 
 
 @dataclass(frozen=True, slots=True)

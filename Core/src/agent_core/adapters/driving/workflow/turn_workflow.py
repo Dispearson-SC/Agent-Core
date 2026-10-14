@@ -219,6 +219,7 @@ from agent_core.domain.turn import (
     TurnResult,
     Usage,
     UserInput,
+    reply_identity,
 )
 from agent_core.ports.agent_mailbox import AgentMailbox
 from agent_core.ports.answer_cache import AnswerCache
@@ -2678,8 +2679,9 @@ async def _step_deliver(request: TurnRequest, result: TurnResult) -> None:
         targets are sorted before dispatch, because a set or a completion order would make
         replay take another path (CLAUDE.md #7).
     """
+    # S8. A routed turn runs under a delegated identity; the reply is the PERSON's, on their channel
     await _require_dependencies().channels.deliver(
-        request.caller, OutboundMessage.from_turn_result(result)
+        reply_identity(request.caller), OutboundMessage.from_turn_result(result)
     )
 
 
