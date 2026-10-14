@@ -19,3 +19,4 @@ core: ">=0.0,<1"
 depends: [glazed_tools, plain_language]
 provides:
   profiles: profiles/
+  channels: [glazed]

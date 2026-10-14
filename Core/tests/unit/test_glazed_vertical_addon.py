@@ -442,3 +442,38 @@ def test_every_role_inherits_the_base() -> None:
         )
         assert document["inherit"] == "glazed_base", role
         assert "model" not in document and "compaction" not in document, role
+
+
+# ---- the channel (replaces `_glazed_channel` of vertical/glazed) ----------------------------
+
+
+def test_the_addon_registers_the_glazed_pull_channel() -> None:
+    assert glazed.contributions().pull_channels == ("glazed",)
+
+
+def test_a_glazed_started_turn_has_a_channel_to_leave_on() -> None:
+    """The Glazed backend starts turns on channel `glazed` and polls `GET /turns/{id}`.
+
+    Without a registration the peer-worker's turns died at `_step_deliver` with
+    `UnknownChannelError: no channel registered under 'glazed'`. Port of the test of the same
+    name in vertical/glazed's `test_composition.py`; the channel now comes from the addon.
+    """
+    from agent_core.adapters.driven.addons_fs.loader import load_addons_from_environment
+    from agent_core.adapters.driving.channels.registry import OutboundMessage
+    from agent_core.composition import Settings, build_container
+
+    container = build_container(
+        Settings(addons=load_addons_from_environment(dict(glazed.ENVIRONMENT)))
+    )
+    try:
+        assert "glazed" in container.channels
+        caller = CallerIdentity(
+            subject_id="m-1",
+            channel="glazed",
+            tenant_id=TenantId("S030"),
+            roles=frozenset({"glazed-manager"}),
+        )
+        asyncio.run(container.channels.deliver(caller, OutboundMessage(text="la respuesta")))
+    finally:
+        container.domain_pool.close()
+        container.audit_pool.close()
