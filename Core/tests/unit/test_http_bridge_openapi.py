@@ -958,6 +958,27 @@ class _Overlap:
         return thread
 
 
+def _joined(*threads: threading.Thread, timeout: float = 10) -> None:
+    """Join each thread and fail when one is still running: `join` itself never says."""
+    for thread in threads:
+        thread.join(timeout)
+        assert not thread.is_alive(), f"{thread.name} is still running after {timeout}s"
+
+
+def test_joining_a_build_that_never_finished_fails_instead_of_passing_on() -> None:
+    """Slice 31 advisory (test_http_bridge_openapi.py:971-972): `join(10)` returns on timeout too,
+    so a build stuck in the fetch let the race tests go on to assert on partial results."""
+    stuck = threading.Event()
+    thread = threading.Thread(target=stuck.wait, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(AssertionError, match="still running"):
+            _joined(thread, timeout=0.05)
+    finally:
+        stuck.set()
+        thread.join(5)
+
+
 def test_builds_racing_at_startup_ask_the_backend_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """Slice 29 advisory (openapi.py:147): the cache was checked, then the lock released for the
     fetch, so two toolsets built at the same time both missed and both asked the backend. One URL
@@ -970,8 +991,7 @@ def test_builds_racing_at_startup_ask_the_backend_once(monkeypatch: pytest.Monke
     second = race.build()
     assert race.second_arrived.wait(10)
     race.release.set()
-    first.join(10)
-    second.join(10)
+    _joined(first, second)
 
     assert len(race.results) == 2
     assert race.fetched == [URL]
@@ -992,8 +1012,7 @@ def test_clearing_the_cache_mid_fetch_does_not_make_the_next_build_ask_again(
     second = race.build()
     assert race.second_arrived.wait(10)
     race.release.set()
-    first.join(10)
-    second.join(10)
+    _joined(first, second)
 
     assert len(race.results) == 2
     assert race.fetched == [URL]

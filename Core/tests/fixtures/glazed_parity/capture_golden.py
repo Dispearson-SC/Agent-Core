@@ -74,5 +74,21 @@ def main(old_core: Path) -> int:
     return 0
 
 
+USAGE = "usage: capture_golden.py <old Core directory>  (a vertical/glazed checkout's Core/)"
+
+
+def cli(argv: list[str]) -> int:
+    """Check the command line before anything is imported or written: one argument, a Core
+    directory (it holds `src/agent_core`). Anything else prints the usage and exits 2."""
+    if len(argv) != 1:
+        print(USAGE, file=sys.stderr)
+        return 2
+    old_core = Path(argv[0])
+    if not (old_core / "src" / "agent_core").is_dir():
+        print(f"{old_core} is not a Core directory (no src/agent_core)\n{USAGE}", file=sys.stderr)
+        return 2
+    return main(old_core)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(Path(sys.argv[1])))
+    raise SystemExit(cli(sys.argv[1:]))

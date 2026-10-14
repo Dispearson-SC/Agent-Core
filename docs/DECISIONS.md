@@ -3341,7 +3341,7 @@ decision 2026-10-13) and are described by `addon.yaml`.
   consumers (include, slot insert). `clear_openapi_cache` no longer drops a fetch in flight: racing
   builds wait on a `_Flight`, and the race tests force the overlap with events, not a sleep.
 
-## D94 - The bridge fills unsent defaults into the validated arguments (Phase 3, G7)
+## D94 - The bridge fills unsent defaults into the validated arguments; slice 31 advisories (Phase 3, G7)
 
 - **F1 resolved (approved as default).** A Python tool's signature filled every default into the
   arguments `before_tool_execute` hands the policy and the audit row; the bridge's tools did not, so
@@ -3354,3 +3354,11 @@ decision 2026-10-13) and are described by `addon.yaml`.
   validated arguments and audit rows exactly; F2 (body and query order) stays pinned.
   Rejected: filling defaults only in the glazed overlay (every consumer has the same gap), and
   filling them in Core's policy hook (the hook does not know a tool's schema).
+- **Slice 31 advisories.** Every alias of UTF-8 (`utf8`, `U8`, `cp65001`) is served by a checked
+  fragment, another codec is refused naming it, an unknown one raises `LookupError` as a file read
+  does (tests; the code already compared the resolved codec). The race tests fail when a build thread
+  is still running after its join. The parity harness records httpx's user agent without its version
+  and the comparison ignores it, so an httpx upgrade does not break the golden; `golden.json` is
+  pinned by its SHA-256 in the test; `capture_golden.py` checks its command line (one existing Core
+  directory, else usage and exit 2). The positional pairing of audit rows with scripted calls went
+  away with F1 (rows are compared as a list).

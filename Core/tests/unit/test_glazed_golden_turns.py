@@ -27,6 +27,8 @@ validated arguments, so they compare EQUAL here; the finding's test pins that th
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -37,10 +39,12 @@ import pytest
 from agent_core.adapters.driven.addons_fs.registration import collect_audit_for
 from agent_core.adapters.driven.persistence_pg.audit_repository import PRESENCE_RECORDED
 from agent_core.composition import TOOL_PACKAGES
-from tests.support.glazed_parity import SCENARIOS, Build, run_scenarios
+from tests.support.glazed_parity import SCENARIOS, Build, run_scenarios, without_client_version
 from tests.unit import glazed_vertical_support as glazed
 
 GOLDEN_FILE = Path(__file__).resolve().parents[1] / "fixtures" / "glazed_parity" / "golden.json"
+# The digest of golden.json as capture_golden.py wrote it (slice 31 advisory): checked below.
+GOLDEN_SHA256 = "bb8f44b047bfe5b897a220759eb8b4d21fb59775530e3eb4f2ac4de3b11008b2"
 GOLDEN: dict[str, dict[str, Any]] = json.loads(GOLDEN_FILE.read_text(encoding="utf-8"))
 HELPER = "agent_core_addons.glazed_tools.toolsets._glazed"
 SECTION_START = "How to talk to the manager"
@@ -105,8 +109,14 @@ def _definition(definition: dict[str, Any]) -> dict[str, Any]:
 
 
 def _request(request: dict[str, Any]) -> dict[str, Any]:
-    """F2: the same request whatever the order of its JSON keys and query parameters."""
-    return {**request, "body": None, "query": sorted(map(tuple, request["query"]))}
+    """F2: the same request whatever the order of its JSON keys and query parameters. The httpx
+    version in the user agent is the test environment's, not glazed's (slice 31 advisory)."""
+    return {
+        **request,
+        "body": None,
+        "query": sorted(map(tuple, request["query"])),
+        "headers": without_client_version(request["headers"]),
+    }
 
 
 def _seen(scenario: str, number: int, seen: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -298,3 +308,62 @@ def test_finding_f2_bodies_and_queries_keep_their_content_but_not_their_order(
     assert new["json"] == old["json"]
     assert new["body"] != old["body"]
     assert list(json.loads(new["body"])) == sorted(old["json"])
+
+
+# --- slice 31 advisories: what the comparison must not depend on ---------------------------------
+
+
+def _a_request(user_agent: str) -> dict[str, Any]:
+    return {
+        "method": "GET",
+        "path": "/internal/v1/kpis",
+        "query": [],
+        "headers": {"accept": "*/*", "user-agent": user_agent, "x-glazed-store": "S030"},
+        "body": "",
+        "json": None,
+    }
+
+
+def test_the_httpx_version_in_the_user_agent_is_not_part_of_the_comparison() -> None:
+    """Slice 31 advisory (capture_golden.py:68-72): the golden recorded `python-httpx/0.28.1`, so an
+    httpx upgrade would fail every scenario for a reason that is not glazed's. The client and its
+    version stay compared as `python-httpx`; any other user agent is compared as it is."""
+    assert _request(_a_request("python-httpx/0.28.1")) == _request(_a_request("python-httpx/9.1"))
+    assert _request(_a_request("python-httpx/9.1"))["headers"]["user-agent"] == "python-httpx"
+    assert _request(_a_request("glazed/1.0"))["headers"]["user-agent"] == "glazed/1.0"
+
+
+def test_the_golden_file_is_the_one_capture_golden_wrote() -> None:
+    """Slice 31 advisory (test_glazed_golden_turns.py:43-44): the oracle was read unchecked, so a
+    hand edit (or a bad merge) to golden.json would move the oracle silently. Its digest is pinned
+    here; re-capturing it (capture_golden.py) is the only change that updates this line."""
+    digest = hashlib.sha256(GOLDEN_FILE.read_bytes()).hexdigest()
+
+    assert digest == GOLDEN_SHA256, "golden.json changed: re-capture it, never edit it by hand"
+
+
+def _capture_module() -> Any:
+    path = GOLDEN_FILE.parent / "capture_golden.py"
+    spec = importlib.util.spec_from_file_location("capture_golden_under_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("argv", [[], ["a", "b"], ["{missing}"], ["{not_a_core}"]])
+def test_capture_golden_refuses_a_bad_command_line_with_usage_and_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    """Slice 31 advisory (capture_golden.py:77-78): `sys.argv[1]` unchecked raised an IndexError
+    with no argument, and any path was taken for the old Core. The command line is checked first:
+    one argument, an existing Core directory (it has `src/agent_core`), else usage and exit 2."""
+    (tmp_path / "plain").mkdir()
+    paths = {"{missing}": str(tmp_path / "absent"), "{not_a_core}": str(tmp_path / "plain")}
+    capture = _capture_module()
+    before = GOLDEN_FILE.read_bytes()
+
+    assert capture.cli([paths.get(a, a) for a in argv]) == 2
+
+    assert "usage: capture_golden.py <old Core directory>" in capsys.readouterr().err
+    assert GOLDEN_FILE.read_bytes() == before

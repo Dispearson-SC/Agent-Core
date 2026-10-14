@@ -333,13 +333,24 @@ class _Backend:
         return httpx.Response(status, json=spec.get("json", {}), headers=headers)
 
 
+def without_client_version(headers: dict[str, str]) -> dict[str, str]:
+    """The headers with httpx's own `user-agent` (`python-httpx/<version>`) as `python-httpx`: the
+    version is the environment's, so a capture must not pin it (slice 31 advisory)."""
+    agent = headers.get("user-agent", "")
+    if not agent.startswith("python-httpx/"):
+        return headers
+    return {**headers, "user-agent": "python-httpx"}
+
+
 def _request(request: httpx.Request) -> dict[str, Any]:
     raw = request.content.decode() if request.content else ""
     return {
         "method": request.method,
         "path": request.url.raw_path.decode().split("?", 1)[0],
         "query": [list(pair) for pair in request.url.params.multi_items()],
-        "headers": dict(sorted((k.lower(), v) for k, v in request.headers.items())),
+        "headers": without_client_version(
+            dict(sorted((k.lower(), v) for k, v in request.headers.items()))
+        ),
         "body": raw,
         "json": json.loads(raw) if raw else None,
     }

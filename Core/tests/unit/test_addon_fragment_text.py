@@ -231,6 +231,35 @@ def test_the_checked_text_is_utf8_and_another_encoding_is_refused(tmp_path: Path
         fragment.read_text(encoding="latin-1")
 
 
+@pytest.mark.parametrize("spelling", ["utf-8", "UTF-8", "utf8", "UTF8", "utf_8", "U8", "cp65001"])
+def test_every_alias_of_utf8_is_served_and_never_refused(tmp_path: Path, spelling: str) -> None:
+    """Slice 31 advisory (registration.py:411-414): the refusal compares the codec Python resolves,
+    never the spelling, so an alias of UTF-8 a caller passes (`utf8`, `U8`...) is served."""
+    _addon(tmp_path, "For {{setting:audience}}.")
+    fragment = _register(tmp_path).fragments["style"]
+
+    assert fragment.read_text(encoding=spelling) == "For people."
+
+
+@pytest.mark.parametrize("spelling", ["utf-8-sig", "utf-16", "ascii", "cp1252"])
+def test_a_codec_that_is_not_utf8_is_refused_naming_it(tmp_path: Path, spelling: str) -> None:
+    _addon(tmp_path, "For {{setting:audience}}.")
+    fragment = _register(tmp_path).fragments["style"]
+
+    with pytest.raises(ValueError, match=spelling):
+        fragment.read_text(encoding=spelling)
+
+
+def test_an_unknown_encoding_fails_as_a_file_read_would(tmp_path: Path) -> None:
+    """`Path.read_text(encoding="no-such-codec")` raises `LookupError`; the checked text is a
+    `FragmentFile` standing in for a file, so it fails the same way, never served."""
+    _addon(tmp_path, "For {{setting:audience}}.")
+    fragment = _register(tmp_path).fragments["style"]
+
+    with pytest.raises(LookupError):
+        fragment.read_text(encoding="no-such-codec")
+
+
 def test_every_consumer_of_an_addon_fragment_is_served_the_checked_text(tmp_path: Path) -> None:
     """The two Core consumers: a profile's `include` and a slot insert, through `load_profiles`."""
     _addon_with_profile(tmp_path / "addons")
