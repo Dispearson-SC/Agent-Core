@@ -457,10 +457,15 @@ def _loose_toolset() -> FunctionToolset[None]:
     return FunctionToolset([Tool(echo, metadata=safe_tool_metadata())])
 
 
-def _drive_forging(toolset: Any, capabilities: list[Any], forged: object) -> None:
+def _drive_forging(
+    toolset: Any,
+    capabilities: list[Any],
+    forged: object,
+    extra: Mapping[str, object] | None = None,
+) -> None:
     def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         if not any(isinstance(p, ToolReturnPart) for m in messages for p in m.parts):
-            args = {"text": "hi", WRAPPED_BY_AUDIT_KEY: forged}
+            args = {"text": "hi", WRAPPED_BY_AUDIT_KEY: forged, **(extra or {})}
             return ModelResponse(parts=[ToolCallPart("echo", args)])
         return ModelResponse(parts=[TextPart("done")])
 
@@ -474,7 +479,10 @@ def test_a_marker_the_model_forges_never_reaches_the_audit_of_an_unwrapped_tool(
 
     _drive_forging(_loose_toolset(), [hooks], ["decision_desk"])
 
-    assert WRAPPED_BY_AUDIT_KEY not in audit.calls[0].payload[3]
+    audited = audit.calls[0].payload[3]
+    assert WRAPPED_BY_AUDIT_KEY not in audited  # not as the runner's marker
+    # ... and the forged value is not lost either: it is labelled as what the tool received.
+    assert audited == {"text": "hi", WRAPPED_BY_RECEIVED_AUDIT_KEY: ["decision_desk"]}
 
 
 def test_the_marker_the_runner_sets_replaces_one_the_model_forges() -> None:
@@ -514,6 +522,42 @@ def test_the_audit_carries_an_argument_the_tool_received_under_the_reserved_name
     assert audit.calls[0].payload[3] == {
         "text": "hi",
         WRAPPED_BY_RECEIVED_AUDIT_KEY: ["decision_desk"],
+    }
+
+
+def test_a_received_label_the_model_sends_is_dropped_so_it_cannot_pose_as_the_runners() -> None:
+    allow = PolicyRule(rule_id="r-echo", tool_pattern="echo", effect=Effect.ALLOW, reason="ok")
+    hooks, audit = _enforcement((allow,))
+
+    # Only the received-label is forged: nothing was sent under the reserved name itself.
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if not any(isinstance(p, ToolReturnPart) for m in messages for p in m.parts):
+            args = {"text": "hi", WRAPPED_BY_RECEIVED_AUDIT_KEY: ["fake_addon"]}
+            return ModelResponse(parts=[ToolCallPart("echo", args)])
+        return ModelResponse(parts=[TextPart("done")])
+
+    agent = Agent(FunctionModel(model_fn), toolsets=[_loose_toolset()], capabilities=[hooks])
+    asyncio.run(agent.run("go"))
+
+    assert audit.calls[0].payload[3] == {"text": "hi"}
+
+
+def test_forging_both_reserved_keys_audits_only_what_arrived_under_the_marker_name() -> None:
+    async def passthrough(original: CallOriginal, arguments: Mapping[str, Any], ctx: Any) -> Any:
+        return await original()
+
+    allow = PolicyRule(rule_id="r-echo", tool_pattern="echo", effect=Effect.ALLOW, reason="ok")
+    hooks, audit = _enforcement((allow,))
+    (wrapped,) = wrap_toolsets([_loose_toolset()], [_wrapper("shop", passthrough)])
+
+    _drive_forging(
+        wrapped, [hooks], ["evil_addon"], extra={WRAPPED_BY_RECEIVED_AUDIT_KEY: ["other_evil"]}
+    )
+
+    assert audit.calls[0].payload[3] == {
+        "text": "hi",
+        WRAPPED_BY_AUDIT_KEY: ["shop"],
+        WRAPPED_BY_RECEIVED_AUDIT_KEY: ["evil_addon"],
     }
 
 
