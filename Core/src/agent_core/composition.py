@@ -212,6 +212,7 @@ from agent_core.adapters.driven.persistence_pg.migrations import (
     ensure_databases,
 )
 from agent_core.adapters.driven.persistence_pg.policy_repository import PgToolPolicy
+from agent_core.adapters.driven.persistence_pg.route_audit import PgRouteAudit
 from agent_core.adapters.driven.persistence_pg.tool_journal import PgToolJournal
 from agent_core.adapters.driven.persistence_pg.transcript_repository import (
     PgTranscriptReader,
@@ -224,6 +225,7 @@ from agent_core.adapters.driven.profiles_fs.inheritance import (
     resolve_documents,
 )
 from agent_core.adapters.driven.profiles_fs.loader import PROFILE_FILE_ERRORS
+from agent_core.adapters.driven.routing.addon_router import AddonTurnRouter
 from agent_core.adapters.driven.skills_fs.registry import FilesystemSkillRegistry
 from agent_core.adapters.driven.tools import peer_background as peer_background_tools
 from agent_core.adapters.driven.tools import peers as peer_tools
@@ -266,6 +268,7 @@ from agent_core.application.decide_approval import DecideApproval, PendingCheck,
 from agent_core.application.event_feed import EventFeed
 from agent_core.application.ingest_media import IngestMedia
 from agent_core.application.resume_turn import ResumeTurn
+from agent_core.application.route_turn import DEFAULT_ROUTER_TIMEOUT_MS, RouteTurn
 from agent_core.application.start_turn import StartTurn
 from agent_core.domain.media import MediaRef
 from agent_core.domain.policy import PolicyRule
@@ -308,6 +311,7 @@ __all__ = [
     "build_container",
     "dbos_config",
     "load_profiles",
+    "refuse_unroutable_profiles",
     "start_container",
 ]
 
@@ -546,7 +550,11 @@ def _export_mapped_credentials(env: Mapping[str, str]) -> None:
 # round's recorded steps (`_step_read_peer_answer`, `_step_peek_peer_answer`) gained a `kind`. A
 # peer workflow recovered under .11 from a .10 input would read attributes that pickle never had.
 # Stranded on purpose (drain first, OPERATIONS.md). Nothing was deployed under .3-.10.
-PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.11"
+# .12 (D95): the turn body gained `_step_route` (the turn router) between the drain and the turn,
+# run for every turn whether routing is on or not, so the replay shape never depends on config. A
+# turn workflow recovered under .12 from a .11 log would find `_step_new_turn_id` where the route
+# step is expected. Stranded on purpose (drain first, OPERATIONS.md).
+PINNED_DBOS_APPLICATION_VERSION: Final[str] = "agent-core-turns.12"
 
 # C5 (D32). The default of `Settings.max_turn_attempts` is `DEFAULT_MAX_TURN_ATTEMPTS`, defined once
 # in `turn_workflow` (where the budget is enforced) and imported above; D33 removed the second copy.
@@ -701,6 +709,13 @@ class Settings:
     # model is called (a streaming request) for every such turn; switch it on where a front-end
     # (voice) reads `GET /turns/{id}/events`.
     stream_replies: bool = False
+    # D95. Consult a profile's turn router (an addon's `provides.routers`) before the model when a
+    # channel starts its turn (`AGENT_CORE_TURN_ROUTING`, true/false/1/0). OFF by default: off, no
+    # router is consulted whatever the profiles declare. On, only profiles with `routing:` route.
+    # `AGENT_CORE_TURN_ROUTER_TIMEOUT_MS` bounds one consultation (default 1500); past it the turn
+    # runs the requested profile.
+    turn_routing: bool = False
+    turn_router_timeout_ms: int = DEFAULT_ROUTER_TIMEOUT_MS
 
     @property
     def resolved_audit_conninfo(self) -> str:
@@ -782,6 +797,12 @@ class Settings:
             retire_other_versions=_parse_flag(
                 "AGENT_CORE_RETIRE_OTHER_VERSIONS", env.get("AGENT_CORE_RETIRE_OTHER_VERSIONS")
             ),
+            turn_routing=_parse_flag(
+                "AGENT_CORE_TURN_ROUTING", env.get("AGENT_CORE_TURN_ROUTING")
+            ),
+            turn_router_timeout_ms=_parse_router_timeout_ms(
+                env.get("AGENT_CORE_TURN_ROUTER_TIMEOUT_MS")
+            ),
         )
 
 
@@ -826,6 +847,22 @@ def _parse_max_redeliveries(raw: str | None) -> int:
             f"AGENT_CORE_PEER_MAX_REDELIVERIES must be a non-negative whole number, got {raw!r}"
         )
     return cap
+
+
+def _parse_router_timeout_ms(raw: str | None) -> int:
+    """`AGENT_CORE_TURN_ROUTER_TIMEOUT_MS` as a positive integer; unset means the default."""
+    if raw is None:
+        return DEFAULT_ROUTER_TIMEOUT_MS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise ValueError(
+            f"AGENT_CORE_TURN_ROUTER_TIMEOUT_MS must be a positive whole number of "
+            f"milliseconds, got {raw!r}"
+        )
+    return value
 
 
 def _parse_max_turn_attempts(raw: str | None) -> int:
@@ -1178,6 +1215,39 @@ def _refuse_topology_drift(
     validate_topology(profiles, rules)
 
 
+def refuse_unroutable_profiles(
+    profiles: Mapping[str, AgentProfile], routers: frozenset[str]
+) -> None:
+    """Fail startup on a profile whose `routing:` cannot work (D95), naming every offender.
+
+    Called only when `AGENT_CORE_TURN_ROUTING` is on. Its router must be one an enabled addon
+    provides, and every target a loaded profile a channel may start: a route to anything else
+    would only ever fall back, which reads as a router that never fires.
+    """
+    problems: list[str] = []
+    for profile_id, profile in sorted(profiles.items()):
+        routing = profile.routing
+        if routing is None:
+            continue
+        if routing.router not in routers:
+            known = ", ".join(sorted(routers)) or "none"
+            problems.append(
+                f"profile {profile_id!r}: router {routing.router!r} is not provided by any "
+                f"enabled addon (known: {known})"
+            )
+        for target in routing.targets:
+            found = profiles.get(target)
+            if found is None:
+                problems.append(f"profile {profile_id!r}: route target {target!r} is not loaded")
+            elif not found.mode.startable_by_channel:
+                problems.append(
+                    f"profile {profile_id!r}: route target {target!r} has mode "
+                    f"{found.mode.value!r}, which a channel cannot start"
+                )
+    if problems:
+        raise ValueError("unroutable profiles:\n  " + "\n  ".join(problems))
+
+
 def _refuse_unusable_answer_schemas(profiles: Mapping[str, AgentProfile]) -> None:
     """Fail startup on a profile whose `answer_schema` is not a valid JSON Schema (C9, D44).
 
@@ -1382,6 +1452,8 @@ class Container:
     # C1p (D55). The event adapters' own pool, opened on first use; the process that runs the
     # container closes it (`main` does, next to the other two pools).
     events_connections: EventConnections | None = None
+    # D95. The turn router; None when `AGENT_CORE_TURN_ROUTING` is off (the default).
+    route_turn: RouteTurn | None = None
     # C1q. The publisher's own pool, so the feed's long reads never make a publish wait.
     events_publisher_connections: EventConnections | None = None
 
@@ -1989,6 +2061,7 @@ def bind_turn_workflow(container: Container) -> None:
             attempts=attempt_ledger_for(container.domain_pool),
             max_attempts=container.settings.max_turn_attempts,
             events=container.events,
+            route_turn=container.route_turn,
         )
     )
 
@@ -2019,6 +2092,9 @@ def build_container(
     # policy files: drift stops the process here, not as refused asks on a customer's turn.
     _refuse_topology_drift(profiles, resolved.policy_dir, addons.policy_rules)
     _refuse_unusable_answer_schemas(profiles)
+    # D95. Only when routing is on: off, a `routing:` block is inert and checked by nobody.
+    if resolved.turn_routing:
+        refuse_unroutable_profiles(profiles, frozenset(addons.routers))
 
     model = LiteLLMGateway(resolved.proxy_base_url)
     policy = PgToolPolicy(PoolConnections(domain_pool))
@@ -2140,6 +2216,18 @@ def build_container(
     signal_evidence = _pg_evidence_signal(resolved.app_conninfo)
 
     task_graph = PgTaskGraphReader(events_connections)
+    # D95. The turn router: None unless the deployment switched routing on. Audited on the AUDIT
+    # pool (CLAUDE.md #6), like every other trail.
+    route_turn = (
+        RouteTurn(
+            routers=AddonTurnRouter(addons.routers),
+            audit=PgRouteAudit(PoolConnections(audit_pool)),
+            profiles=profiles,
+            timeout_ms=resolved.turn_router_timeout_ms,
+        )
+        if resolved.turn_routing
+        else None
+    )
     container = Container(
         settings=resolved,
         domain_pool=domain_pool,
@@ -2187,6 +2275,7 @@ def build_container(
             # C27. Lets a non-entry agent run the follow-up that carries a background answer home.
             is_follow_up=mailbox.is_background_followup,
         ),
+        route_turn=route_turn,
         # t-f3-20. The SAME runner, store, audit sink and profile map `start_turn` holds.
         # A second set here would police the continuation with rules loaded from another
         # container and file its tool calls through another sink - and the two would only

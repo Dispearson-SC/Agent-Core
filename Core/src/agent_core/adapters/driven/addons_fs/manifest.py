@@ -130,6 +130,15 @@ class Provides(_Strict):
     channels: tuple[Slug, ...] = ()
     inserts: tuple[ProfileInsertion, ...] = ()
     wrappers: tuple[ToolWrapperDecl, ...] = ()
+    # D95. Turn routers: `routers/<name>.py` with `route(request[, settings])`.
+    routers: tuple[Slug, ...] = ()
+
+    @field_validator("routers")
+    @classmethod
+    def _routers_once(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("lists the same router twice")
+        return value
 
     @field_validator("wrappers")
     @classmethod

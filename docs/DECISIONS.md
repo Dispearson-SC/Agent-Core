@@ -3362,3 +3362,43 @@ decision 2026-10-13) and are described by `addon.yaml`.
   pinned by its SHA-256 in the test; `capture_golden.py` checks its command line (one existing Core
   directory, else usage and exit 2). The positional pairing of audit rows with scripted calls went
   away with F1 (rows are compared as a list).
+
+## D95 - A turn router before the model: `provides.routers`, a recorded step, off by default (Phase 5, P1)
+
+- **What.** A profile may declare `routing: {router, targets}`. When `AGENT_CORE_TURN_ROUTING` is on
+  and a person or a channel starts its turn, the named router (an addon's `provides.routers`,
+  `routers/<name>.py` with `route(request[, settings])`) answers `pass`, `route(profile_id)` or
+  `intent(name, arguments)` before the model runs. A route makes the turn the target profile's from
+  its first step: its `started` event, its persisted request, its policy, approvals and budgets.
+- **Layering.** `domain/routing.py` holds the decision, the record and `resolve_route` (pure);
+  `ports/turn_router.py` asks a router; `ports/route_audit.py` records the consultation;
+  `application/route_turn.py` (`RouteTurn`) owns the timeout, the fallbacks and the audit;
+  `adapters/driven/routing/addon_router.py` turns an addon's plain-dict answer into a decision.
+  Addons stay plain Python (no domain imports), as wrappers do.
+- **A port of its own for the audit.** `AuditSink` is frozen with a regression lock and a route is
+  none of its five facts, so `RouteAudit.record_route` writes `audit_turn_routes` (migration 0045)
+  on the audit pool, append-only (CLAUDE.md #6). A route is applied only after its row is written;
+  an audit failure runs the requested profile (`audit_unavailable`).
+- **Guards.** A route lands only on a target the declaring profile lists, that is loaded and a
+  channel may start (`resolve_route`); startup refuses a routing profile whose router or targets
+  cannot work, when routing is on. A router slower than `AGENT_CORE_TURN_ROUTER_TIMEOUT_MS`
+  (default 1500 ms), one that raises (recorded as `error:<Class>`, never the message) and a
+  malformed answer fall back to the requested profile. Peer and subagent turns are never routed. A
+  router is not a safety barrier: it chooses a profile, it grants nothing.
+- **Intent.** Accepted by the type and recorded; until intent executors exist (P3) it runs the
+  normal path with `intent_not_supported`.
+- **Replay safety.** The consultation is `_step_route`, a DBOS step whose result is the routed
+  request and its record, so a replayed or recovered turn reads the route back and never asks the
+  router again (an integration test kills the process mid-turn and changes the router's answer).
+  The step runs for EVERY person-started turn, routing on or off, so the replay shape does not
+  depend on configuration; that is a new step, so `PINNED_DBOS_APPLICATION_VERSION` moves to
+  `agent-core-turns.12` (drain first, OPERATIONS.md). Rejected: running the step only when routing
+  is on (flipping the flag would strand every turn in flight with `DBOSUnexpectedStepError`), DBOS
+  patching (needs `enable_patching`, a second versioning mechanism), and routing inside
+  `StartTurn` (a crash mid-model would re-classify on the step retry).
+- **Observability.** A `routed` progress event before `started` (`agent` the profile that runs,
+  `detail` `routed` / `passed` / `fallback:<reason>`, `elapsed_ms` the router's time; no label on the
+  feed) and the audit row with label, confidence, calibration, model, elapsed time, decision and
+  fallback reason. The feed fold ignores `routed` (it changes no turn's state).
+- **Reversible defaults.** Off by default; one router per profile; the timeout is per deployment,
+  not per profile; the confidence threshold lives in the router (P2), not in Core.

@@ -165,6 +165,7 @@ from agent_core.adapters.driving.channels.registry import ChannelRegistry, Outbo
 from agent_core.adapters.driving.peers.worker import new_peer_session
 from agent_core.application.compact_context import CompactContext
 from agent_core.application.resume_turn import ResolvedTool, ResumeTurn
+from agent_core.application.route_turn import RoutedTurn, RouteTurn
 from agent_core.application.start_turn import StartTurn
 from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.answer_cache import (
@@ -196,6 +197,7 @@ from agent_core.domain.peers import (
     peer_workflow_id,
 )
 from agent_core.domain.profile import AgentProfile, profile_content_hash
+from agent_core.domain.routing import RouteRecord
 from agent_core.domain.subagents import SPAWN_SUBAGENT_TOOL
 from agent_core.domain.turn import (
     BackgroundReturn,
@@ -784,6 +786,10 @@ class TurnWorkflowDependencies:
     # configuration), they just have nobody to tell.
     events: EventPublisher | None = None
 
+    # D95. The turn router. `None` (routing off, the default) makes `_step_route` hand the request
+    # back unchanged; the step runs either way, so the replay shape does not depend on config.
+    route_turn: RouteTurn | None = None
+
 
 _dependencies: TurnWorkflowDependencies | None = None
 
@@ -1037,6 +1043,55 @@ async def _step_drain_pending(request: TurnRequest) -> TurnRequest:
             media=request.input.media,
         ),
     )
+
+
+@DBOS.step()
+async def _step_route(request: TurnRequest) -> RoutedTurn:
+    """Ask the profile's turn router which profile runs this turn, ONCE (D95).
+
+    A STEP SO THE DECISION IS A RECORDED FACT. A router is a classifier or a model: asked twice it
+    may answer twice differently. The step's result (the routed request and its record) is stored
+    in the operation log, so a replayed or resumed workflow reads it back and runs the same
+    profile it ran before the crash, without asking the router again. The `routed` event is
+    published from here with a deterministic id, so a step that ran twice across a crash leaves
+    one row; the audit row (written by `RouteTurn` before a route is applied) is at least once,
+    like a tool call's.
+
+    Runs for every turn a person or a channel started; with no router bound, or a profile that
+    declares no `routing:`, it returns the request unchanged and publishes nothing. Never raises
+    for a router's sake: `RouteTurn` falls back to the requested profile.
+    """
+    route_turn = _require_dependencies().route_turn
+    if route_turn is None or not route_turn.applies(request):
+        return RoutedTurn(request)
+    turn_id = TurnId(_current_workflow_id())
+    routed = await route_turn.execute(turn_id, request)
+    if routed.record is not None:
+        await _publish_routed(turn_id, request, routed.record)
+    return routed
+
+
+async def _publish_routed(turn_id: TurnId, request: TurnRequest, record: RouteRecord) -> None:
+    """The `routed` progress event. Fails open, like every progress event (C21)."""
+    publisher = _require_dependencies().events
+    if publisher is None:
+        return
+    try:
+        await publisher.publish(
+            ProgressEvent(
+                event_id=progress_event_id(str(turn_id), EventKind.ROUTED),
+                kind=EventKind.ROUTED,
+                tenant_id=str(request.session.tenant_id),
+                session_id=str(request.session.session_id),
+                turn_id=str(turn_id),
+                agent=record.profile_id,
+                at=datetime.now(UTC),
+                elapsed_ms=record.elapsed_ms,
+                detail=record.outcome,
+            )
+        )
+    except Exception:
+        _LOG.warning("could not publish the routed event of turn %r", turn_id, exc_info=True)
 
 
 @DBOS.step()
@@ -2816,6 +2871,11 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
         # Rebinding `request` is deterministic: the combined value is a STEP result, so a
         # replay reads it back out of the operation log rather than draining again.
         request = await _step_drain_pending(request)
+
+        # D95. Before the turn exists, after the input is complete: the router reads everything
+        # the person said, and the turn (its `started` event, its persisted request, its policy)
+        # is the routed profile's from the start. A STEP result, so a replay re-reads the route.
+        request = (await _step_route(request)).request
 
         end = await _drive_turn(request)
         if end.closed:

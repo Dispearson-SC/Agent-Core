@@ -5,7 +5,7 @@ changes. Decisions behind them are in `docs/DECISIONS.md`.
 
 ## Bumping the DBOS application version
 
-`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.11`) is bumped when a
+`composition.PINNED_DBOS_APPLICATION_VERSION` (currently `agent-core-turns.12`) is bumped when a
 change makes turns that are already in flight incompatible with the new code: a workflow step
 added, removed, renamed or reordered, or a changed workflow argument (D28 took `.1` to `.2`;
 D31 took `.2` to `.3`: the peer job gained `answer_token` and the round gained the cancel
@@ -186,6 +186,33 @@ VALID`) and `0042` (`VALIDATE CONSTRAINT`, a lock that lets reads and writes go 
 and safe under a running `.10` build: its inserts name neither column and read as `peer`, depth 0.
 Nothing was deployed under `.3`-`.10` on this branch, so the bumps collapse into one before the
 first release.
+
+## Deploying the turn router (`.11` -> `.12`, D95)
+
+Every turn a person or a channel starts now records `_step_route` between the drain and the turn id,
+whether routing is on or not (the replay shape never depends on configuration), so a turn suspended
+under `.11` is stranded: drain before deploying (`stranded-turns` against the OLD build must report
+0), deploy, run `stranded-turns` again and cancel what it lists. Migration `0045`
+(`audit_turn_routes`) is additive and safe under a running `.11` build.
+
+Routing is OFF until `AGENT_CORE_TURN_ROUTING=true`. Then a profile with a `routing:` block consults
+its router (an enabled addon's `provides.routers`) before the model; startup stops when such a
+profile names a router no enabled addon provides, or a target that is not loaded or that a channel
+cannot start. `AGENT_CORE_TURN_ROUTER_TIMEOUT_MS` (default 1500) bounds one consultation. Turning it
+off again needs no drain: the step stays and simply returns the request unchanged.
+
+What the router did, per turn:
+
+```postgresql
+SELECT turn_id, requested_profile, profile_id, decision, label, confidence, calibrated, model,
+       elapsed_ms, fallback_reason, at
+FROM audit_turn_routes ORDER BY id DESC LIMIT 50;
+```
+
+`fallback_reason` is `timeout`, `error:<ExceptionClass>`, `target_not_allowed`,
+`target_not_startable`, `intent_not_supported` or `audit_unavailable` (a route is applied only after
+its audit row is written). The event feed shows a `routed` event before `started`, its `detail`
+`routed`, `passed` or `fallback:<reason>`, never the label.
 
 ### Subagents: looking and stopping
 

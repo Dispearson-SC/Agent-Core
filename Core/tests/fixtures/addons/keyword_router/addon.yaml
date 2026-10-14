@@ -1,0 +1,13 @@
+# Test-only turn router (D95): routes a turn whose text contains a configured keyword to the
+# configured profile and passes everything else. Proves `provides.routers` end to end; it is not a
+# classifier and ships nowhere.
+name: keyword_router
+version: 1.0.0
+core: ">=0.0,<1"
+provides:
+  # routers/keyword.py defines `route(request, settings)` returning a plain mapping.
+  routers:
+    - keyword
+settings:
+  keyword: {type: str, default: invoice}
+  target: {type: str, default: billing}

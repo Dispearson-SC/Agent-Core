@@ -379,6 +379,9 @@ def install(
     monkeypatch.setattr(
         turn_workflow, "_step_progress", inspect.unwrap(turn_workflow._step_progress)
     )
+    # D95. The route step runs its real body too: with no `route_turn` bound it hands the request
+    # back unchanged, and a test that wants routing binds one on the dependencies.
+    monkeypatch.setattr(turn_workflow, "_step_route", inspect.unwrap(turn_workflow._step_route))
     monkeypatch.setattr(turn_workflow, "_step_deliver", noop)
     monkeypatch.setattr(turn_workflow, "_step_compact", noop)
     monkeypatch.setattr(turn_workflow, "_step_expire", expire)

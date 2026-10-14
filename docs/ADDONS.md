@@ -28,6 +28,7 @@ addons/shop/
   toolsets/cart.py      # provides.toolsets: [cart]
   toolsets/_common.py   # not declared: a helper the toolsets import (`from ._common import x`)
   wrappers/stamp.py     # provides.wrappers
+  routers/keyword.py    # provides.routers: [keyword]
   fragments/note.md     # provides.fragments: fragments/
   profiles/clerk.yaml   # provides.profiles: profiles/
   policy/rules.yaml     # provides.policy
@@ -66,6 +67,7 @@ version that is not a version, or a `core` range that is not a range, fails at m
 | `profiles: dir/` | profile templates served beside Core's | `*.yaml` files | ids are global; a profile may `inherit` |
 | `inserts: [{profile, slot, fragment}]` | where your fragment goes in someone else's profile | nothing (uses one of your `fragments`) | your own fragments only; the slot must exist. `profile: "*"` means every profile that declares the slot (D89) |
 | `wrappers: [{tool, wrapper}]` | a wrapper around an existing tool | `wrappers/<wrapper>.py` with `wrap(original, arguments, ctx)` | a tool of Core or of an addon you depend on (directly or not); never your own |
+| `routers: [name]` | a turn router a profile can name in `routing.router` (D95) | `routers/<name>.py` with `route(request)` or `route(request, settings)`, sync or async | names are global; consulted only when `AGENT_CORE_TURN_ROUTING` is on |
 | `channels: [id]` | pull-mode channel ids a backend can start turns on | nothing (no code) | not an id Core or `AGENT_CORE_PULL_CHANNELS` owns |
 
 A declared directory that is missing or empty is an error, not an empty contribution.
@@ -203,6 +205,41 @@ is read-only. Wrappers on one tool nest in activation order, the last loaded out
 exception from wrapper code reaches the model as a tool error with the text kept in the log. If a
 tool itself takes an argument called `_wrapped_by` (reserved), the audit records it as
 `_wrapped_by_received`, under the tool's own audit decision for that name (D81).
+
+## Routers (before the model, D95)
+
+A router reads what a person said before the model does and picks the way the turn goes. It is
+plain data in and out: the addon imports nothing of Core.
+
+```python
+# routers/keyword.py
+def route(request, settings):          # or route(request); `async def` works too
+    # request = {"text", "profile_id", "channel", "tenant_id", "modality"}
+    if "invoice" in request["text"].lower():
+        return {"decision": "route", "profile_id": "billing",
+                "label": "invoice", "confidence": 0.97, "calibrated": True, "model": "clf-1"}
+    return {"decision": "pass", "label": "no_match"}
+```
+
+`decision` is `pass` (run as asked), `route` (run as `profile_id` instead) or `intent` (`intent`
+and `arguments`: a typed intent; until intent executors exist it runs the normal path with the
+reason recorded). Every other key is optional; an unknown key, a wrong type or a confidence outside
+[0, 1] is a malformed answer and the turn runs as asked. A profile opts in:
+
+```yaml
+# profiles/front_desk.yaml
+routing:
+  router: keyword                # an enabled addon's provides.routers entry
+  targets: [billing, returns]    # the ONLY profiles it may route to
+```
+
+A router is not a safety barrier. A route only changes WHICH profile runs the turn, and only to a
+listed target that is loaded and that a channel may start; the routed turn runs that profile's
+full policy, approvals and budgets. Only turns a person or a channel started are routed (never a
+peer's ask or a subagent). A router slower than `AGENT_CORE_TURN_ROUTER_TIMEOUT_MS` (default 1500)
+or one that raises runs the turn as asked. Each consultation is one `audit_turn_routes` row and a
+`routed` progress event; the decision is a recorded workflow step, so a recovered turn never asks
+the router again. With `AGENT_CORE_TURN_ROUTING` off (the default) nothing is consulted.
 
 ## Settings
 
@@ -537,6 +574,8 @@ Widening that list is a reviewed change to the test helper and to this section.
   and a failing file rolls back alone (the earlier ones stay). One `post_init`, synchronous.
 - Wrapper `arguments` are read-only; an addon cannot wrap its own tool; the last loaded wrapper is
   outermost; the `{{slot:x}}` marker has no escape.
+- A router answers within one call (no streaming, no retries of its own); `intent` decisions run the
+  normal path until intent executors exist; one router per profile.
 - An addon policy file needs a policy directory; a channel id clashing with the operator's
   `AGENT_CORE_PULL_CHANNELS` is a collision.
 - Each of these is a reversible default recorded in DECISIONS.md.

@@ -49,6 +49,10 @@ class EventKind(StrEnum):
     # C26 (D58). A piece of the reply a person-started turn is streaming: `text` is the chunk and
     # `detail` is `<run>:<response>:<index>` (see `ProgressEvent`). The only kind that carries text.
     DELTA = "delta"
+    # D95. A router chose the profile a person-started turn runs under, before `started`: `agent`
+    # is that profile, `detail` the outcome (`routed`, `passed`, `fallback:<reason>`), `elapsed_ms`
+    # how long the router took. Never a label or text. It does not change a turn's state.
+    ROUTED = "routed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +240,8 @@ def fold_snapshot(
         if event.kind is EventKind.STARTED:
             turns[event.turn_id] = _placeholder(event)
             continue
+        if event.kind is EventKind.ROUTED:
+            continue  # precedes `started` and changes nothing about the turn's state
         current = turns.get(event.turn_id)
         if current is None:
             if omitted <= 0:

@@ -27,6 +27,10 @@ THE RULE: AN ADDON CONTRIBUTES WHAT ITS MANIFEST `provides` DECLARES, AND NOTHIN
                    `wrap(original, arguments, ctx)` (A6, D78). Only a tool of Core or of an addon in
                    the wrapper's dependency closure, never the addon's own; see
                    `adapters/driven/tools/wrapping.py` for what a wrapper may do.
+    * routers      `provides.routers: [name]` -> `<addon>/routers/<name>.py` with a
+                   `route(request)` (or `route(request, settings)`, sync or async) that reads a
+                   plain mapping and answers one (D95). Consulted before the model only when
+                   `AGENT_CORE_TURN_ROUTING` is on; see `adapters/driven/routing/addon_router.py`.
     Every name is global: a collision between addons, or with a built-in, stops startup naming
     the addon (`AddonRegistrationError`). With no addons enabled the result is `EMPTY` and the
     caller does exactly what it did before.
@@ -62,6 +66,7 @@ from agent_core.adapters.driven.persistence_pg.audit_repository import (
 )
 from agent_core.adapters.driven.policy_fs.loader import parse_policy_rules
 from agent_core.adapters.driven.profiles_fs.fragments import AddonFragment, FragmentFile
+from agent_core.adapters.driven.routing.addon_router import RouterFunction
 from agent_core.adapters.driven.tools.provider import ToolsetBuilder
 from agent_core.adapters.driven.tools.wrapping import ToolWrapper
 from agent_core.domain.policy import Effect, PolicyRule
@@ -94,6 +99,8 @@ class AddonContributions:
     tools: Mapping[str, frozenset[str]] = field(default_factory=dict)
     # The tool wrappers, in activation order (A6, D78).
     wrappers: tuple[ToolWrapper, ...] = ()
+    # D95. Router name -> its `route` function, the addon's settings already bound.
+    routers: Mapping[str, RouterFunction] = field(default_factory=dict)
 
 
 EMPTY: Final = AddonContributions()
@@ -472,6 +479,66 @@ def _wrappers_of(
     return tuple(found)
 
 
+def _routers_of(addon: ResolvedAddon, taken: dict[str, str]) -> dict[str, RouterFunction]:
+    """The addon's `provides.routers`, imported and bound to its settings. Names are global."""
+    owner = addon.manifest.name
+    found: dict[str, RouterFunction] = {}
+    for name in addon.manifest.provides.routers:
+        if name in taken:
+            raise _refuse(
+                owner, "provides.routers", f"{name!r} is already provided by {taken[name]}"
+            )
+        module = _import_addon_file(addon, "provides.routers", "routers", name)
+        function = getattr(module, "route", None)
+        if not callable(function):
+            raise _refuse(
+                owner,
+                "provides.routers",
+                f"{name!r} has no route(request) or route(request, settings) function",
+            )
+        found[name] = _bind_router_settings(owner, name, function, addon.settings)
+        taken[name] = f"addon {owner!r}"
+    return found
+
+
+def _bind_router_settings(
+    owner: str, name: str, function: Callable[..., Any], settings: Mapping[str, Any]
+) -> RouterFunction:
+    """A one-argument router, whichever shape the module declared: `route(request)` as it is,
+    `route(request, settings)` with the addon's validated settings bound (as D84 does for
+    toolsets). Any other number of required parameters is refused."""
+    try:
+        parameters = list(inspect.signature(function).parameters.values())
+    except (TypeError, ValueError):
+        return function
+    required = [
+        p
+        for p in parameters
+        if p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+    ]
+    if len(required) == 1:
+        return function
+    if len(required) == 2:
+        bound_settings = dict(settings)
+        if inspect.iscoroutinefunction(function):
+
+            async def with_settings_async(request: dict[str, Any]) -> Any:
+                return await function(request, bound_settings)
+
+            return with_settings_async
+
+        def with_settings(request: dict[str, Any]) -> Any:
+            return function(request, bound_settings)
+
+        return with_settings
+    raise _refuse(
+        owner,
+        "provides.routers",
+        f"{name!r}: route() takes the request and optionally the addon's settings, "
+        f"but declares {len(required)} required parameters",
+    )
+
+
 def _channels_of(
     addon: ResolvedAddon, reserved: Collection[str], taken: dict[str, str]
 ) -> tuple[str, ...]:
@@ -528,6 +595,8 @@ def register_addons(
     channels: list[str] = []
     inserts: list[tuple[str, str, str, FragmentFile]] = []
     wrappers: list[ToolWrapper] = []
+    routers: dict[str, RouterFunction] = {}
+    router_owner: dict[str, str] = {}
     depends = {a.manifest.name: a.manifest.depends for a in addons}
     core_tools = frozenset(tool for tool, who in tool_owner.items() if who == "Core")
     for addon in addons:
@@ -560,6 +629,7 @@ def register_addons(
                 (owner, insertion.profile, insertion.slot, own_fragments[insertion.fragment])
             )
         wrappers.extend(_wrappers_of(addon, own, depends, core_tools))
+        routers.update(_routers_of(addon, router_owner))
         channels.extend(_channels_of(addon, reserved_channels, channel_owner))
         relative = addon.manifest.provides.profiles
         if relative is not None:
@@ -576,6 +646,7 @@ def register_addons(
         inserts=tuple(inserts),
         tools=own,
         wrappers=tuple(wrappers),
+        routers=routers,
     )
 
 

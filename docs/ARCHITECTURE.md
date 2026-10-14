@@ -192,6 +192,8 @@ Each port answers exactly one question. A port that answers two is cut wrong.
 | `KnowledgeAdmin` | Change what the business offers (**admins only**) | Postgres | no |
 | `AgentMailbox` | How does one agent ask another? | durable queue, A2A-shaped | no |
 | `TranscriptReader` | What happened in this conversation? | Postgres projection | no |
+| `TurnRouter` | Which way should this turn go, before the model is asked? (D95) | addons' `provides.routers` | no (a router is an addon) |
+| `RouteAudit` | Which way did a router send a turn, and why? (D95) | Postgres append-only, audit pool | no |
 
 **The contract:** fifteen ports, and still only two change when a vertical is added —
 `ToolProvider` and the rows behind `ToolPolicy`. Every capability added since the first
