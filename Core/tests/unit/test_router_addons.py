@@ -15,6 +15,7 @@ not a loaded entry point stops startup.
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from textwrap import dedent
 from typing import Any
@@ -25,7 +26,7 @@ from agent_core.adapters.driven.addons_fs.errors import AddonRegistrationError, 
 from agent_core.adapters.driven.addons_fs.loader import load_addons
 from agent_core.adapters.driven.addons_fs.manifest import parse_manifest
 from agent_core.adapters.driven.addons_fs.registration import EMPTY, register_addons
-from agent_core.adapters.driven.routing.addon_router import AddonTurnRouter
+from agent_core.adapters.driven.routing.addon_router import AddonTurnRouter, RouterSaturatedError
 from agent_core.composition import TOOL_PACKAGES, Settings, refuse_unroutable_profiles
 from agent_core.domain.agent_mode import AgentMode
 from agent_core.domain.profile import AgentProfile
@@ -242,3 +243,53 @@ def test_a_routing_profile_must_name_a_registered_router_and_entry_point_targets
             {**good, "billing": _profile("billing", mode=AgentMode.PEER.value)},
             frozenset({"keyword"}),
         )
+
+
+# --- sync routers that hang --------------------------------------------------------------------
+
+
+def test_sync_routers_hanging_past_the_timeout_cannot_exhaust_threads_and_then_recover() -> None:
+    release = threading.Event()
+    calls: list[dict[str, Any]] = []
+
+    def hang(request: dict[str, Any]) -> dict[str, Any]:
+        calls.append(request)
+        release.wait(5)
+        return {"decision": "pass"}
+
+    router = AddonTurnRouter({"hang": hang}, max_sync_calls=2)
+
+    async def scenario() -> RouteDecision:
+        for _ in range(2):
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(router.route("hang", _request()), 0.05)
+        # Both threads still hang: a third call is refused at once, never queued behind them.
+        with pytest.raises(RouterSaturatedError):
+            await asyncio.wait_for(router.route("hang", _request()), 1.0)
+        assert len(calls) == 2 and router.sync_calls_in_flight == 2
+        release.set()
+        for _ in range(200):
+            if router.sync_calls_in_flight == 0:
+                break
+            await asyncio.sleep(0.01)
+        return await router.route("hang", _request())
+
+    assert asyncio.run(scenario()).kind is RouteKind.PASS
+    assert router.sync_calls_in_flight == 0
+
+
+def test_a_sync_routers_error_reaches_the_caller_and_frees_its_slot() -> None:
+    def broken(request: dict[str, Any]) -> dict[str, Any]:
+        raise ConnectionError("refused")
+
+    router = AddonTurnRouter({"broken": broken}, max_sync_calls=1)
+
+    for _ in range(3):
+        with pytest.raises(ConnectionError):
+            asyncio.run(router.route("broken", _request()))
+    assert router.sync_calls_in_flight == 0
+
+
+def test_the_sync_call_cap_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="max_sync_calls"):
+        AddonTurnRouter({}, max_sync_calls=0)

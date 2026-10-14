@@ -19,21 +19,34 @@ THE ADDON SIDE OF THE CONTRACT IS PLAIN DATA
 
     Every key but `decision` is optional. This adapter is the one place that turns that mapping
     into a `RouteDecision`, strictly: an unknown key, a wrong type or an impossible value raises,
-    and `RouteTurn` falls back to the normal path with the error class recorded. A sync `route`
-    runs in a worker thread so a blocking HTTP client cannot stall the event loop (and the
-    timeout still answers on time; the thread finishes on its own).
+    and `RouteTurn` falls back to the normal path with the error class recorded.
+
+SYNC ROUTERS RUN ON THEIR OWN, CAPPED THREADS
+    A sync `route` runs in a daemon thread so a blocking HTTP client cannot stall the event loop,
+    and the caller's timeout still answers on time. A thread cannot be cancelled, so one that
+    hangs keeps running after its caller gave up. At most `max_sync_calls` such threads live at
+    once (counting the hung ones, until they finish); one more call is refused at once with
+    `RouterSaturatedError` (a fallback to the normal path) instead of queueing behind them or
+    taking a thread the rest of the process needs. Daemon threads never hold up shutdown.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
 from agent_core.domain.routing import RouteDecision, RouteKind, RouteRequest
 
-__all__ = ["AddonTurnRouter", "RouterFunction", "decision_from_mapping"]
+__all__ = [
+    "DEFAULT_MAX_SYNC_CALLS",
+    "AddonTurnRouter",
+    "RouterFunction",
+    "RouterSaturatedError",
+    "decision_from_mapping",
+]
 
 RouterFunction = Callable[[dict[str, Any]], Any]
 """An addon's `route`, settings already bound: a plain request mapping in, a mapping out (or an
@@ -43,11 +56,32 @@ _KEYS: Final = frozenset(
     {"decision", "profile_id", "intent", "arguments", "label", "confidence", "calibrated", "model"}
 )
 _MAX_TEXT: Final = 200
+DEFAULT_MAX_SYNC_CALLS: Final = 4
+
+
+class RouterSaturatedError(RuntimeError):
+    """Every sync-router thread is still busy: the call is refused instead of queued."""
 
 
 class AddonTurnRouter:
-    def __init__(self, routers: Mapping[str, RouterFunction]) -> None:
+    def __init__(
+        self,
+        routers: Mapping[str, RouterFunction],
+        *,
+        max_sync_calls: int = DEFAULT_MAX_SYNC_CALLS,
+    ) -> None:
+        if max_sync_calls < 1:
+            raise ValueError(f"max_sync_calls must be at least 1, got {max_sync_calls}")
         self._routers = dict(routers)
+        self._max_sync_calls = max_sync_calls
+        self._lock = threading.Lock()
+        self._in_flight = 0
+
+    @property
+    def sync_calls_in_flight(self) -> int:
+        """Sync router threads still running, including those whose caller gave up."""
+        with self._lock:
+            return self._in_flight
 
     @property
     def names(self) -> frozenset[str]:
@@ -65,10 +99,48 @@ class AddonTurnRouter:
         if inspect.iscoroutinefunction(function):
             answer = await function(plain)
         else:
-            answer = await asyncio.to_thread(function, plain)
+            answer = await self._in_thread(function, plain)
             if inspect.isawaitable(answer):
                 answer = await answer
         return decision_from_mapping(answer)
+
+    async def _in_thread(self, function: RouterFunction, plain: dict[str, Any]) -> Any:
+        with self._lock:
+            if self._in_flight >= self._max_sync_calls:
+                raise RouterSaturatedError(
+                    f"{self._in_flight} sync router calls are still running "
+                    f"(max_sync_calls={self._max_sync_calls})"
+                )
+            self._in_flight += 1
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+
+        def work() -> None:
+            answer: Any = None
+            failure: BaseException | None = None
+            try:
+                answer = function(plain)
+            except BaseException as error:  # handed to the awaiting caller, never swallowed
+                failure = error
+            finally:
+                with self._lock:
+                    self._in_flight -= 1
+            try:
+                loop.call_soon_threadsafe(_settle, future, answer, failure)
+            except RuntimeError:
+                pass  # the loop closed while the router hung: nobody is waiting any more
+
+        threading.Thread(target=work, name="turn-router", daemon=True).start()
+        return await future
+
+
+def _settle(future: asyncio.Future[Any], answer: Any, failure: BaseException | None) -> None:
+    if future.done():  # the caller timed out or was cancelled
+        return
+    if failure is not None:
+        future.set_exception(failure)
+    else:
+        future.set_result(answer)
 
 
 def _optional_text(answer: Mapping[str, Any], key: str) -> str | None:
