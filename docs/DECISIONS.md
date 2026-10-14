@@ -2759,3 +2759,16 @@ decision 2026-10-13) and are described by `addon.yaml`.
   at named slots of another profile is A5.
 - **Channels are pull-mode ids only** (no code), merged with `AGENT_CORE_PULL_CHANNELS`; an id the
   operator already lists is a collision rather than a silent merge.
+
+## D75 - Failures an addon causes are always `AddonError`s naming it (A4b)
+
+- **Choice: nothing an addon's files can do escapes registration as a raw exception.** A
+  `build_toolset()` that raises is an `AddonRegistrationError` naming the addon and the toolset
+  (chained with `from`, so the traceback keeps the cause); a malformed addon profile YAML document
+  is an `AddonRegistrationError` naming the addon and the file, like a profile that breaks a rule
+  already was (`PROFILE_FILE_ERRORS` is exported by `profiles_fs` so `yaml` stays an import of the
+  adapter). Core's own profile files keep raising what they always raised.
+- **A declared directory must exist and hold something.** The loader checks the directory when the
+  manifest is read; registration re-checks (it must not trust that it still holds) and refuses a
+  `fragments:`/`profiles:` directory with no `*.md`/`*.yaml`, instead of registering an empty
+  contribution. Rejected: warn-only (a declaration that yields nothing is a mistake to name).

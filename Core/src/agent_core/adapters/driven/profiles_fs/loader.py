@@ -47,7 +47,12 @@ import yaml  # type: ignore[import-untyped]  # no stub package installed; see py
 
 from agent_core.domain.profile import AgentProfile, ProfileValidationError
 
-__all__ = ["load_profile", "load_profile_sync", "parse_profile"]
+__all__ = ["PROFILE_FILE_ERRORS", "load_profile", "load_profile_sync", "parse_profile"]
+
+# What reading one profile file can raise: a rule broken (`ProfileValidationError` is a
+# `ValueError`) or a document that is not YAML at all. The composition root catches this pair for
+# an addon's profile so that `yaml` stays an import of this adapter, not of the root.
+PROFILE_FILE_ERRORS: tuple[type[Exception], ...] = (ValueError, yaml.YAMLError)
 
 
 def parse_profile(

@@ -136,7 +136,14 @@ def _register_toolsets(
         builder = getattr(module, "build_toolset", None)
         if not callable(builder):
             raise _refuse(owner, "provides.toolsets", f"{name!r} has no build_toolset()")
-        built = builder()
+        try:
+            built = builder()
+        except Exception as error:
+            raise _refuse(
+                owner,
+                "provides.toolsets",
+                f"{name!r}: build_toolset() raised {type(error).__name__}: {error}",
+            ) from error
         if not isinstance(built, FunctionToolset):
             raise _refuse(
                 owner,
@@ -223,6 +230,26 @@ def _policy_of(
     return rules
 
 
+def _declared_files(
+    addon: ResolvedAddon, field_name: str, relative: str, pattern: str
+) -> list[Path]:
+    """The `pattern` files of a declared directory; a missing or empty one is refused.
+
+    The loader checked the directory when the manifest was read; registration does not trust that
+    it still holds, and a declaration that yields nothing is a mistake to name, not an empty
+    contribution to ship.
+    """
+    directory = addon.root / relative
+    if not directory.is_dir():
+        raise _refuse(
+            addon.manifest.name, field_name, f"{relative!r} does not exist in the addon directory"
+        )
+    found = sorted(directory.glob(pattern))
+    if not found:
+        raise _refuse(addon.manifest.name, field_name, f"{relative!r} declares no {pattern} files")
+    return found
+
+
 def _fragments_of(
     addon: ResolvedAddon, builtin_dir: Path | None, taken: dict[str, str]
 ) -> dict[str, Path]:
@@ -231,7 +258,7 @@ def _fragments_of(
         return {}
     owner = addon.manifest.name
     found: dict[str, Path] = {}
-    for path in sorted((addon.root / relative).glob("*.md")):
+    for path in _declared_files(addon, "provides.fragments", relative, "*.md"):
         if path.stem in taken:
             raise _refuse(
                 owner,
@@ -321,7 +348,7 @@ def register_addons(
         channels.extend(_channels_of(addon, reserved_channels, channel_owner))
         relative = addon.manifest.provides.profiles
         if relative is not None:
-            for path in sorted((addon.root / relative).glob("*.yaml")):
+            for path in _declared_files(addon, "provides.profiles", relative, "*.yaml"):
                 profile_files.append((owner, path))
 
     return AddonContributions(

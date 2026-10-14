@@ -469,3 +469,71 @@ def test_every_failure_is_an_addon_error_naming_the_addon(tmp_path: Path) -> Non
 
     with pytest.raises(AddonError, match="addon 'a'"):
         _register(tmp_path, ["a"])
+
+
+# --- A4b: failures an addon causes are wrapped, never raw -------------------------------------
+
+
+def test_a_malformed_addon_profile_yaml_is_an_addon_error_naming_addon_and_file(
+    tmp_path: Path,
+) -> None:
+    _shop(
+        tmp_path,
+        SHOP + "  profiles: profiles/\n",
+        profiles__broken_dot_yaml="id: [unclosed\npersona: x\n",
+    )
+    contributions = _register(tmp_path, ["shop"])
+
+    with pytest.raises(AddonRegistrationError) as caught:
+        load_profiles(tmp_path / "core_profiles", ProfileVersionRegistry(), contributions)
+
+    assert caught.value.addon == "shop" and "broken.yaml" in str(caught.value)
+    assert caught.value.field == "provides.profiles"
+
+
+def test_a_build_toolset_that_raises_is_refused_naming_addon_and_toolset(tmp_path: Path) -> None:
+    _addon(
+        tmp_path,
+        "shop",
+        SHOP,
+        toolsets__cart_dot_py="def build_toolset():\n    raise RuntimeError('db down')\n",
+    )
+
+    error = _refused(tmp_path, ["shop"])
+
+    assert error.addon == "shop" and "'cart'" in str(error) and "db down" in str(error)
+    assert isinstance(error.__cause__, RuntimeError)
+
+
+@pytest.mark.parametrize("point", ["profiles", "fragments"])
+def test_a_declared_directory_gone_after_loading_is_refused_not_silently_empty(
+    tmp_path: Path, point: str
+) -> None:
+    # The loader checks the directory exists; registration must not trust that it still does.
+    _shop(tmp_path, SHOP + f"  {point}: {point}/\n", **{f"{point}__keep_dot_txt": "x"})
+    addons = load_addons(enabled=["shop"], addons_root=tmp_path, core_version="0.0.0")
+    (tmp_path / "shop" / point / "keep.txt").unlink()
+    (tmp_path / "shop" / point).rmdir()
+
+    with pytest.raises(AddonRegistrationError) as caught:
+        register_addons(
+            addons,
+            builtin_toolsets=TOOL_PACKAGES,
+            builtin_fragments_dir=None,
+            reserved_channels=("http", "cli"),
+        )
+
+    assert caught.value.addon == "shop" and caught.value.field == f"provides.{point}"
+    assert "does not exist" in str(caught.value)
+
+
+@pytest.mark.parametrize(("point", "pattern"), [("profiles", "*.yaml"), ("fragments", "*.md")])
+def test_a_declared_directory_with_nothing_in_it_is_refused(
+    tmp_path: Path, point: str, pattern: str
+) -> None:
+    _shop(tmp_path, SHOP + f"  {point}: {point}/\n", **{f"{point}__notes_dot_txt": "x"})
+
+    error = _refused(tmp_path, ["shop"])
+
+    assert error.addon == "shop" and error.field == f"provides.{point}"
+    assert pattern in str(error)

@@ -216,7 +216,7 @@ from agent_core.adapters.driven.persistence_pg.transcript_repository import (
     PgTranscriptReader,
 )
 from agent_core.adapters.driven.policy_fs.loader import apply_policy_rules, load_policy_rules
-from agent_core.adapters.driven.profiles_fs.loader import load_profile_sync
+from agent_core.adapters.driven.profiles_fs.loader import PROFILE_FILE_ERRORS, load_profile_sync
 from agent_core.adapters.driven.skills_fs.registry import FilesystemSkillRegistry
 from agent_core.adapters.driven.tools import peer_background as peer_background_tools
 from agent_core.adapters.driven.tools import peers as peer_tools
@@ -1059,7 +1059,7 @@ def load_profiles(
     for addon, path in contributions.profile_files:
         try:
             template = load_profile_sync(path, addon_fragments=contributions.fragments)
-        except ValueError as error:  # ProfileValidationError and a bad YAML document
+        except PROFILE_FILE_ERRORS as error:  # a broken rule or a document that is not YAML
             raise AddonRegistrationError(
                 addon, "provides.profiles", f"{path.name}: {error}"
             ) from error

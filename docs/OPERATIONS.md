@@ -512,8 +512,8 @@ list above is the only switch, and everything below happens at startup (build an
 | `profiles: dir/` | `*.yaml` profile files | profiles served next to Core's |
 | `channels: [id]` | nothing (no code) | pull-mode channel ids, like `AGENT_CORE_PULL_CHANNELS` |
 
-- Startup stops, naming the addon and the `provides.*` key, when: a declared file is missing or
-  fails to import; a toolset, tool, fragment, profile id, channel or rule id is already used by Core
+- Startup stops, naming the addon and the `provides.*` key, when: a declared file or directory is missing
+  or empty, a toolset fails to import or its `build_toolset()` raises, an addon profile is not valid YAML; a toolset, tool, fragment, profile id, channel or rule id is already used by Core
   or by another addon (or, for a channel, listed in `AGENT_CORE_PULL_CHANNELS`); an audit entry names
   a tool the addon does not export, or contradicts an existing decision; an `allow` rule reaches a
   tool the addon does not own (`deny` and `needs_approval` rules may name any tool); or the addon
