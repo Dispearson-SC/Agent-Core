@@ -19,10 +19,10 @@ DOCUMENTED (D87, pinned value by value in test_glazed_tools_contract.py):
     `None` default, the old in-code clamps and enums are `minimum`/`maximum`/`enum`, and there is
     no `format: date`.
 FINDINGS (G6, reported for a decision; pinned so a change to either side is seen):
-  * F1 the audit row and the policy's arguments no longer list an argument the model did not send
-    that the old function defaulted (`limit`, `category`, `kind`, `date_to`, `impact`...). The HTTP
-    request is the same: the bridge applies the defaults when it builds the call.
   * F2 a POST body's JSON keys and a query's parameters come in another ORDER (same content).
+RESOLVED (G7): F1, the audit row and the policy's arguments lacked the arguments the model did not
+send that the old function defaulted. The bridge now fills them (default, or null) into the
+validated arguments, so they compare EQUAL here; the finding's test pins that they stay equal.
 """
 
 from __future__ import annotations
@@ -53,17 +53,6 @@ REASONS = {
     ("strategist-audits-a-promo-and-meets-a-missing-forecast", 1): (
         "no traffic model for this store"
     ),
-}
-# Finding F1: what the old functions defaulted and the addon build's arguments leave out.
-OLD_DEFAULTS: dict[str, dict[str, Any]] = {
-    "get_issues": {"limit": 10, "category": None, "kind": None},
-    "get_transfer_options": {"sku": None, "limit": 5},
-    "save_manager_note": {
-        "category": "eventos",
-        "date_from": None,
-        "date_to": None,
-        "impact": None,
-    },
 }
 
 
@@ -120,16 +109,6 @@ def _request(request: dict[str, Any]) -> dict[str, Any]:
     return {**request, "body": None, "query": sorted(map(tuple, request["query"]))}
 
 
-def _without_old_defaults(tool: str, sent: dict[str, Any], arguments: dict[str, Any]) -> Any:
-    """F1: the old arguments minus what the old function defaulted and the model never sent."""
-    defaults = OLD_DEFAULTS.get(tool, {})
-    return {
-        k: v
-        for k, v in arguments.items()
-        if not (k in defaults and k not in sent and v == defaults[k])
-    }
-
-
 def _seen(scenario: str, number: int, seen: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """D91: the old result with the backend's reason where the addon build now shows it."""
     reason = REASONS.get((scenario, number))
@@ -159,25 +138,18 @@ def _persona(role: str, old: str, new: str) -> str:
 def _expected(scenario: str, golden: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     steps = []
     for number, step in enumerate(golden["steps"]):
-        sent = step["args"]
         steps.append(
             {
                 **step,
-                "validated_args": _without_old_defaults(step["tool"], sent, step["validated_args"]),
                 "requests": [_request(r) for r in step["requests"]],
                 "seen_by_model": _seen(scenario, number, step["seen_by_model"]),
             }
         )
-    audit = [
-        {**row, "arguments": _without_old_defaults(row["tool"], call[1], row["arguments"])}
-        for row, call in zip(golden["audit"], _calls(scenario), strict=True)
-    ]
     return {
         **golden,
         "persona": _persona(golden["role"], golden["persona"], new["persona"]),
         "definitions": [_definition(d) for d in golden["definitions"]],
         "steps": steps,
-        "audit": audit,
     }
 
 
@@ -190,10 +162,6 @@ def _comparable(played: dict[str, Any]) -> dict[str, Any]:
             for step in played["steps"]
         ],
     }
-
-
-def _calls(scenario: str) -> list[list[Any]]:
-    return next(s["calls"] for s in SCENARIOS if s["id"] == scenario)
 
 
 # --- the comparison -------------------------------------------------------------------------------
@@ -291,25 +259,32 @@ def test_a_refusal_now_shows_the_model_the_backends_reason(
 # --- the findings, pinned -------------------------------------------------------------------------
 
 
-def test_finding_f1_unsent_defaults_are_no_longer_arguments_but_still_reach_the_backend(
+def test_finding_f1_resolved_unsent_defaults_are_arguments_again_and_the_request_is_unchanged(
     actual: dict[str, dict[str, Any]],
 ) -> None:
-    """F1. The old tools were Python functions: the framework filled every default into the
-    arguments the policy and the audit row saw. The bridge's tools fill them only into the request.
-    Pinned so that either a fix or a further drift fails here and is decided, not absorbed."""
+    """F1, resolved in G7 (approved as default). The old tools were Python functions: the framework
+    filled every default into the arguments the policy and the audit row saw. The bridge now does
+    the same, and the request it sends is the one it sent before."""
     scenario = "orchestrator-reads-the-briefing-and-proposes"
     old_row, new_row = GOLDEN[scenario]["audit"][2], actual[scenario]["audit"][2]
     old_req = GOLDEN[scenario]["steps"][2]["requests"][0]["json"]
     new_req = actual[scenario]["steps"][2]["requests"][0]["json"]
 
-    assert old_row["arguments"] == {
-        "category": "eventos",
-        "date_from": "2026-03-07",
-        "date_to": None,
-        "impact": None,
-        "text": PRESENCE_RECORDED,
-    }
-    assert new_row["arguments"] == {"date_from": "2026-03-07", "text": PRESENCE_RECORDED}
+    assert (
+        new_row["arguments"]
+        == old_row["arguments"]
+        == {
+            "category": "eventos",
+            "date_from": "2026-03-07",
+            "date_to": None,
+            "impact": None,
+            "text": PRESENCE_RECORDED,
+        }
+    )
+    assert (
+        actual[scenario]["steps"][2]["validated_args"]
+        == (GOLDEN[scenario]["steps"][2]["validated_args"])
+    )
     assert new_req == old_req and new_req["category"] == "eventos"
 
 

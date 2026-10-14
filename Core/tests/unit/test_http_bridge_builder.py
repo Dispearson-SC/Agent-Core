@@ -479,3 +479,64 @@ tools:
     assert backend.requests[0].url.raw_path.decode().split("?")[0] == "/stores/a%2Fb%20c/kpis"
     schema = toolset.tools["store_kpis"].function_schema.json_schema
     assert schema["properties"] == {} and "required" not in schema
+
+
+# --- F1 (G7): the validated arguments carry the schema's defaults ---------------------------------
+
+
+def _validated(toolset: Any, name: str, raw: str | dict[str, Any]) -> dict[str, Any]:
+    """What pydantic-ai hands the policy, the audit and the tool: `FunctionToolset.get_tools` makes
+    the tool's `function_schema.validator` its `args_validator`, which validates every call."""
+    validator = toolset.tools[name].function_schema.validator
+    result: dict[str, Any] = (
+        validator.validate_json(raw) if isinstance(raw, str) else validator.validate_python(raw)
+    )
+    return result
+
+
+def test_unsent_arguments_are_filled_with_their_default_or_null_before_policy_and_audit() -> None:
+    """F1 (approved as default): a Python tool's framework filled every default into the arguments
+    the policy and the audit row saw; the bridge's tools do the same, for every consumer (this one
+    is the vertical-neutral library manifest). An optional without a default is null."""
+    toolset = _toolset(Backend())
+
+    assert _validated(toolset, "list_books", "{}") == {"limit": 10, "genre": None}
+    assert _validated(toolset, "list_books", {"genre": "science"}) == {
+        "limit": 10,
+        "genre": "science",
+    }
+    assert _validated(toolset, "reserve_book", '{"book_id": "b1", "slot": "am"}') == {
+        "book_id": "b1",
+        "slot": "am",
+        "note": "",
+    }
+    assert _validated(toolset, "ping", "{}") == {}
+
+
+def test_filling_defaults_keeps_what_the_model_sent_and_never_adds_a_fixed_argument(
+    tmp_path: Path,
+) -> None:
+    toolset = build_bridge_toolset(SETTINGS, manifest=_fixed_manifest(tmp_path))
+
+    assert _validated(toolset, "list_things", "{}") == {"days": 7}
+    # what the model sent stands as sent (the tool still refuses or overrides it, as before)
+    sent = {"days": 3, "limit": 500}
+    assert _validated(toolset, "list_things", sent) == sent
+    assert _validated(_toolset(Backend()), "get_book", "{}") == {"book_id": None}
+
+
+def test_the_request_is_the_same_whether_the_defaults_were_filled_or_not() -> None:
+    """HTTP stays identical: a filled default or null sends what the unfilled call sent."""
+    backend = Backend({"items": []})
+    toolset = _toolset(backend)
+
+    _run(toolset, "list_books")
+    _run(toolset, "list_books", **_validated(toolset, "list_books", "{}"))
+    _run(toolset, "reserve_book", book_id="b1", slot="am")
+    filled = _validated(toolset, "reserve_book", {"book_id": "b1", "slot": "am"})
+    _run(toolset, "reserve_book", **filled)
+
+    plain_list, filled_list, plain_write, filled_write = backend.requests
+    assert str(plain_list.url) == str(filled_list.url)
+    assert plain_write.content == filled_write.content
+    assert plain_write.headers["Idempotency-Key"] == filled_write.headers["Idempotency-Key"]

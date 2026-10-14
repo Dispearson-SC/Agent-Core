@@ -3340,3 +3340,17 @@ decision 2026-10-13) and are described by `addon.yaml`.
   protocol) and refuses a read in another encoding than the UTF-8 it was checked in; a test runs both
   consumers (include, slot insert). `clear_openapi_cache` no longer drops a fetch in flight: racing
   builds wait on a `_Flight`, and the race tests force the overlap with events, not a sleep.
+
+## D94 - The bridge fills unsent defaults into the validated arguments (Phase 3, G7)
+
+- **F1 resolved (approved as default).** A Python tool's signature filled every default into the
+  arguments `before_tool_execute` hands the policy and the audit row; the bridge's tools did not, so
+  a tool moved onto it lost `limit`, `category: "eventos"` and the null optionals from its audit
+  trail. Each bridge tool now gets an arguments validator that adds every argument the model did not
+  send: its `default`, or null when it has none. A `fixed` argument is the bridge's and is never
+  added; what the model sent is kept as sent. The request does not change (`_prepare` treats null as
+  unsent and applies the same default), pinned by a test. It applies to EVERY bridge consumer, not
+  only glazed (a test uses the vertical-neutral library manifest). The golden-turn test now compares
+  validated arguments and audit rows exactly; F2 (body and query order) stays pinned.
+  Rejected: filling defaults only in the glazed overlay (every consumer has the same gap), and
+  filling them in Core's policy hook (the hook does not know a tool's schema).

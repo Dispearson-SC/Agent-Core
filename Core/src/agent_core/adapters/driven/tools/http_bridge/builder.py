@@ -16,6 +16,8 @@ THE CONSUMER API
     D84); a `BridgeSettings` is accepted too. The environment is never read.
 
 WHAT EACH TOOL DOES
+    0. Fills every argument the model did not send with its default (or null) in the validated
+       arguments, so the policy and the audit row see them as they saw a Python tool's (F1, G7).
     1. Validates the model's arguments against the manifest (required, type, enum, numeric clamp).
        A problem is returned as `{"error": ...}`; no call is made.
     2. Calls the backend (client.py) with the turn's identity headers and, for a write that
@@ -35,6 +37,7 @@ from urllib.parse import quote
 import httpx
 from pydantic_ai.tools import Tool
 from pydantic_ai.toolsets import FunctionToolset
+from pydantic_core import SchemaValidator, core_schema
 
 from agent_core.adapters.driven.tools.http_bridge.client import Reply, call_backend
 from agent_core.adapters.driven.tools.http_bridge.manifest import (
@@ -165,6 +168,27 @@ def _schema(tool: ToolSpec) -> dict[str, Any]:
     return schema
 
 
+def _with_defaults(tool: ToolSpec) -> SchemaValidator:
+    """The arguments validator: the model's arguments with every unsent one filled (F1, G7).
+
+    A Python tool's framework filled each default into the arguments the policy and the audit row
+    saw; the bridge does the same so a vertical moved onto it keeps its audit trail. An argument the
+    model did not send gets its default, or null when it has none; a `fixed` one is the bridge's,
+    never the model's, so it is not added. What the model sent is kept as sent. The request is the
+    same either way: `_prepare` treats null as unsent and applies the same default.
+    """
+    filled = {n: s.default for n, s in tool.arguments.items() if s.fixed is None}
+
+    def fill(arguments: Any) -> Any:
+        if not isinstance(arguments, dict):
+            return arguments
+        return {**{n: v for n, v in filled.items() if n not in arguments}, **arguments}
+
+    return SchemaValidator(
+        core_schema.no_info_after_validator_function(fill, core_schema.any_schema())
+    )
+
+
 class _Shape(Exception):
     """The reply does not have the shape the manifest describes."""
 
@@ -260,6 +284,7 @@ def _make_tool(
     built: Tool[Any] = Tool.from_schema(
         run, tool.name, tool.description, _schema(tool), takes_ctx=True
     )
+    built.function_schema.validator = _with_defaults(tool)
     if tool.replay == "safe":
         built.metadata = safe_tool_metadata()
     return built

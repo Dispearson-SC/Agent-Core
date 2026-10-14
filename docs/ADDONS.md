@@ -294,7 +294,11 @@ one-parameter `build_toolset(settings)`, and the bridge uses the keys it knows (
 `tenant_header`, `subject_header`, `idempotency_header`, `warning_header`, `peer_session_prefix`
 with its non-empty `peer_session_separator`, `service_name`; an empty header name turns that header
 off) and ignores the rest. The bridge reads no environment, so two consumers can point at two
-backends (`AGENT_CORE_ADDON__SHOP__BASE_URL`); `http_tool_bridge` itself has no settings. Safety
+backends (`AGENT_CORE_ADDON__SHOP__BASE_URL`); `http_tool_bridge` itself has no settings. The arguments the policy and the audit row see are
+the model's with every unsent argument filled: its `default`, or null when it has none (a `fixed`
+one is never added; what the model sent stays as sent). That is what a Python tool's signature did,
+so a tool moved onto the bridge keeps its audit trail; the request is the same either way (F1, D94).
+Safety
 rules of the builder: a path argument is one percent-encoded segment (an empty one, `.` or `..` is an
 error value and no call is made); with `response.pick`, only the picked top-level keys of an object
 or of each row reach the model (rows that are not objects are dropped; a reply that is not the
