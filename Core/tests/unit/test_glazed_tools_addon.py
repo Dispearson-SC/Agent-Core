@@ -1248,3 +1248,52 @@ def test_a_delivery_calendar_without_days_is_an_empty_calendar(
     backend.body = {"window_days": 7}
 
     assert _run(gt.get_deliveries(_ctx(), days=7))["days"] == []
+
+
+# --- the model sees why a view or a forecast is unavailable (user decision 2026-10-14, D91) -----
+
+
+@pytest.mark.parametrize("view", _VIEWS)
+@pytest.mark.parametrize("status", [404, 503])
+def test_an_unavailable_view_carries_the_backends_reason(
+    gt: Glazed, backend: Backend, view: Any, status: int
+) -> None:
+    backend.status, backend.body = status, {"detail": "no closing data for 2026-03-09 yet"}
+    out = _run(view(gt, _ctx()))
+
+    assert out["available"] is False
+    assert "no closing data for 2026-03-09 yet" in out["reason"]
+    assert "never estimate" in out["reason"].lower()
+
+
+@pytest.mark.parametrize("status", [404, 503])
+def test_an_unavailable_forecast_carries_the_backends_reason(
+    gt: Glazed, backend: Backend, status: int
+) -> None:
+    backend.status = status
+    backend.headers = {"content-type": "application/problem+json"}
+    backend.body = {"title": "Unavailable", "detail": "the demand model is retraining"}
+    demand = _run(gt.forecast_demand(_ctx(), sku="SKU-1", target_date=_TARGET))
+    flow = _run(gt.forecast_daily_flow(_ctx(), target_date=_TARGET))
+
+    for out in (demand, flow):
+        assert out["forecast_available"] is False
+        assert "the demand model is retraining" in out["reason"]
+        assert "never estimate" in out["reason"].lower()
+
+
+def test_without_a_reason_from_the_backend_the_unavailable_text_is_unchanged(
+    gt: Glazed, backend: Backend
+) -> None:
+    backend.status, backend.body = 503, {}
+    view = _run(gt.get_staffing(_ctx()))
+    demand = _run(gt.forecast_demand(_ctx(), sku="SKU-1", target_date=_TARGET))
+
+    assert view["reason"] == (
+        "The staffing recommendation is not available right now. "
+        "Say the data is unavailable; never estimate it yourself."
+    )
+    assert demand["reason"] == (
+        "The forecast service is not available right now. "
+        "Say the forecast is unavailable; never estimate one yourself."
+    )

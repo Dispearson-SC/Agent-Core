@@ -90,15 +90,52 @@ def _failure(
 
 
 def _refusal(settings: BridgeSettings, response: httpx.Response) -> Reply:
-    """An HTTP error as a value; an RFC 9457 `application/problem+json` body is kept structured."""
+    """An HTTP error as a value; an RFC 9457 `application/problem+json` body is kept structured.
+
+    `reason` is the backend's own words for the refusal (D91), so a tool can tell the model WHY
+    ("no forecast for this item") instead of a bare "unavailable": the problem's `detail` (else its
+    `title`), the `detail`/`message`/`error`/`title` text of a JSON body, or a `text/plain` body;
+    one line, at most `_BODY_EXCERPT` characters. No readable message, no `reason`.
+    """
     head = f"The {{service}} refused the request: HTTP {response.status_code} "
     problem = _problem(response)
     if problem is None:
-        return _failure(settings, head, response.status_code, response.text[:_BODY_EXCERPT])
-    said = ": ".join(str(problem[k]) for k in ("title", "detail") if k in problem)
-    reply = _failure(settings, head, response.status_code, said[:_BODY_EXCERPT])
+        reply = _failure(settings, head, response.status_code, response.text[:_BODY_EXCERPT])
+    else:
+        said = ": ".join(str(problem[k]) for k in ("title", "detail") if k in problem)
+        reply = _failure(settings, head, response.status_code, said[:_BODY_EXCERPT])
     assert reply.error is not None
-    return Reply(error={**reply.error, "problem": problem})
+    error = dict(reply.error)
+    if problem is not None:
+        error["problem"] = problem
+    reason = _reason(response)
+    if reason:
+        error["reason"] = reason
+    return Reply(error=error)
+
+
+_REASON_KEYS = ("detail", "message", "error", "title")
+
+
+def _reason(response: httpx.Response) -> str:
+    """The backend's message for a refusal, on one line and bounded; `""` when it gave none."""
+    kind = response.headers.get("content-type", "").lower()
+    said: object = None
+    if kind.startswith("text/plain"):
+        said = response.text
+    else:
+        try:
+            body = response.json()
+        except ValueError:
+            return ""
+        if isinstance(body, dict):
+            said = next(
+                (body[k] for k in _REASON_KEYS if isinstance(body.get(k), str) and body[k].strip()),
+                None,
+            )
+    if not isinstance(said, str):
+        return ""
+    return " ".join(said.split())[:_BODY_EXCERPT]
 
 
 def _problem(response: httpx.Response) -> dict[str, Any] | None:

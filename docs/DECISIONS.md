@@ -3279,3 +3279,20 @@ decision 2026-10-13) and are described by `addon.yaml`.
 - **Ported tests.** `test_glazed_vertical.py` (all of it, assertions unchanged, plus parity tests) and
   the 32 deferred tests of `test_glazed_prompts.py` (docstring tests read the generated description).
 
+## D91 - A refusal carries the backend's reason, and an unavailable view says it (Phase 3, G5)
+
+- **Why.** User decision 2026-10-14, "Que el modelo vea el motivo": a 404 or 503 of a glazed view or
+  forecast reached the model as a bare "not available right now", so it could not tell the manager why
+  (no closing data yet, the model is retraining) and the reason was lost.
+- **Generic, in the bridge.** Every refusal (`status >= 400`) whose body says why gets `reason` in its
+  error value: the problem `detail` (else `title`), the `detail`/`message`/`error`/`title` text of a
+  JSON body, or a `text/plain` body; whitespace collapsed to one line, at most 300 characters (the
+  same bound as the message excerpt). A body with no readable text (a list of validation errors, a
+  blank, HTML) gives no `reason`, never a guess. Additive: `error`, `status` and `problem` are unchanged.
+- **Glazed.** The view and forecast outcomes that turn a 404/503 into `available: false` /
+  `forecast_available: false` append "The backend said: <reason>." before the "never estimate"
+  instruction. Without a reason the text is exactly the old one. Other refusals stay error values and
+  now carry `reason` too.
+- **Trust.** The text comes from the vertical's own backend, bounded, and reaches the model inside the
+  tool result like every other backend field; no new channel is opened.
+

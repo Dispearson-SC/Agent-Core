@@ -286,7 +286,7 @@ tools:
 
 Rules: the manifest is validated when the consumer's toolset is built (a bad one stops startup naming
 the file and field); an argument problem, an HTTP error, a timeout or a network failure is returned
-to the model as `{"error": ..., "status"?: ...}`, never raised (an `application/problem+json` error body also adds a structured `problem` {type, title, status, detail} and puts `title: detail` in the message); a reply with a warning and no
+to the model as `{"error": ..., "status"?: ...}`, never raised (an `application/problem+json` error body also adds a structured `problem` {type, title, status, detail} and puts `title: detail` in the message; any refusal whose body says why, a problem `detail` or `title`, a JSON `detail`/`message`/`error`/`title` text or a `text/plain` body, adds `reason`: that text on one line, at most 300 characters, D91); a reply with a warning and no
 `wrap_as` gets a `warning` key (a list becomes `{"data": [...], "warning": ...}`). Settings
 are the CONSUMER's own (D84): the addon loader hands the consumer's validated `settings:` to a
 one-parameter `build_toolset(settings)`, and the bridge uses the keys it knows (`base_url`,
@@ -439,7 +439,7 @@ convention the bridge defaults to, and each header name is a setting.
 - `Idempotency-Key` on writes: a deterministic key (session + the keyed arguments) so a retried call
   does not create a second row; the backend stores the first result under the key.
 - Errors as `application/problem+json` (RFC 9457): `type`, `title`, `status`, `detail`. The bridge
-  returns `{error, status, problem}` to the model, so `detail` is what the model can say.
+  returns `{error, status, problem, reason}` to the model, so `detail` is what the model can say.
 - `X-Agent-Warning` response header (`warning_header`) for a degraded answer ("memory unavailable");
   a tool with `x-agent-warning: true` shows it to the model as `warning`.
 - Row limits: a list answers `{items: [...], total: n}` (or a bare list), the backend caps it, and

@@ -147,6 +147,15 @@ _DEMAND_KEYS = (
 _FLOW_KEYS = ("avg_ticket", "granularity", "model", "forecast_origin")
 
 
+def _backend_said(error: dict[str, Any]) -> str:
+    """The backend's own reason for a refusal (the bridge's `reason`, bounded), as a sentence to
+    append; `""` when it gave none. The model is told WHY, not a bare "unavailable" (D91)."""
+    reason = error.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return ""
+    return f" The backend said: {reason.strip().rstrip('.')}."
+
+
 def _unavailable(subject: dict[str, Any], reason: str) -> dict[str, Any]:
     return {
         **subject,
@@ -183,7 +192,8 @@ def _forecast(arguments: Arguments, data: Any, subject: dict[str, Any]) -> Any:
         if status in (400, 422):
             return dict(_FUTURE_ONLY)
         if status is None or status in (404, 503):
-            return _unavailable(subject, "The forecast service is not available right now.")
+            said = _backend_said(data)
+            return _unavailable(subject, f"The forecast service is not available right now.{said}")
         return data
     if not _after_origin(target, data.get("forecast_origin")):
         return dict(_FUTURE_ONLY)
@@ -357,7 +367,8 @@ def _view(what: str, shape: Callable[[dict[str, Any]], dict[str, Any]]) -> After
         if isinstance(data, dict) and "error" in data:
             status = data.get("status")
             if status is None or status in (404, 503):
-                return _view_unavailable(f"The {what} is not available right now.")
+                said = _backend_said(data)
+                return _view_unavailable(f"The {what} is not available right now.{said}")
             return data
         if not isinstance(data, dict):
             return _view_unavailable(f"The backend returned an unexpected {what}.")

@@ -239,3 +239,63 @@ def test_an_empty_peer_separator_is_refused_when_a_prefix_is_set_and_harmless_ot
 def test_case_id_for_never_raises_on_an_empty_separator() -> None:
     assert case_id_for("peer~case-1", "peer~", "") == "case-1"
     assert case_id_for("case-1", "peer~", "") == "case-1"
+
+
+# --- the backend's reason reaches the model (user decision 2026-10-14, D91) --------------------
+
+
+def _refused(
+    status: int, body: Any = None, content_type: str | None = None, raw: bytes | None = None
+) -> dict[str, Any]:
+    backend = Backend(status=status, body=body)
+    if content_type is not None:
+        backend.headers = {"content-type": content_type}
+    backend.raw = raw
+    reply = _call(backend)
+    assert reply.error is not None and reply.error["status"] == status
+    return dict(reply.error)
+
+
+def test_a_problem_document_gives_its_detail_as_the_reason_and_its_title_without_one() -> None:
+    problem = "application/problem+json"
+    detailed = _refused(404, {"title": "Not Found", "detail": "no forecast for SKU-9"}, problem)
+    titled = _refused(503, {"title": "Forecast model not trained"}, problem)
+
+    assert detailed["reason"] == "no forecast for SKU-9"
+    assert titled["reason"] == "Forecast model not trained"
+
+
+@pytest.mark.parametrize("key", ["detail", "message", "error", "title"])
+def test_a_json_error_body_gives_its_message_as_the_reason(key: str) -> None:
+    assert _refused(503, {key: "the model is retraining"})["reason"] == "the model is retraining"
+
+
+def test_a_plain_text_error_body_is_the_reason() -> None:
+    error = _refused(503, content_type="text/plain; charset=utf-8", raw=b"Service Unavailable\n")
+
+    assert error["reason"] == "Service Unavailable"
+
+
+def test_the_reason_is_bounded_and_on_one_line() -> None:
+    reason = _refused(404, {"detail": "line one\n\n  line two " + "x" * 900})["reason"]
+
+    assert reason.startswith("line one line two x")
+    assert len(reason) <= 300
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type", "raw"),
+    [
+        ({"d": "x"}, None, None),  # no message field
+        ({"detail": [{"loc": ["q"], "msg": "bad"}]}, None, None),  # not a text
+        ({"detail": "   "}, None, None),  # blank
+        (None, "text/html", b"<html><body>502</body></html>"),  # markup is not a reason
+    ],
+)
+def test_a_body_without_a_readable_message_gives_no_reason(
+    body: Any, content_type: str | None, raw: bytes | None
+) -> None:
+    error = _refused(502, body, content_type, raw)
+
+    assert "reason" not in error
+    assert "HTTP 502" in error["error"]  # the refusal itself is unchanged
