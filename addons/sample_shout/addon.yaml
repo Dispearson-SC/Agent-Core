@@ -1,0 +1,10 @@
+# A minimal tool wrapper (A6): it wraps `sample_echo` of sample_base and shouts the result. A
+# wrapper may wrap a tool of Core or of an addon it depends on, so the dependency is declared.
+name: sample_shout
+version: 1.0.0
+core: ">=0.0,<1"
+depends: [sample_base]
+provides:
+  # wrappers/shout.py defines `wrap(original, arguments, ctx)`; `await original()` is the tool.
+  wrappers:
+    - {tool: sample_echo, wrapper: shout}

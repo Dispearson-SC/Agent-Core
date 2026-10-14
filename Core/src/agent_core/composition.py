@@ -2065,7 +2065,7 @@ def build_container(
     # constructor also supplies the MCP half, so a profile declaring a server (today
     # `delivery_optimizer`) is served rather than refused. It CONNECTS TO NOTHING here -
     # transports are built, and reached on first use or on schema discovery.
-    tools = build_tool_provider(packages)
+    tools = build_tool_provider(packages, wrappers=addons.wrappers)
     # t-f5-10 filled this seat: `ModelSummariser` over the SAME `model` gateway every
     # other model call in this container uses, so a summarisation call never ends up on
     # a different day-1/day-2 route from the turn it is compacting. Before this line

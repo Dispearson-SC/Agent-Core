@@ -44,6 +44,7 @@ __all__ = [
     "AuditProvides",
     "Hooks",
     "Provides",
+    "ToolWrapperDecl",
     "load_manifest",
     "parse_manifest",
 ]
@@ -106,6 +107,13 @@ class ProfileInsertion(_Strict):
     fragment: FragmentName
 
 
+class ToolWrapperDecl(_Strict):
+    """`provides.wrappers` entry: wrap `tool` with `wrappers/<wrapper>.py` of the addon (A6)."""
+
+    tool: Ident
+    wrapper: Slug
+
+
 class Provides(_Strict):
     toolsets: tuple[Slug, ...] = ()
     profiles: RelPath | None = None
@@ -114,6 +122,15 @@ class Provides(_Strict):
     audit: AuditProvides = Field(default_factory=AuditProvides)
     channels: tuple[Slug, ...] = ()
     inserts: tuple[ProfileInsertion, ...] = ()
+    wrappers: tuple[ToolWrapperDecl, ...] = ()
+
+    @field_validator("wrappers")
+    @classmethod
+    def _wrappers_once(cls, value: tuple[ToolWrapperDecl, ...]) -> tuple[ToolWrapperDecl, ...]:
+        pairs = [(entry.tool, entry.wrapper) for entry in value]
+        if len(set(pairs)) != len(pairs):
+            raise ValueError("lists the same tool and wrapper twice")
+        return value
 
 
 class Hooks(_Strict):

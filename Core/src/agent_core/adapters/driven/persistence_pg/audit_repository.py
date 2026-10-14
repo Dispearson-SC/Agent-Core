@@ -76,6 +76,11 @@ from typing import Any
 
 from agent_core.domain.media import MediaRef
 from agent_core.domain.policy import PolicyDecision
+from agent_core.domain.tool_wrapping import (
+    WRAPPED_BY_AUDIT_KEY,
+    WRAPPED_BY_METADATA_KEY,
+    wrapped_by,
+)
 from agent_core.domain.turn import CallerIdentity, ToolCallId, TurnId, Usage
 
 # A source of connections that belong to THIS sink. `psycopg_pool.ConnectionPool.connection`
@@ -510,11 +515,18 @@ class PgAuditSink:
             )
         redacted: dict[str, object] = {}
         for name, value in arguments.items():
+            if name == WRAPPED_BY_AUDIT_KEY:
+                continue  # not an argument: see below
             if name in allowed:
                 # Typed tool params (a `date`) must survive the jsonb dump.
                 redacted[name] = value.isoformat() if isinstance(value, (date, datetime)) else value
             elif name in presence:
                 redacted[name] = PRESENCE_RECORDED
+        # A6 (D78). Which addons wrap this tool: set by the runner from the tool's metadata, kept
+        # whatever the allowlist says, and only if every entry is shaped like an addon name.
+        wrappers = wrapped_by({WRAPPED_BY_METADATA_KEY: arguments.get(WRAPPED_BY_AUDIT_KEY)})
+        if wrappers:
+            redacted[WRAPPED_BY_AUDIT_KEY] = list(wrappers)
         return redacted
 
     async def _append(self, sql: str, params: Sequence[Any]) -> None:

@@ -148,6 +148,12 @@ reaches the domain: `inherit: <id>` plus a patch (scalars replace, lists append,
 of another profile, in activation order. The merged mapping is validated as any profile is, so
 inheritance adds no authority; cycles, unknown parents, depth past 4 and unknown slots stop startup.
 
+Tool wrappers (A6, D78) are the `super()` analogue: `provides.wrappers` makes the tool of Core, or of
+a dependency, run through the addon's `wrap(original, arguments, ctx)`. They are applied by
+`LocalToolProvider` in a `WrappedToolset` below every runner hook, so the tool keeps its name,
+schema and replay class, policy and audit stay on the tool name (the call is audited once and the
+row names the wrapper), and with no wrapper the toolsets are exactly what they were.
+
 ---
 
 ## 3. The ports — the contract

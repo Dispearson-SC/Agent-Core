@@ -149,6 +149,7 @@ from agent_core.domain.tool_replay import (
     replay_policy,
     safe_tool_metadata,
 )
+from agent_core.domain.tool_wrapping import WRAPPED_BY_AUDIT_KEY, wrapped_by
 from agent_core.domain.turn import (
     CallerIdentity,
     PeerOwner,
@@ -614,11 +615,15 @@ class PolicyEnforcement(AbstractCapability[Any]):
         decision = self._policy.decide(self._rules, call.tool_name, arguments)
 
         # BEFORE either raise. See the class docstring; this must stay ahead of both.
+        # A6 (D78). The decision above saw the model's arguments only; the audit row also names
+        # the addons that wrap this tool, so a wrapped call is one row that says it was wrapped.
+        wrappers = wrapped_by(tool_def.metadata)
+        audited = {**arguments, WRAPPED_BY_AUDIT_KEY: list(wrappers)} if wrappers else arguments
         await self._audit.record_tool_call(
             self._turn_id,
             self._caller,
             call.tool_name,
-            arguments,
+            audited,
             decision,
         )
 

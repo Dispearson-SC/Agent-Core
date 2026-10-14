@@ -2834,3 +2834,41 @@ decision 2026-10-13) and are described by `addon.yaml`.
   quotes the syntax, and the "nothing used, nothing changes" guarantee of D76). Consequence: a
   profile that uses the machinery cannot hold a literal marker line; no escape syntax is added
   (reversible: add one if an author needs it).
+
+## D78 - Tool wrappers wrap in the toolset, below every hook (A6)
+
+- **Choice: `provides.wrappers: [{tool, wrapper}]`; `wrappers/<wrapper>.py` defines
+  `wrap(original, arguments, ctx)`.** `await original()` is the `super()` analogue: it runs the
+  tool, or the wrapper loaded before this one. A wrapper may transform the result, run code
+  around the call or not call the original. The wrapper function may be sync or async.
+- **Mechanism: a `WrappedToolset` (`adapters/driven/tools/wrapping.py`) around the toolset that
+  holds the tool, applied by `LocalToolProvider`.** It sits below every runner hook, so the tool
+  the model is offered is the original's - name, schema, description, metadata (hence the replay
+  class) - and policy (`before_tool_execute`, on the tool name), audit and the tool journal run
+  exactly as before: a denied or approval-pending call never reaches a wrapper. Rejected:
+  replacing the tool's function (loses the context/positional-argument handling of the framework
+  and needs a second schema) and registering a second tool under a new name (policy and audit
+  would key on a name the model never calls).
+- **`original()` takes no arguments; `arguments` is a read-only copy.** The policy decided on, and
+  the audit recorded, the model's arguments; a wrapper that could change them could turn an
+  approved call into a different one. Reversible: allow an explicit, schema-validated override
+  if an addon needs it (it would have to re-run the policy).
+- **Scope.** A wrapper may wrap a tool of Core or of an addon in its dependency closure
+  (`depends`, transitively); not its own tool (edit it), not an unrelated addon's, not an unknown
+  one: `AddonRegistrationError` naming the addon and `provides.wrappers` at startup. MCP tools are
+  not wrappable. It grants nothing: `provides.policy` `allow` rules still name only the addon's
+  own tools.
+- **Chaining.** Wrappers of one tool nest in activation order (dependency order, then the enabled
+  list): the first loaded is innermost, the last outermost, like a later Odoo module's override
+  calling the earlier one's.
+- **Audit identity.** One audit row per call, as before. The runner adds the wrapper addon names
+  (innermost first) to the audited arguments under `_wrapped_by`; the sink keeps that key whatever
+  the tool's allowlist says, only when every entry has the shape of an addon name
+  (`domain/tool_wrapping.py`). No new column or port signature.
+- **Failure.** An exception raised by wrapper code becomes a `ToolFailed` the model reads (addon
+  and tool named, the exception's text left out and logged); control-flow exceptions (retry,
+  defer, approval) pass through; what the original raises is left alone, as without a wrapper.
+  Nothing crashes the turn.
+- With no wrappers `wrap_toolsets` returns the toolsets it was given, so the provider is
+  byte-identical to before. Sample: `addons/sample_shout` wraps `sample_echo` of `sample_base`.
+

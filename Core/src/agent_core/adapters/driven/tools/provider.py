@@ -88,12 +88,13 @@ AN UNREACHABLE SERVER IS A DEGRADED START, NOT A REFUSAL - AND THAT IS A DECISIO
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, FunctionToolset
 
 from agent_core.adapters.driven.mcp.toolsets import MCPToolProvider
 from agent_core.adapters.driven.tools.delivery import tools as delivery_tools
+from agent_core.adapters.driven.tools.wrapping import ToolWrapper, wrap_toolsets
 from agent_core.domain.profile import AgentProfile
 from agent_core.ports.tool_provider import ToolProvider
 
@@ -155,7 +156,10 @@ class LocalToolProvider:
     """
 
     def __init__(
-        self, packages: Mapping[str, ToolsetBuilder], mcp: ToolProvider | None = None
+        self,
+        packages: Mapping[str, ToolsetBuilder],
+        mcp: ToolProvider | None = None,
+        wrappers: Sequence[ToolWrapper] = (),
     ) -> None:
         # Copied, not aliased. A registry a caller can keep mutating after construction is
         # auto-discovery with extra steps: what an agent may do would depend on when the
@@ -167,6 +171,7 @@ class LocalToolProvider:
         # cache lives on it (t-f6-05): rebuilding one per turn would spawn a server per
         # turn to answer a question whose answer has not changed.
         self._mcp = mcp
+        self._wrappers: tuple[ToolWrapper, ...] = tuple(wrappers)
 
     async def toolset_for(self, profile: AgentProfile) -> AbstractToolset[None]:
         """One object for `PydanticAgentRunner` to hand Pydantic AI.
@@ -180,7 +185,7 @@ class LocalToolProvider:
         `PydanticAgentRunner._toolsets_for` type-checks for, and an empty profile getting
         an empty toolset is the honest answer - an agent with no tools, not a fake one.
         """
-        toolsets: list[AbstractToolset[None]] = list(self._resolve(profile))
+        toolsets = wrap_toolsets(self._resolve(profile), self._wrappers)
         if self._mcp is not None and profile.mcp_servers:
             toolsets.append(await self._mcp_toolset_for(profile))
         return CombinedToolset(toolsets)
@@ -280,6 +285,7 @@ DEFAULT_TOOL_PACKAGES: Mapping[str, ToolsetBuilder] = {
 def build_tool_provider(
     packages: Mapping[str, ToolsetBuilder] | None = None,
     mcp: ToolProvider | None = None,
+    wrappers: Sequence[ToolWrapper] = (),
 ) -> LocalToolProvider:
     """The provider the composition root wires. `packages` overrides the registry.
 
@@ -302,4 +308,5 @@ def build_tool_provider(
     return LocalToolProvider(
         DEFAULT_TOOL_PACKAGES if packages is None else packages,
         mcp=MCPToolProvider() if mcp is None else mcp,
+        wrappers=wrappers,
     )

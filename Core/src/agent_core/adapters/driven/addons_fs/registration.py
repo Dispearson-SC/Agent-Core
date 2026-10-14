@@ -1,6 +1,6 @@
 """Register what the enabled addons provide, through the declared extension points only.
 
-Phase:   Phase 2 (addon system), A4
+Phase:   Phase 2 (addon system), A4, A6
 Tests:   Core/tests/unit/test_addon_registration.py
 Implements: no port - startup wiring (D74).
 
@@ -22,6 +22,10 @@ THE RULE: AN ADDON CONTRIBUTES WHAT ITS MANIFEST `provides` DECLARES, AND NOTHIN
     * fragments    `provides.fragments`: `<name>.md` files `include:` can name.
     * profiles     `provides.profiles`: `*.yaml` profile templates.
     * channels     `provides.channels`: pull-mode channel ids.
+    * wrappers     `provides.wrappers: [{tool, wrapper}]` -> `<addon>/wrappers/<wrapper>.py` with a
+                   `wrap(original, arguments, ctx)` (A6, D78). Only a tool of Core or of an addon in
+                   the wrapper's dependency closure, never the addon's own; see
+                   `adapters/driven/tools/wrapping.py` for what a wrapper may do.
     Every name is global: a collision between addons, or with a built-in, stops startup naming
     the addon (`AddonRegistrationError`). With no addons enabled the result is `EMPTY` and the
     caller does exactly what it did before.
@@ -53,6 +57,7 @@ from agent_core.adapters.driven.persistence_pg.audit_repository import (
 )
 from agent_core.adapters.driven.policy_fs.loader import parse_policy_rules
 from agent_core.adapters.driven.tools.provider import ToolsetBuilder
+from agent_core.adapters.driven.tools.wrapping import ToolWrapper
 from agent_core.domain.policy import Effect, PolicyRule
 
 __all__ = [
@@ -81,6 +86,8 @@ class AddonContributions:
     inserts: tuple[tuple[str, str, str, Path], ...] = ()
     # addon -> names of the tools its toolsets export (what `audit` and `policy` are checked on).
     tools: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    # The tool wrappers, in activation order (A6, D78).
+    wrappers: tuple[ToolWrapper, ...] = ()
 
 
 EMPTY: Final = AddonContributions()
@@ -90,18 +97,21 @@ def _refuse(addon: str, field_name: str, reason: str) -> AddonRegistrationError:
     return AddonRegistrationError(addon, field_name, reason)
 
 
-def _import_toolset(addon: ResolvedAddon, name: str) -> ModuleType:
+def _import_addon_file(
+    addon: ResolvedAddon, field_name: str, directory: str, name: str
+) -> ModuleType:
+    """Import `<addon>/<directory>/<name>.py` by path, once. Anything wrong is a refusal."""
     owner = addon.manifest.name
-    path = addon.root / "toolsets" / f"{name}.py"
+    path = addon.root / directory / f"{name}.py"
     if not path.is_file():
-        raise _refuse(owner, "provides.toolsets", f"{name!r} has no file toolsets/{name}.py")
-    module_name = f"{_MODULE_PREFIX}.{owner}.{name.replace('-', '_')}"
+        raise _refuse(owner, field_name, f"{name!r} has no file {directory}/{name}.py")
+    module_name = f"{_MODULE_PREFIX}.{owner}.{directory}.{name.replace('-', '_')}"
     cached = sys.modules.get(module_name)
     if cached is not None and getattr(cached, "__file__", None) == str(path):
         return cached
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:  # pragma: no cover - a .py file always has a loader
-        raise _refuse(owner, "provides.toolsets", f"{name!r} cannot be imported")
+        raise _refuse(owner, field_name, f"{name!r} cannot be imported")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     try:
@@ -109,11 +119,13 @@ def _import_toolset(addon: ResolvedAddon, name: str) -> ModuleType:
     except Exception as error:
         del sys.modules[module_name]
         raise _refuse(
-            owner,
-            "provides.toolsets",
-            f"{name!r} failed to import: {type(error).__name__}: {error}",
+            owner, field_name, f"{name!r} failed to import: {type(error).__name__}: {error}"
         ) from error
     return module
+
+
+def _import_toolset(addon: ResolvedAddon, name: str) -> ModuleType:
+    return _import_addon_file(addon, "provides.toolsets", "toolsets", name)
 
 
 def _register_toolsets(
@@ -276,6 +288,63 @@ def _fragments_of(
     return found
 
 
+def _closure(name: str, manifests: Mapping[str, Sequence[str]]) -> frozenset[str]:
+    """Every addon `name` depends on, directly or through another (not `name` itself)."""
+    seen: set[str] = set()
+    pending = list(manifests.get(name, ()))
+    while pending:
+        current = pending.pop()
+        if current not in seen:
+            seen.add(current)
+            pending.extend(manifests.get(current, ()))
+    return frozenset(seen)
+
+
+def _wrappers_of(
+    addon: ResolvedAddon,
+    own: Mapping[str, frozenset[str]],
+    depends: Mapping[str, Sequence[str]],
+    core_tools: Collection[str],
+) -> tuple[ToolWrapper, ...]:
+    """The addon's `provides.wrappers`, resolved. A wrapper reaches Core's tools and the tools of
+    the addons it depends on (directly or not); nothing else, and not its own."""
+    owner = addon.manifest.name
+    closure = _closure(owner, depends)
+    found: list[ToolWrapper] = []
+    for declared in addon.manifest.provides.wrappers:
+        tool = declared.tool
+        if tool in own[owner]:
+            raise _refuse(
+                owner,
+                "provides.wrappers",
+                f"{tool!r} is a tool of this addon's own toolsets; an addon wraps the tools of "
+                "Core and of the addons it depends on, not its own",
+            )
+        if tool not in core_tools:
+            providers = sorted(name for name, tools in own.items() if tool in tools)
+            if not providers:
+                raise _refuse(
+                    owner, "provides.wrappers", f"{tool!r} is not a tool any enabled toolset has"
+                )
+            if not any(name in closure for name in providers):
+                raise _refuse(
+                    owner,
+                    "provides.wrappers",
+                    f"{tool!r} belongs to addon {providers[0]!r}, which this addon does not "
+                    "depend on (directly or through another dependency); add it to depends",
+                )
+        module = _import_addon_file(addon, "provides.wrappers", "wrappers", declared.wrapper)
+        function = getattr(module, "wrap", None)
+        if not callable(function):
+            raise _refuse(
+                owner,
+                "provides.wrappers",
+                f"{declared.wrapper!r} has no wrap(original, arguments, ctx) function",
+            )
+        found.append(ToolWrapper(addon=owner, tool=tool, call=function))
+    return tuple(found)
+
+
 def _channels_of(
     addon: ResolvedAddon, reserved: Collection[str], taken: dict[str, str]
 ) -> tuple[str, ...]:
@@ -331,6 +400,9 @@ def register_addons(
     profile_files: list[tuple[str, Path]] = []
     channels: list[str] = []
     inserts: list[tuple[str, str, str, Path]] = []
+    wrappers: list[ToolWrapper] = []
+    depends = {a.manifest.name: a.manifest.depends for a in addons}
+    core_tools = frozenset(tool for tool, who in tool_owner.items() if who == "Core")
     for addon in addons:
         owner = addon.manifest.name
         contribution = _audit_of(addon, own[owner])
@@ -360,6 +432,7 @@ def register_addons(
             inserts.append(
                 (owner, insertion.profile, insertion.slot, own_fragments[insertion.fragment])
             )
+        wrappers.extend(_wrappers_of(addon, own, depends, core_tools))
         channels.extend(_channels_of(addon, reserved_channels, channel_owner))
         relative = addon.manifest.provides.profiles
         if relative is not None:
@@ -375,6 +448,7 @@ def register_addons(
         pull_channels=tuple(channels),
         inserts=tuple(inserts),
         tools=own,
+        wrappers=tuple(wrappers),
     )
 
 

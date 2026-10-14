@@ -511,6 +511,7 @@ list above is the only switch, and everything below happens at startup (build an
 | `fragments: dir/` | `<name>.md` files | names a profile can put in `include:` |
 | `profiles: dir/` | `*.yaml` profile files | profiles served next to Core's |
 | `inserts: [{profile, slot, fragment}]` | nothing (uses one of the addon's own `fragments`) | that fragment's text at the profile's `{{slot:name}}`, after the slot's defaults, in activation order |
+| `wrappers: [{tool, wrapper}]` | `wrappers/<wrapper>.py` with `wrap(original, arguments, ctx)` | the tool runs through `wrap`; `await original()` calls the tool (or the wrapper loaded before) |
 | `channels: [id]` | nothing (no code) | pull-mode channel ids, like `AGENT_CORE_PULL_CHANNELS` |
 
 - Startup stops, naming the addon and the `provides.*` key, when: a declared file or directory is missing
@@ -522,6 +523,31 @@ list above is the only switch, and everything below happens at startup (build an
 - An addon's rules are part of the reviewed set: removing the addon from `AGENT_CORE_ADDONS` and
   restarting revokes them, exactly like deleting a rule from `Core/policy/`.
 - `:reload` in the console and `preflight` see the addons' profiles and toolsets too.
+
+### Tool wrappers (A6, D78)
+
+```yaml
+# addons/shop_audit/addon.yaml
+depends: [shop]
+provides:
+  wrappers: [{tool: cart_add, wrapper: stamp}]
+```
+
+```python
+# addons/shop_audit/wrappers/stamp.py
+async def wrap(original, arguments, ctx):
+    result = await original()          # the tool, or the wrapper loaded before this one
+    return f"{result} (checked)"
+```
+
+The tool keeps its name, schema and replay class; policy rules, approvals and the audit row still
+apply to the tool name and run BEFORE the wrapper, which therefore never sees a refused call. The
+audit row is written once and lists the wrapping addons in its arguments as `_wrapped_by`.
+`original()` takes no arguments: it runs with the arguments the policy decided on. Wrappers on one
+tool nest in activation order (the last loaded is outermost). A wrapper may wrap a tool of Core or
+of an addon it depends on (directly or not), never its own or an unrelated addon's: startup stops
+naming the addon otherwise. An exception from wrapper code reaches the model as a tool error (the
+exception text goes to the log, not to the model); the original tool's own errors are unchanged.
 
 ### Profile inheritance and slots (A5, D76)
 
