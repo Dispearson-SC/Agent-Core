@@ -15,7 +15,10 @@ not a loaded entry point stops startup.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import logging
 import threading
+import time
 from pathlib import Path
 from textwrap import dedent
 from typing import Any
@@ -26,7 +29,11 @@ from agent_core.adapters.driven.addons_fs.errors import AddonRegistrationError, 
 from agent_core.adapters.driven.addons_fs.loader import load_addons
 from agent_core.adapters.driven.addons_fs.manifest import parse_manifest
 from agent_core.adapters.driven.addons_fs.registration import EMPTY, register_addons
-from agent_core.adapters.driven.routing.addon_router import AddonTurnRouter, RouterSaturatedError
+from agent_core.adapters.driven.routing.addon_router import (
+    AddonTurnRouter,
+    RouterSaturatedError,
+    decision_from_mapping,
+)
 from agent_core.composition import TOOL_PACKAGES, Settings, refuse_unroutable_profiles
 from agent_core.domain.agent_mode import AgentMode
 from agent_core.domain.profile import AgentProfile
@@ -263,7 +270,7 @@ def test_sync_routers_hanging_past_the_timeout_cannot_exhaust_threads_and_then_r
         for _ in range(2):
             with pytest.raises(TimeoutError):
                 await asyncio.wait_for(router.route("hang", _request()), 0.05)
-        # Both threads still hang: a third call is refused at once, never queued behind them.
+        # Both threads still hang: a third call waits briefly for a slot, then is refused.
         with pytest.raises(RouterSaturatedError):
             await asyncio.wait_for(router.route("hang", _request()), 1.0)
         assert len(calls) == 2 and router.sync_calls_in_flight == 2
@@ -293,3 +300,110 @@ def test_a_sync_routers_error_reaches_the_caller_and_frees_its_slot() -> None:
 def test_the_sync_call_cap_must_be_positive() -> None:
     with pytest.raises(ValueError, match="max_sync_calls"):
         AddonTurnRouter({}, max_sync_calls=0)
+
+
+# --- slice 34 advisories: context and load ----------------------------------------------------
+
+
+_REQUEST_TAG: contextvars.ContextVar[str] = contextvars.ContextVar("request_tag", default="unset")
+
+
+def test_a_sync_router_sees_the_callers_context_variables() -> None:
+    seen: list[str] = []
+
+    def tagged(request: dict[str, Any]) -> dict[str, Any]:
+        seen.append(_REQUEST_TAG.get())
+        return {"decision": "pass"}
+
+    router = AddonTurnRouter({"tagged": tagged})
+
+    async def scenario() -> None:
+        _REQUEST_TAG.set("turn-42")
+        await router.route("tagged", _request())
+
+    asyncio.run(scenario())
+    assert seen == ["turn-42"]
+
+
+def test_a_burst_of_fast_sync_calls_over_the_cap_waits_for_a_slot_instead_of_failing() -> None:
+    def quick(request: dict[str, Any]) -> dict[str, Any]:
+        time.sleep(0.02)
+        return {"decision": "pass"}
+
+    router = AddonTurnRouter({"quick": quick}, max_sync_calls=2)
+
+    async def scenario() -> list[RouteDecision]:
+        return await asyncio.gather(*(router.route("quick", _request()) for _ in range(6)))
+
+    decisions = asyncio.run(scenario())
+    assert [d.kind for d in decisions] == [RouteKind.PASS] * 6
+    assert router.sync_calls_in_flight == 0
+
+
+def test_a_call_waiting_for_a_slot_gives_up_after_the_slot_wait() -> None:
+    release = threading.Event()
+
+    def hang(request: dict[str, Any]) -> dict[str, Any]:
+        release.wait(5)
+        return {"decision": "pass"}
+
+    router = AddonTurnRouter({"hang": hang}, max_sync_calls=1, slot_wait_seconds=0.05)
+
+    async def scenario() -> float:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(router.route("hang", _request()), 0.02)
+        started = time.monotonic()
+        with pytest.raises(RouterSaturatedError):
+            await router.route("hang", _request())
+        return time.monotonic() - started
+
+    try:
+        waited = asyncio.run(scenario())
+    finally:
+        release.set()
+    assert 0.04 <= waited < 1.0
+
+
+def test_the_slot_wait_must_not_be_negative() -> None:
+    with pytest.raises(ValueError, match="slot_wait_seconds"):
+        AddonTurnRouter({}, slot_wait_seconds=-1)
+
+
+def test_an_answer_may_carry_its_reason_elapsed_time_and_usage_which_are_logged_not_decided(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def diagnosed(request: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "decision": "pass",
+            "label": "none_of_these",
+            "confidence": 0.31,
+            "model": "clf-2",
+            "reason": "below_threshold",
+            "elapsed_ms": 123,
+            "usage": {"input_tokens": 300, "output_tokens": 20},
+        }
+
+    router = AddonTurnRouter({"diagnosed": diagnosed})
+    with caplog.at_level(logging.INFO, logger="agent_core.adapters.driven.routing.addon_router"):
+        decision = asyncio.run(router.route("diagnosed", _request("secret customer words")))
+
+    assert decision.kind is RouteKind.PASS and decision.label == "none_of_these"
+    logged = caplog.text
+    assert "below_threshold" in logged and "elapsed_ms=123" in logged
+    assert "input_tokens" in logged and "secret customer words" not in logged
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"decision": "pass", "reason": 7},
+        {"decision": "pass", "reason": "x" * 201},
+        {"decision": "pass", "elapsed_ms": -1},
+        {"decision": "pass", "elapsed_ms": True},
+        {"decision": "pass", "usage": ["tokens"]},
+        {"decision": "pass", "usage": {"input_tokens": "many"}},
+    ],
+)
+def test_malformed_diagnostics_are_a_malformed_answer(answer: dict[str, Any]) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        decision_from_mapping(answer)

@@ -15,7 +15,9 @@ THE ADDON SIDE OF THE CONTRACT IS PLAIN DATA
         {"decision": "pass" | "route" | "intent",
          "profile_id": str,              # route: where to send the turn
          "intent": str, "arguments": {}, # intent: what to run
-         "label": str, "confidence": float in [0, 1], "calibrated": bool, "model": str}
+         "label": str, "confidence": float in [0, 1], "calibrated": bool, "model": str,
+         # diagnostics: logged with the router's name, never part of the decision
+         "reason": str, "elapsed_ms": number >= 0, "usage": {str: int}}
 
     Every key but `decision` is optional. This adapter is the one place that turns that mapping
     into a `RouteDecision`, strictly: an unknown key, a wrong type or an impossible value raises,
@@ -25,15 +27,26 @@ SYNC ROUTERS RUN ON THEIR OWN, CAPPED THREADS
     A sync `route` runs in a daemon thread so a blocking HTTP client cannot stall the event loop,
     and the caller's timeout still answers on time. A thread cannot be cancelled, so one that
     hangs keeps running after its caller gave up. At most `max_sync_calls` such threads live at
-    once (counting the hung ones, until they finish); one more call is refused at once with
-    `RouterSaturatedError` (a fallback to the normal path) instead of queueing behind them or
-    taking a thread the rest of the process needs. Daemon threads never hold up shutdown.
+    once (counting the hung ones, until they finish). One more call waits for a slot, without a
+    thread, for at most `slot_wait_seconds` (a burst of quick calls queues briefly instead of
+    failing), then is refused with `RouterSaturatedError` (a fallback to the normal path) rather
+    than taking a thread the rest of the process needs. The caller's own timeout cancels the wait
+    too. The thread runs in a copy of the caller's context, so context variables (a trace id, a
+    request scope) reach the router as they would reach an async one. Daemon threads never hold
+    up shutdown.
+
+DIAGNOSTICS ARE LOGGED, NOT DECIDED
+    `reason`, `elapsed_ms` and `usage` say why and at what cost a router answered (an abstention
+    below its threshold, a classifier's token usage). They are validated like the rest and logged
+    at INFO with the router's name, label, confidence and model; the person's text never is.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
+import logging
 import threading
 from collections.abc import Callable, Mapping
 from typing import Any, Final
@@ -42,6 +55,7 @@ from agent_core.domain.routing import RouteDecision, RouteKind, RouteRequest
 
 __all__ = [
     "DEFAULT_MAX_SYNC_CALLS",
+    "DEFAULT_SLOT_WAIT_SECONDS",
     "AddonTurnRouter",
     "RouterFunction",
     "RouterSaturatedError",
@@ -52,11 +66,14 @@ RouterFunction = Callable[[dict[str, Any]], Any]
 """An addon's `route`, settings already bound: a plain request mapping in, a mapping out (or an
 awaitable of one)."""
 
-_KEYS: Final = frozenset(
-    {"decision", "profile_id", "intent", "arguments", "label", "confidence", "calibrated", "model"}
-)
+_DIAGNOSTICS: Final = frozenset({"reason", "elapsed_ms", "usage"})
+_KEYS: Final = _DIAGNOSTICS | {
+    "decision", "profile_id", "intent", "arguments", "label", "confidence", "calibrated", "model",
+}  # fmt: skip
 _MAX_TEXT: Final = 200
 DEFAULT_MAX_SYNC_CALLS: Final = 4
+DEFAULT_SLOT_WAIT_SECONDS: Final = 0.25
+_LOG = logging.getLogger(__name__)
 
 
 class RouterSaturatedError(RuntimeError):
@@ -69,13 +86,19 @@ class AddonTurnRouter:
         routers: Mapping[str, RouterFunction],
         *,
         max_sync_calls: int = DEFAULT_MAX_SYNC_CALLS,
+        slot_wait_seconds: float = DEFAULT_SLOT_WAIT_SECONDS,
     ) -> None:
         if max_sync_calls < 1:
             raise ValueError(f"max_sync_calls must be at least 1, got {max_sync_calls}")
+        if slot_wait_seconds < 0:
+            raise ValueError(f"slot_wait_seconds must not be negative, got {slot_wait_seconds}")
         self._routers = dict(routers)
         self._max_sync_calls = max_sync_calls
+        self._slot_wait = slot_wait_seconds
         self._lock = threading.Lock()
         self._in_flight = 0
+        # Callers waiting for a slot: woken (all of them) whenever a thread frees one.
+        self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
 
     @property
     def sync_calls_in_flight(self) -> int:
@@ -102,36 +125,92 @@ class AddonTurnRouter:
             answer = await self._in_thread(function, plain)
             if inspect.isawaitable(answer):
                 answer = await answer
-        return decision_from_mapping(answer)
+        decision = decision_from_mapping(answer)
+        _log_diagnostics(router, answer)
+        return decision
+
+    async def _acquire_slot(self) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._slot_wait
+        while True:
+            with self._lock:
+                if self._in_flight < self._max_sync_calls:
+                    self._in_flight += 1
+                    return
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise RouterSaturatedError(
+                        f"{self._in_flight} sync router calls are still running "
+                        f"(max_sync_calls={self._max_sync_calls}, waited {self._slot_wait}s)"
+                    )
+                waiter: asyncio.Future[None] = loop.create_future()
+                self._waiters.append((loop, waiter))
+            try:
+                await asyncio.wait_for(asyncio.shield(waiter), remaining)
+            except TimeoutError:
+                pass  # re-checked above: refused unless a slot freed in the meantime
+            finally:
+                with self._lock:
+                    if (loop, waiter) in self._waiters:
+                        self._waiters.remove((loop, waiter))
+
+    def _release_slot(self) -> None:
+        with self._lock:
+            self._in_flight -= 1
+            waiters, self._waiters = self._waiters, []
+        for loop, waiter in waiters:
+            try:
+                loop.call_soon_threadsafe(_wake, waiter)
+            except RuntimeError:
+                pass  # that caller's loop closed: nobody is waiting there any more
 
     async def _in_thread(self, function: RouterFunction, plain: dict[str, Any]) -> Any:
-        with self._lock:
-            if self._in_flight >= self._max_sync_calls:
-                raise RouterSaturatedError(
-                    f"{self._in_flight} sync router calls are still running "
-                    f"(max_sync_calls={self._max_sync_calls})"
-                )
-            self._in_flight += 1
+        await self._acquire_slot()
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Any] = loop.create_future()
+        context = contextvars.copy_context()
 
         def work() -> None:
             answer: Any = None
             failure: BaseException | None = None
             try:
-                answer = function(plain)
+                answer = context.run(function, plain)
             except BaseException as error:  # handed to the awaiting caller, never swallowed
                 failure = error
             finally:
-                with self._lock:
-                    self._in_flight -= 1
+                self._release_slot()
             try:
                 loop.call_soon_threadsafe(_settle, future, answer, failure)
             except RuntimeError:
                 pass  # the loop closed while the router hung: nobody is waiting any more
 
-        threading.Thread(target=work, name="turn-router", daemon=True).start()
+        try:
+            threading.Thread(target=work, name="turn-router", daemon=True).start()
+        except BaseException:
+            self._release_slot()
+            raise
         return await future
+
+
+def _wake(waiter: asyncio.Future[None]) -> None:
+    if not waiter.done():
+        waiter.set_result(None)
+
+
+def _log_diagnostics(router: str, answer: Mapping[str, Any]) -> None:
+    """One INFO line per answer: what was decided and why, never the person's text."""
+    _LOG.info(
+        "turn router %r answered %s label=%s confidence=%s model=%s reason=%s elapsed_ms=%s "
+        "usage=%s",
+        router,
+        answer.get("decision"),
+        answer.get("label"),
+        answer.get("confidence"),
+        answer.get("model"),
+        answer.get("reason"),
+        answer.get("elapsed_ms"),
+        dict(answer.get("usage") or {}),
+    )
 
 
 def _settle(future: asyncio.Future[Any], answer: Any, failure: BaseException | None) -> None:
@@ -171,6 +250,7 @@ def decision_from_mapping(answer: object) -> RouteDecision:
     arguments = answer.get("arguments", {})
     if not isinstance(arguments, Mapping):
         raise ValueError("router answer 'arguments' must be a mapping")
+    _check_diagnostics(answer)
     return RouteDecision(
         kind=kind,
         profile_id=_optional_text(answer, "profile_id"),
@@ -181,3 +261,20 @@ def decision_from_mapping(answer: object) -> RouteDecision:
         calibrated=calibrated,
         model=_optional_text(answer, "model"),
     )
+
+
+def _check_diagnostics(answer: Mapping[str, Any]) -> None:
+    _optional_text(answer, "reason")
+    elapsed = answer.get("elapsed_ms")
+    if elapsed is not None and (
+        isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or elapsed < 0
+    ):
+        raise ValueError("router answer 'elapsed_ms' must be a number of at least 0")
+    usage = answer.get("usage")
+    if usage is None:
+        return
+    if not isinstance(usage, Mapping) or not all(
+        isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool)
+        for key, value in usage.items()
+    ):
+        raise ValueError("router answer 'usage' must map names to whole numbers")
