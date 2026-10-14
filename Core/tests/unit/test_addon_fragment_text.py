@@ -165,3 +165,19 @@ def test_a_fragment_that_cannot_render_stops_startup_naming_the_addon(
 
     assert caught.value.addon == "shop" and caught.value.field == "provides.fragments"
     assert "style.md" in str(caught.value)
+
+
+def test_the_text_served_is_the_text_registration_checked(tmp_path: Path) -> None:
+    """Slice 29 advisory (registration.py:372-376): the check rendered the file and threw the text
+    away, so every later read rendered the file AGAIN. A fragment edited or removed after startup
+    then reached a profile unchecked, or failed at profile load with a bare `ValueError` /
+    `OSError` naming no addon. The text registration validated is the text served."""
+    _addon(tmp_path, "For {{setting:audience}}.")
+    contributions = _register(tmp_path)
+    path = tmp_path / "shop" / "fragments" / "style.md"
+
+    path.write_text("Now {{setting:missing}}.", encoding="utf-8")
+    assert contributions.fragments["style"].read_text(encoding="utf-8") == "For people."
+    path.unlink()
+    assert contributions.fragments["style"].is_file()
+    assert contributions.fragments["style"].read_text(encoding="utf-8") == "For people."

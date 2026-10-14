@@ -667,6 +667,31 @@ def test_a_wildcard_insert_reaches_a_child_once_through_its_parent() -> None:
     assert resolved[1]["persona"].count("ONCE.") == 1
 
 
+@pytest.mark.parametrize("order", ["parent first", "child first"])
+def test_a_wildcard_insert_lands_once_down_a_chain_that_redeclares_the_slot(order: str) -> None:
+    """Slice 29 advisory (inheritance.py:434-446): `_declaring` looks at EVERY ancestor, not only
+    the parent, and does not depend on the order the documents load in. A grandchild whose parent
+    and grandparent both declare the slot, or only its grandparent does, gets the text once."""
+    documents = [
+        _doc(SLOTTED.replace("[first]", "[]"), name="a.yaml"),
+        _doc("id: middle\ninherit: slotted\nslots: {before_tools: []}\n", name="b.yaml"),
+        _doc("id: leaf\ninherit: middle\nslots: {before_tools: []}\n", name="c.yaml"),
+        _doc("id: other_leaf\ninherit: middle\n", name="d.yaml"),
+        # the grandparent declares, the parent does not, the child declares again
+        _doc("id: quiet_middle\ninherit: slotted\nmax_iterations: 3\n", name="e.yaml"),
+        _doc("id: far_leaf\ninherit: quiet_middle\nslots: {before_tools: []}\n", name="f.yaml"),
+    ]
+    if order == "child first":
+        documents.reverse()
+    inserts = (SlotInsert("alpha", "*", "before_tools", "ONCE."),)
+
+    by_id = {m["id"]: m["persona"] for m in resolve_documents(documents, inserts)}
+
+    assert set(by_id) == {"slotted", "middle", "leaf", "other_leaf", "quiet_middle", "far_leaf"}
+    for profile_id, persona in by_id.items():
+        assert persona == "Intro.\n\nONCE.\n\nOutro.", profile_id
+
+
 def test_a_wildcard_insert_into_a_slot_nobody_declares_is_an_error_naming_the_addon() -> None:
     inserts = (SlotInsert("alpha", "*", "nowhere", "x"),)
 

@@ -369,13 +369,39 @@ def _fragments_of(
                 owner, "provides.fragments", f"{path.stem!r} is already a built-in fragment"
             )
         taken[path.stem] = f"addon {owner!r}"
-        fragment = AddonFragment(path, addon.settings)
         try:
-            fragment.read_text(encoding="utf-8")  # a template the settings cannot fill stops here
+            # A template the settings cannot fill stops here, naming the addon and the file.
+            text = AddonFragment(path, addon.settings).read_text(encoding="utf-8")
         except (ValueError, OSError) as error:
             raise _refuse(owner, "provides.fragments", f"{path.name}: {error}") from error
-        found[path.stem] = fragment
+        found[path.stem] = _CheckedFragment(path, text)
     return found
+
+
+@dataclass(frozen=True)
+class _CheckedFragment:
+    """A fragment as registration rendered and checked it (slice 29 advisory).
+
+    Serving the checked text, not the file, means a fragment edited or removed after startup can
+    neither reach a profile unchecked nor fail later with an error that names no addon.
+    """
+
+    path: Path
+    text: str
+
+    @property
+    def name(self) -> str:
+        return self.path.name
+
+    @property
+    def stem(self) -> str:
+        return self.path.stem
+
+    def is_file(self) -> bool:
+        return True
+
+    def read_text(self, encoding: str | None = None) -> str:
+        return self.text
 
 
 def _closure(name: str, manifests: Mapping[str, Sequence[str]]) -> frozenset[str]:

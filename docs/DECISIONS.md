@@ -3296,3 +3296,18 @@ decision 2026-10-13) and are described by `addon.yaml`.
 - **Trust.** The text comes from the vertical's own backend, bounded, and reaches the model inside the
   tool result like every other backend field; no new channel is opened.
 
+
+## D92 - Slice 29 advisories closed: checked fragment text, one fetch under a race, wildcard chains
+
+- **registration.py (fragments).** Registration rendered each addon fragment to check it and threw the
+  text away; every later read rendered the file again, so an edit or removal after startup reached a
+  profile unchecked or failed at profile load naming no addon. Registration now serves the text it
+  checked (`_CheckedFragment`). Consequence: editing an addon fragment needs a restart, like every
+  other addon change.
+- **openapi.py (fetch cache).** The cache was checked under the lock but the fetch ran outside it, so
+  builds racing at startup each asked the backend. A per-key lock makes the second build wait and read
+  the cached document; different URLs or transports are not serialized; a failed fetch is still not
+  stored (the waiter tries again).
+- **inheritance.py (`_declaring`).** No defect: a test now pins that a wildcard insert lands once down a
+  chain that re-declares the slot, including when only the grandparent declares it, in either load
+  order (it fails if only the direct parent were consulted).

@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -910,3 +912,34 @@ def test_a_manual_tool_pin_must_agree_with_its_own_method_and_route() -> None:
 
     with pytest.raises(OpenApiContractError, match="list_fiction.*POST /internal/v1/books"):
         load_openapi_manifest(_spec(), overlay=overlay)
+
+
+def test_builds_racing_at_startup_ask_the_backend_once() -> None:
+    """Slice 29 advisory (openapi.py:147): the cache was checked, then the lock released for the
+    fetch, so two toolsets built at the same time both missed and both asked the backend. One URL
+    and transport is fetched once even when the builds overlap; the second waits for the first."""
+    fetched: list[str] = []
+    release = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fetched.append(str(request.url))
+        release.wait(5)  # the first fetch is still in flight while the second build starts
+        return httpx.Response(200, json=_spec())
+
+    transport = httpx.MockTransport(handler)
+    results: list[object] = []
+    builds = [
+        threading.Thread(
+            target=lambda: results.append(load_openapi_manifest(URL, transport=transport))
+        )
+        for _ in range(2)
+    ]
+    for build in builds:
+        build.start()
+    time.sleep(0.3)
+    release.set()
+    for build in builds:
+        build.join(10)
+
+    assert len(results) == 2
+    assert fetched == [URL]

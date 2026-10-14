@@ -71,8 +71,10 @@ Transport = httpx.BaseTransport | httpx.AsyncBaseTransport
 # several toolsets builds the same bridge several times and the backend is asked once. The
 # transport is part of the key (G2b): a document fetched through one transport (a test double, a
 # second backend's own route) is never served to a build that uses another. A failed fetch is never
-# stored. Tests call `clear_openapi_cache()`.
+# stored. Builds racing for one key wait on that key's lock, so the backend is still asked once
+# (slice 29); other keys are not held up. Tests call `clear_openapi_cache()`.
 _FETCHED: dict[tuple[str, Transport | None], dict[str, Any]] = {}
+_FETCHING: dict[tuple[str, Transport | None], threading.Lock] = {}
 _FETCH_LOCK = threading.Lock()
 
 _METHODS = ("get", "post", "put", "patch", "delete")
@@ -84,6 +86,7 @@ def clear_openapi_cache() -> None:
     """Forget every fetched document, so the next build asks the backend again."""
     with _FETCH_LOCK:
         _FETCHED.clear()
+        _FETCHING.clear()
 
 
 class OpenApiContractError(BridgeManifestError):
@@ -149,11 +152,17 @@ def _fetched(url: str, timeout: float, transport: Transport | None) -> dict[str,
     key = (url, transport)
     with _FETCH_LOCK:
         cached = _FETCHED.get(key)
-    if cached is not None:
-        return cached
-    document = _fetch(url, timeout, transport)
-    with _FETCH_LOCK:
-        return _FETCHED.setdefault(key, document)
+        if cached is not None:
+            return cached
+        fetching = _FETCHING.setdefault(key, threading.Lock())
+    with fetching:  # a build racing for the same key waits here instead of fetching again
+        with _FETCH_LOCK:
+            cached = _FETCHED.get(key)
+        if cached is not None:
+            return cached
+        document = _fetch(url, timeout, transport)
+        with _FETCH_LOCK:
+            return _FETCHED.setdefault(key, document)
 
 
 def _fetch(url: str, timeout: float, transport: Transport | None) -> dict[str, Any]:
