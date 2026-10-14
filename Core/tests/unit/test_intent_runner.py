@@ -230,3 +230,16 @@ def test_a_template_reply_is_the_text_as_the_agents_message_without_a_model() ->
     assert outcome.result.text == "Low: A (2)"
     (message,) = outcome.messages
     assert isinstance(message, ModelResponse) and message.parts[0].content == "Low: A (2)"
+
+
+def test_a_planned_call_fits_a_profile_allowed_a_single_iteration() -> None:
+    """The scripted run takes two requests (the call, then the end) but makes ONE tool call: its
+    limit is one call, not the profile's iteration count, which `prepare` already charged."""
+    backend = Backend()
+    planned = PlannedCall(step_id="s", tool="stock_levels", arguments={})
+    one = AgentProfile(id="shop", persona="p", model="m", max_iterations=1)
+
+    result = asyncio.run(_runner(backend).call_tool(TURN, _request(), one, planned))
+
+    assert result.ok
+    assert backend.calls == [("stock_levels", {"limit": 5})]

@@ -1771,7 +1771,11 @@ class PydanticAgentRunner:
                 capabilities=capabilities,
                 toolsets=self._per_turn_toolsets(request.caller, profile),
                 deps=self._turn_context(turn_id, request, profile, rules),
-                usage_limits=self.usage_limits_for(profile),
+                # Two scripted requests (the call, then the end) and exactly ONE tool call; the
+                # plan's calls were charged against `max_iterations` when it was prepared.
+                usage_limits=UsageLimits(
+                    request_limit=2, tool_calls_limit=1, cost_limit=profile.max_cost_usd
+                ),
             )
         except PlanRefusedError as refused:
             return PlanToolResult(call.step_id, call.tool, failure=refused.reason)
