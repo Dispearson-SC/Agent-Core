@@ -525,6 +525,31 @@ def test_filling_defaults_keeps_what_the_model_sent_and_never_adds_a_fixed_argum
     assert _validated(_toolset(Backend()), "get_book", "{}") == {"book_id": None}
 
 
+def test_a_filled_container_default_is_a_fresh_copy_on_every_call(tmp_path: Path) -> None:
+    """Slice 32 advisory: a list or object default is copied per call, so a policy, wrapper or
+    audit step that mutates one call's arguments cannot change the default the next call gets."""
+    path = tmp_path / "containers.yaml"
+    path.write_text(
+        """\
+tools:
+  - name: list_tagged
+    description: Tagged things.
+    method: POST
+    route: /tagged
+    kind: read
+    arguments:
+      tags: {type: array, in: body, default: [new]}
+""",
+        encoding="utf-8",
+    )
+    toolset = build_bridge_toolset(SETTINGS, manifest=path)
+
+    first = _validated(toolset, "list_tagged", "{}")
+    first["tags"].append("mutated")
+
+    assert _validated(toolset, "list_tagged", "{}") == {"tags": ["new"]}
+
+
 def test_the_request_is_the_same_whether_the_defaults_were_filled_or_not() -> None:
     """HTTP stays identical: a filled default or null sends what the unfilled call sent."""
     backend = Backend({"items": []})

@@ -28,6 +28,7 @@ WHAT EACH TOOL DOES
 
 from __future__ import annotations
 
+import copy
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -182,7 +183,10 @@ def _with_defaults(tool: ToolSpec) -> SchemaValidator:
     def fill(arguments: Any) -> Any:
         if not isinstance(arguments, dict):
             return arguments
-        return {**{n: v for n, v in filled.items() if n not in arguments}, **arguments}
+        # A container default is copied per call: a later step mutating one call's arguments
+        # must not change the default the next call gets.
+        unsent = {n: copy.deepcopy(v) for n, v in filled.items() if n not in arguments}
+        return {**unsent, **arguments}
 
     return SchemaValidator(
         core_schema.no_info_after_validator_function(fill, core_schema.any_schema())
