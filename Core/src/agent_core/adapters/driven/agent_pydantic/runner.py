@@ -617,8 +617,12 @@ class PolicyEnforcement(AbstractCapability[Any]):
         # BEFORE either raise. See the class docstring; this must stay ahead of both.
         # A6 (D78). The decision above saw the model's arguments only; the audit row also names
         # the addons that wrap this tool, so a wrapped call is one row that says it was wrapped.
+        # The key is the RUNNER's: whatever the model sent under it is dropped first, so the audit
+        # row says a tool was wrapped only when it was (A6b, D79).
         wrappers = wrapped_by(tool_def.metadata)
-        audited = {**arguments, WRAPPED_BY_AUDIT_KEY: list(wrappers)} if wrappers else arguments
+        audited = {key: value for key, value in arguments.items() if key != WRAPPED_BY_AUDIT_KEY}
+        if wrappers:
+            audited[WRAPPED_BY_AUDIT_KEY] = list(wrappers)
         await self._audit.record_tool_call(
             self._turn_id,
             self._caller,

@@ -387,6 +387,42 @@ def test_a_marker_in_a_profile_that_uses_the_machinery_must_be_declared() -> Non
         resolve_documents([_doc(BASE, name="a.yaml"), _doc(child, name="k.yaml")], ())
 
 
+@pytest.mark.parametrize(
+    "persona",
+    [
+        "Intro {{slot:before_tools}} outro.",
+        "{{slot:before_tools}} and more",
+        "Text first {{slot:before_tools}}",
+        "{{slot:before_tools}}{{slot:before_tools}}",
+        "Intro.\n\nSee: {{slot:before_tools}}\n\nOutro.",
+    ],
+    ids=["middle", "leading", "trailing", "twice-on-a-line", "after-a-label"],
+)
+def test_a_marker_that_is_not_alone_on_its_line_is_refused_naming_the_slot(persona: str) -> None:
+    text = SLOTTED.replace("Intro.\n\n  {{slot:before_tools}}\n\n  Outro.", "X").replace(
+        "persona: |-\n  X", "persona: |-\n" + "".join(f"  {line}\n" for line in persona.split("\n"))
+    )
+
+    with pytest.raises(ProfileInheritanceError, match="alone on its own line") as caught:
+        resolve_documents([_doc(text.replace("[first]", "[]"), name="s.yaml")], ())
+
+    assert "before_tools" in str(caught.value) and "s.yaml" in str(caught.value)
+
+
+def test_an_inline_marker_is_refused_even_when_the_slot_is_not_declared() -> None:
+    child = BASE.replace("id: base", "id: kid") + "inherit: base\n"
+    child = child.replace("persona: You help.", "persona: Docs say {{slot:x}} here.")
+
+    with pytest.raises(ProfileInheritanceError, match="alone on its own line"):
+        resolve_documents([_doc(BASE, name="a.yaml"), _doc(child, name="k.yaml")], ())
+
+
+def test_an_inline_marker_in_a_profile_outside_the_machinery_stays_text() -> None:
+    literal = BASE.replace("persona: You help.", "persona: Docs say {{slot:x}} here.")
+
+    assert resolve_documents([_doc(literal)], ())[0]["persona"] == "Docs say {{slot:x}} here."
+
+
 # --- nothing used: nothing changes ------------------------------------------------------------
 
 

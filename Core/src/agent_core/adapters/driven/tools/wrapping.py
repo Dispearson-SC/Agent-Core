@@ -33,7 +33,9 @@ CHAINING AND FAILURE
     override calls the earlier one's. An exception raised by wrapper code (not by the original
     tool) becomes a `ToolFailed` the model reads - the addon and the tool named, the exception's
     text kept out of it and logged instead. What the original tool raises is left alone, as it
-    is without a wrapper. Control-flow exceptions (retry, defer, approval) pass through.
+    is without a wrapper: the very exception, also when a wrapper calls the original again (a
+    retry) and lets the last failure through. Control-flow exceptions (retry, defer, approval)
+    pass through.
 """
 
 from __future__ import annotations
@@ -148,8 +150,10 @@ def _layer(
         except _PASS_THROUGH:
             raise
         except Exception as error:
-            if original_errors and error is original_errors[0]:
-                raise  # the tool's own failure, which a wrapper let through: as without it
+            if any(error is original for original in original_errors):
+                # The tool's own failure, which a wrapper let through - the first one or a later
+                # attempt of a wrapper that retries: as without it, same type and message.
+                raise
             _LOG.warning(
                 "tool_wrapper_failed: addon=%s tool=%s error=%s",
                 wrapper.addon,
@@ -170,7 +174,9 @@ def wrap_toolsets(
 ) -> list[AbstractToolset[None]]:
     """`toolsets`, with each one holding a wrapped tool put behind a `WrappedToolset`.
 
-    With no wrappers (or none for any tool here) the very same objects come back.
+    With no wrappers (or none for any tool in a function toolset) the very same objects come back.
+    A toolset of any other kind is always put behind a `WrappedToolset`, which wraps only the tools
+    it turns out to have.
     """
     if not wrappers:
         return list(toolsets)
@@ -179,10 +185,12 @@ def wrap_toolsets(
         by_tool.setdefault(wrapper.tool, []).append(wrapper)
     result: list[AbstractToolset[None]] = []
     for toolset in toolsets:
-        mine = {
-            tool: tuple(chain)
-            for tool, chain in by_tool.items()
-            if isinstance(toolset, FunctionToolset) and tool in toolset.tools
-        }
+        if isinstance(toolset, FunctionToolset):
+            mine = {tool: tuple(chain) for tool, chain in by_tool.items() if tool in toolset.tools}
+        else:
+            # Any other kind (combined, prefixed, MCP...) cannot list its tools without a run
+            # context, so every declared wrapper goes with it and `get_tools` / `call_tool` apply
+            # the ones whose tool it has (D79). Never "not a function toolset, so unwrapped".
+            mine = {tool: tuple(chain) for tool, chain in by_tool.items()}
         result.append(WrappedToolset(wrapped=toolset, wrappers=mine) if mine else toolset)
     return result

@@ -2872,3 +2872,26 @@ decision 2026-10-13) and are described by `addon.yaml`.
 - With no wrappers `wrap_toolsets` returns the toolsets it was given, so the provider is
   byte-identical to before. Sample: `addons/sample_shout` wraps `sample_echo` of `sample_base`.
 
+
+## D79 - Slice 22 advisories: the runner owns the wrapper marker, markers sit on their own line (A6b)
+
+- **`_wrapped_by` in the audit is the runner's, never the model's.** A tool that accepts extra
+  arguments let a model send `_wrapped_by: ["some_addon"]`, which reached the sink and was kept
+  (the key survives the allowlist by design). The runner now drops any `_wrapped_by` from the
+  model's arguments before building the audited ones and adds its own only for a wrapped tool.
+  Rejected: stripping in the sink (it cannot tell the runner's key from the model's).
+- **A slot marker must be alone on its line.** `{{slot:x}}` inside a sentence, beside other text or
+  twice on a line is an error naming the slot and the profile (before: a declared slot reported
+  "no marker", an undeclared one passed silently as text). A slot holds paragraphs, so there is no
+  honest mid-sentence placement. Inside the machinery only; a profile outside it keeps the literal
+  text (D77). Reversible: inline replacement could be added with an explicit rule.
+- **The original tool's error stays itself through a wrapper chain.** Any exception the original
+  raised, including the last failure of a wrapper that calls `original()` again (a retry), reaches
+  the caller as that exception; before, only the first failure was recognised and a later one was
+  reported as a wrapper failure. Only errors the wrapper code itself raises become `ToolFailed`.
+- **A wrapper reaches a tool behind any toolset kind.** `wrap_toolsets` used to wrap only
+  `FunctionToolset`s and silently left a combined, prefixed or other toolset unwrapped. Every other
+  toolset now goes behind a `WrappedToolset`, which wraps the tools it turns out to have, so a
+  declared wrapper is never silently skipped. Registration still requires the addon's own toolsets
+  to be function toolsets and refuses wrapping an unknown tool, naming the addon (D78); MCP tools
+  keep their `mcp_<server>_` names, which no manifest can name.

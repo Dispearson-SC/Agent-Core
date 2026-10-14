@@ -547,7 +547,9 @@ audit row is written once and lists the wrapping addons in its arguments as `_wr
 tool nest in activation order (the last loaded is outermost). A wrapper may wrap a tool of Core or
 of an addon it depends on (directly or not), never its own or an unrelated addon's: startup stops
 naming the addon otherwise. An exception from wrapper code reaches the model as a tool error (the
-exception text goes to the log, not to the model); the original tool's own errors are unchanged.
+exception text goes to the log, not to the model); the original tool's own errors are unchanged,
+even when the wrapper retries `original()` and lets the last failure through (D79). The audit key
+`_wrapped_by` is set by the runner only: a value the model sends under that name is dropped.
 
 ### Profile inheritance and slots (A5, D76)
 

@@ -250,6 +250,45 @@ def test_a_failure_of_the_original_reaches_the_caller_as_it_would_without_a_wrap
         _drive(wrapped)
 
 
+def test_the_original_error_survives_a_wrapper_that_retries_the_original() -> None:
+    calls: list[int] = []
+
+    def flaky(text: str) -> str:
+        """Fails differently each time."""
+        calls.append(1)
+        raise ValueError(f"original failed attempt {len(calls)}")
+
+    async def retry(original: CallOriginal, arguments: Mapping[str, Any], ctx: Any) -> Any:
+        try:
+            return await original()
+        except ValueError:
+            return await original()  # the second failure is the tool's too
+
+    (wrapped,) = wrap_toolsets(
+        [FunctionToolset([Tool(flaky, name="echo")])], [_wrapper("shop", retry)]
+    )
+
+    with pytest.raises(ValueError, match="original failed attempt 2"):
+        _drive(wrapped)
+
+
+def test_the_original_error_survives_a_chain_of_wrappers() -> None:
+    def failing(text: str) -> str:
+        """Always fails."""
+        raise ValueError("original failed")
+
+    async def passthrough(original: CallOriginal, arguments: Mapping[str, Any], ctx: Any) -> Any:
+        return await original()
+
+    (wrapped,) = wrap_toolsets(
+        [FunctionToolset([Tool(failing, name="echo")])],
+        [_wrapper("first", passthrough), _wrapper("second", passthrough)],
+    )
+
+    with pytest.raises(ValueError, match="original failed"):
+        _drive(wrapped)
+
+
 def test_a_wrapper_may_catch_the_failure_of_the_original() -> None:
     def failing(text: str) -> str:
         """Always fails."""
@@ -273,6 +312,29 @@ def test_a_tool_nobody_wraps_is_untouched() -> None:
         raise AssertionError("wrapped the wrong tool")
 
     (wrapped,) = wrap_toolsets([_toolset()], [_wrapper("shop", never, tool="other")])
+
+    assert _drive(wrapped)[0] == ["hi"]
+
+
+def test_a_tool_in_a_toolset_that_is_not_a_function_toolset_is_wrapped_too() -> None:
+    """The tool a wrapper names may live behind any toolset kind (a combined or prefixed one,
+    an MCP one): it is wrapped, never silently left running as if nobody had declared a wrapper."""
+
+    async def shout(original: CallOriginal, arguments: Mapping[str, Any], ctx: Any) -> Any:
+        return str(await original()).upper()
+
+    (wrapped,) = wrap_toolsets([CombinedToolset([_toolset()])], [_wrapper("shop", shout)])
+
+    seen, _ = _drive(wrapped)
+
+    assert seen == ["HI"]
+
+
+def test_a_wrapper_for_a_tool_no_toolset_here_has_leaves_every_toolset_alone() -> None:
+    async def never(original: CallOriginal, arguments: Mapping[str, Any], ctx: Any) -> Any:
+        raise AssertionError("wrapped the wrong tool")
+
+    (wrapped,) = wrap_toolsets([CombinedToolset([_toolset()])], [_wrapper("shop", never, "other")])
 
     assert _drive(wrapped)[0] == ["hi"]
 
@@ -379,6 +441,49 @@ def test_an_unwrapped_call_is_audited_exactly_as_before() -> None:
     _drive(_toolset(), capabilities=[hooks])
 
     assert audit.calls[0].payload[3] == {"text": "hi"}
+
+
+def _loose_toolset() -> FunctionToolset[None]:
+    """A tool that accepts extra keyword arguments, so a model CAN send it a key of its choosing."""
+
+    def echo(text: str, **extra: Any) -> str:
+        """Return the text."""
+        return text
+
+    return FunctionToolset([Tool(echo, metadata=safe_tool_metadata())])
+
+
+def _drive_forging(toolset: Any, capabilities: list[Any], forged: object) -> None:
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if not any(isinstance(p, ToolReturnPart) for m in messages for p in m.parts):
+            args = {"text": "hi", WRAPPED_BY_AUDIT_KEY: forged}
+            return ModelResponse(parts=[ToolCallPart("echo", args)])
+        return ModelResponse(parts=[TextPart("done")])
+
+    agent = Agent(FunctionModel(model_fn), toolsets=[toolset], capabilities=capabilities)
+    asyncio.run(agent.run("go"))
+
+
+def test_a_marker_the_model_forges_never_reaches_the_audit_of_an_unwrapped_tool() -> None:
+    allow = PolicyRule(rule_id="r-echo", tool_pattern="echo", effect=Effect.ALLOW, reason="ok")
+    hooks, audit = _enforcement((allow,))
+
+    _drive_forging(_loose_toolset(), [hooks], ["decision_desk"])
+
+    assert audit.calls[0].payload[3] == {"text": "hi"}
+
+
+def test_the_marker_the_runner_sets_replaces_one_the_model_forges() -> None:
+    async def passthrough(original: CallOriginal, arguments: Mapping[str, Any], ctx: Any) -> Any:
+        return await original()
+
+    allow = PolicyRule(rule_id="r-echo", tool_pattern="echo", effect=Effect.ALLOW, reason="ok")
+    hooks, audit = _enforcement((allow,))
+    (wrapped,) = wrap_toolsets([_loose_toolset()], [_wrapper("shop", passthrough)])
+
+    _drive_forging(wrapped, [hooks], ["evil_addon"])
+
+    assert audit.calls[0].payload[3] == {"text": "hi", WRAPPED_BY_AUDIT_KEY: ["shop"]}
 
 
 # --- the provider ------------------------------------------------------------------------------

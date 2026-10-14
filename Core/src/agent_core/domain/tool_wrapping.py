@@ -5,7 +5,9 @@ changes is a fact about it - which addons wrap it - and that fact travels in two
 
   * `ToolDefinition.metadata[WRAPPED_BY_METADATA_KEY]`: the addon names, innermost first. The
     wrapping toolset sets it; the runner reads it.
-  * the audit row's arguments under `WRAPPED_BY_AUDIT_KEY`, which the sink keeps whatever the
+  * the audit row's arguments under `WRAPPED_BY_AUDIT_KEY`, which the RUNNER sets and is the only
+    one allowed to: it drops whatever the model sent under that key before writing its own (D79).
+    The sink keeps it whatever the
     tool's allowlist says. It is safe to keep because `wrapped_by` returns ONLY names shaped like
     addon names (lower case words joined by single underscores): no value from the model, no free
     text, nothing a caller can use to smuggle a payload into the trail.

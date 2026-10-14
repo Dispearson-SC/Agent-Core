@@ -46,6 +46,9 @@ NAMED SLOTS  (`slots:` and `{{slot:name}}`)
     content (defaults or inserts): dropping one is an error naming the slot and who put content in
     it, never a silent loss (D77). An inherited slot nothing was put into may be left out.
     An empty slot removes its own marker line and one adjoining blank line, nothing else.
+    A marker must be ALONE on its line (blanks around it allowed): one inside a sentence, beside
+    other text or twice on a line is an error naming the slot, because a slot's content is whole
+    paragraphs and there is no honest place to put them mid-sentence (A6b, D79).
     The machinery applies only to a profile that inherits, declares slots or is the target of an
     insert; in any other a literal `{{slot:x}}` line is plain text, whatever the other profiles do.
 
@@ -92,6 +95,8 @@ _NOT_INHERITED_TOP: Final = ("id", "public_alias")
 _NEVER_REPLACED: Final = ("id", "approval_rules")
 _SLOT_NAME: Final = re.compile(r"[a-z][a-z0-9_]*")
 _MARKER: Final = re.compile(r"^[ \t]*\{\{slot:([^}\s]*)\}\}[ \t]*$", re.MULTILINE)
+# A marker anywhere in the text; the ones `_MARKER` does not also match are inline (A6b, D79).
+_ANY_MARKER: Final = re.compile(r"\{\{slot:([^}\s]*)\}\}")
 
 
 class ProfileInheritanceError(ProfileValidationError):
@@ -324,6 +329,13 @@ def _apply(layer: _Layer, parent: _Resolved | None) -> _Resolved:
 def _filled(layer: _Layer, resolved: _Resolved) -> dict[str, Any]:
     fields = dict(resolved.fields)
     persona = fields.get("persona")
+    inline = _first_inline_marker(persona) if isinstance(persona, str) else None
+    if inline is not None:
+        raise _fail(
+            layer,
+            f"the marker {{{{slot:{inline}}}}} must be alone on its own line of the persona: "
+            "a slot holds paragraphs of text, so it cannot sit inside a sentence",
+        )
     if not isinstance(persona, str) or (not resolved.slots and not _MARKER.search(persona)):
         return fields
     names = [match.group(1) for match in _MARKER.finditer(persona)]
@@ -351,6 +363,15 @@ def _filled(layer: _Layer, resolved: _Resolved) -> dict[str, Any]:
         del slots[name]  # inherited, empty and not marked here: nothing to place, nothing lost
     fields["persona"] = _place(persona, slots)
     return fields
+
+
+def _first_inline_marker(persona: str) -> str | None:
+    """The name in the first `{{slot:x}}` that shares its line with anything else, if any."""
+    for line in persona.split("\n"):
+        found = _ANY_MARKER.findall(line)
+        if found and _MARKER.fullmatch(line) is None:
+            return str(found[0])
+    return None
 
 
 def _place(persona: str, slots: Mapping[str, list[str]]) -> str:
