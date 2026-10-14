@@ -1,5 +1,6 @@
 # The glazed copilot's System One routes (Phase 5 P2), for addons/system_one_router.
-# Ten layer-B intents (a fixed tool plan; executors are P3) and the seven specialists (layer A).
+# Ten layer-B intents (a fixed tool plan: routing/intent_plans.yaml) and the seven specialists
+# (layer A).
 # Anything else is the escape option `none_of_these`: the orchestrator reasons about it.
 #
 # NOT ENABLED by default. To turn it on (docs/ADDONS.md, "The System One router"):
@@ -8,7 +9,9 @@
 #   AGENT_CORE_ADDON__SYSTEM_ONE_ROUTER__API_KEY_ENV=JEV_API_KEY
 #   AGENT_CORE_TURN_ROUTING=true
 # and give glazed_orchestrator `routing: {router: system_one, targets: [the seven specialists]}`.
-# An intent answer runs the orchestrator (reason intent_not_supported) until P3 lands.
+# Add `intents: true` to that block to answer the ten intents with their plans
+# (routing/intent_plans.yaml, D97); without it an intent answer runs the orchestrator
+# (reason intent_not_supported).
 #
 # BENCHMARK (2026-10-14, evals/routing_questions.yaml, 78 SYNTHETIC questions, jev-1.13.0,
 # threshold 0.5, router timeout 800 ms): English descriptions 96% accuracy (15% with routing off),

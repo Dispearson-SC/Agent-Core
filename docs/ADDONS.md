@@ -571,6 +571,11 @@ AGENT_CORE_ADDONS_CONFIG=<addons dir>/glazed_vertical/addons_config.yaml
 `routing/system_one_routes.yaml` is the vertical's routes file for `system_one_router` (ten
 layer-B intents, the seven specialists). It is not enabled by default; the file's header says how to
 turn it on and holds its benchmark (96% on the synthetic routing set at threshold 0.5).
+`routing/intent_plans.yaml` (`provides.intents`, D97) answers those ten intents with one read of
+the specialist that owns the data (present: `day_summary` via `get_snapshot`, `active_issues`,
+`expiring_items`; supply: `order_plan`, `stockout_risk`, `upcoming_deliveries`; strategist:
+`staffing`, `promo_list`; auditor: `data_integrity`; liaison: `transfer_options`) and a compose
+call of that specialist. Inert until the orchestrator's `routing` block says `intents: true`.
 
 ### Migrating from `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*` (D86)
 

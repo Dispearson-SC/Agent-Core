@@ -1,0 +1,60 @@
+# The glazed copilot's layer-B intent plans (Phase 5 P3, D97): the ten frequent read-only intents of
+# routing/system_one_routes.yaml, each answered by one read of the specialist that owns that data and
+# one compose call of that specialist (no tools, only these results). Anything that fails falls back
+# to the specialist's normal turn, which reasons with its full toolset.
+#
+# NOT ENABLED by default: plans are inert until AGENT_CORE_TURN_ROUTING=true, the system_one_router
+# addon is enabled and glazed_orchestrator opts in with
+#   routing: {router: system_one, targets: [the seven specialists], intents: true}
+#
+# Every tool is a GET of the backend's /internal/v1 contract (replay-safe, registration checks it)
+# and is in its owner's toolset (startup checks it). The store, the case and the as_of date are
+# bound by the turn's headers, never by an argument; the constants stay inside the overlay's bounds.
+intents:
+  day_summary:
+    profile: glazed_present
+    steps:
+      - tool: get_snapshot              # as_of, the day's kpis, top issues: no date argument needed
+  active_issues:
+    profile: glazed_present
+    steps:
+      - tool: get_issues
+        arguments: {category: all, limit: 10}
+  order_plan:
+    profile: glazed_supply
+    steps:
+      - tool: get_order_plan
+  stockout_risk:
+    profile: glazed_supply
+    steps:
+      - tool: get_inventory_status
+        arguments: {sort: days_of_cover, limit: 15}
+  expiring_items:
+    profile: glazed_present
+    steps:
+      - tool: get_expiring
+        arguments: {days: 7}
+  upcoming_deliveries:
+    profile: glazed_supply
+    steps:
+      - tool: get_deliveries
+        arguments: {days: 7}
+  staffing:
+    profile: glazed_strategist
+    steps:
+      - tool: get_staffing
+        arguments: {days: 7}
+  promo_list:
+    profile: glazed_strategist
+    steps:
+      - tool: get_promos
+        arguments: {days: 14}
+  data_integrity:
+    profile: glazed_auditor
+    steps:
+      - tool: get_integrity_issues
+  transfer_options:
+    profile: glazed_liaison
+    steps:
+      - tool: get_transfer_options
+        arguments: {limit: 5}
