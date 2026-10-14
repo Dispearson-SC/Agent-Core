@@ -4,3 +4,9 @@ version: 1.0.0
 core: ">=0.0,<1"
 depends: [sample_base, sample_extra]
 auto_install: true
+provides:
+  fragments: fragments/
+  # Insertion at a named slot of another addon's profile (A5): the bridge exists only when both
+  # dependencies do, so it is the natural place for text that joins them.
+  inserts:
+    - {profile: sample_assistant, slot: before_tools, fragment: sample_bridge_note}

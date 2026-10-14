@@ -1,0 +1,6 @@
+# Inheritance (A5): everything of sample_assistant except what is patched here. Scalars replace,
+# lists append, mappings merge; `replace: [field]` would swap a field wholesale.
+id: sample_specialist
+inherit: sample_assistant
+description: "Sample specialist: the sample assistant with a tighter budget."
+max_iterations: 3

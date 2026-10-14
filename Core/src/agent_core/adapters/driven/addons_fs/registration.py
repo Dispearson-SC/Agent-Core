@@ -77,6 +77,8 @@ class AddonContributions:
     # (addon, profile file), in activation order then file name.
     profile_files: tuple[tuple[str, Path], ...] = ()
     pull_channels: tuple[str, ...] = ()
+    # (addon, profile id, slot, fragment path), in activation order: where the addons insert.
+    inserts: tuple[tuple[str, str, str, Path], ...] = ()
     # addon -> names of the tools its toolsets export (what `audit` and `policy` are checked on).
     tools: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
@@ -328,6 +330,7 @@ def register_addons(
     fragments: dict[str, Path] = {}
     profile_files: list[tuple[str, Path]] = []
     channels: list[str] = []
+    inserts: list[tuple[str, str, str, Path]] = []
     for addon in addons:
         owner = addon.manifest.name
         contribution = _audit_of(addon, own[owner])
@@ -344,7 +347,19 @@ def register_addons(
                 "the database; create the policy directory or remove the addon's policy",
             )
         rules.extend(declared)
-        fragments.update(_fragments_of(addon, builtin_fragments_dir, fragment_owner))
+        own_fragments = _fragments_of(addon, builtin_fragments_dir, fragment_owner)
+        fragments.update(own_fragments)
+        for insertion in addon.manifest.provides.inserts:
+            if insertion.fragment not in own_fragments:
+                raise _refuse(
+                    owner,
+                    "provides.inserts",
+                    f"fragment {insertion.fragment!r} is not one of the addon's own "
+                    "(provides.fragments); an addon inserts only its own text",
+                )
+            inserts.append(
+                (owner, insertion.profile, insertion.slot, own_fragments[insertion.fragment])
+            )
         channels.extend(_channels_of(addon, reserved_channels, channel_owner))
         relative = addon.manifest.provides.profiles
         if relative is not None:
@@ -358,6 +373,7 @@ def register_addons(
         fragments=fragments,
         profile_files=tuple(profile_files),
         pull_channels=tuple(channels),
+        inserts=tuple(inserts),
         tools=own,
     )
 

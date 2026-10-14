@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +47,15 @@ import yaml  # type: ignore[import-untyped]  # no stub package installed; see py
 
 from agent_core.domain.profile import AgentProfile, ProfileValidationError
 
-__all__ = ["PROFILE_FILE_ERRORS", "load_profile", "load_profile_sync", "parse_profile"]
+__all__ = [
+    "PROFILE_FILE_ERRORS",
+    "FragmentReader",
+    "fragment_reader",
+    "load_profile",
+    "load_profile_sync",
+    "parse_profile",
+    "resolve_includes",
+]
 
 # What reading one profile file can raise: a rule broken (`ProfileValidationError` is a
 # `ValueError`) or a document that is not YAML at all. The composition root catches this pair for
@@ -79,32 +87,28 @@ def parse_profile(
     name both provide, so the order never decides anything.
     """
     data: Any = yaml.safe_load(text)
-    if isinstance(data, dict) and "include" in data:
-        data = {**data}
-        names = data.pop("include")
-        data["persona"] = _with_fragments(
-            data.get("persona"), names, fragments_dir, addon_fragments
-        )
-    return AgentProfile.from_mapping(data)
+    return AgentProfile.from_mapping(
+        resolve_includes(data, fragment_reader(fragments_dir, addon_fragments))
+    )
 
 
 # A fragment name is a bare file stem. The pattern is what keeps `include: ["../x"]` from
 # reading outside the fragments directory.
 _FRAGMENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
+FragmentReader = Callable[[str], str]
 
-def _with_fragments(
-    persona: object,
-    names: object,
-    fragments_dir: Path | None,
-    addon_fragments: Mapping[str, Path] | None = None,
-) -> object:
-    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
-        raise ProfileValidationError("include must be a list of fragment names")
-    if not isinstance(persona, str):
-        return persona  # from_mapping reports the missing/invalid persona itself
-    parts = [persona]
-    for name in names:
+
+def fragment_reader(
+    fragments_dir: Path | None, addon_fragments: Mapping[str, Path] | None = None
+) -> FragmentReader:
+    """`name -> the fragment's text`, looked up in `fragments_dir` first, then in the addons'.
+
+    Raises `ProfileValidationError` for a name that is not a bare stem and for a fragment that
+    does not exist - never a silently shorter persona.
+    """
+
+    def read(name: str) -> str:
         if not _FRAGMENT_NAME.fullmatch(name) or ".." in name:
             raise ProfileValidationError(f"invalid fragment name {name!r}")
         path = None if fragments_dir is None else fragments_dir / f"{name}.md"
@@ -115,8 +119,26 @@ def _with_fragments(
                 f"include: fragment {name!r} not found"
                 + ("" if fragments_dir is None else f" in {fragments_dir}")
             )
-        parts.append(path.read_text(encoding="utf-8").strip())
-    return "\n\n".join(parts)
+        return path.read_text(encoding="utf-8").strip()
+
+    return read
+
+
+def resolve_includes(data: Any, read: FragmentReader) -> Any:
+    """`data` with `include:` resolved into `persona` (the document unchanged when it has none)."""
+    if isinstance(data, dict) and "include" in data:
+        data = {**data}
+        names = data.pop("include")
+        data["persona"] = _with_fragments(data.get("persona"), names, read)
+    return data
+
+
+def _with_fragments(persona: object, names: object, read: FragmentReader) -> object:
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        raise ProfileValidationError("include must be a list of fragment names")
+    if not isinstance(persona, str):
+        return persona  # from_mapping reports the missing/invalid persona itself
+    return "\n\n".join([persona, *(read(name) for name in names)])
 
 
 def load_profile_sync(

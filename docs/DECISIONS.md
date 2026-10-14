@@ -2772,3 +2772,41 @@ decision 2026-10-13) and are described by `addon.yaml`.
   manifest is read; registration re-checks (it must not trust that it still holds) and refuses a
   `fragments:`/`profiles:` directory with no `*.md`/`*.yaml`, instead of registering an empty
   contribution. Rejected: warn-only (a declaration that yields nothing is a mistake to name).
+
+## D76 - Profile inheritance and named slots resolve on mappings, before the domain (A5)
+
+- **Choice: `adapters/driven/profiles_fs/inheritance.py` merges profile documents as mappings and
+  `AgentProfile.from_mapping` validates the result.** The domain learns nothing new: a resolved
+  profile is validated exactly like a hand-written one, versions and hashes are assigned from the
+  RESOLVED content (editing a parent moves the child's version), and `AgentProfile` still has no
+  `extra` escape. `load_profiles` reads every document first (Core's files, then the addons'), so a
+  profile may inherit one that loads after it, and a Core profile may inherit an addon template.
+- **Merge rules (`inherit: <id>` plus a patch).** Scalar: the child's replaces. List: parent's
+  items then the child's not already present (so a child can add a toolset, never silently drop
+  one). Mapping: merged key by key, recursively (`peers: {max_hops: 3}` keeps the parent's
+  allowlist). `replace: [field]` swaps named top-level fields wholesale; it may name only a field
+  the patch carries and never `id` or `approval_rules` (a child may add approval requirements, it
+  may not drop its parent's). `persona` is a scalar: replacing it drops the parent's `include:`
+  text; the child's own `include:` is appended to whichever persona results. Not inherited: `id`,
+  `public_alias` (names one profile) and `peers.topology` (declared once on the hub, C17; copying it
+  would be a topology drift). Rejected: a free-form patch language (JSON-patch/jq) - the four rules
+  are what reviewers can hold in their heads - and positional list edits.
+- **Bounds.** At most `MAX_INHERIT_DEPTH` (4) parents; a cycle, an unknown parent, an `inherit`
+  that is not a string and a `replace` without `inherit` fail at load naming the profile (and the
+  addon, wrapped as `AddonRegistrationError`, when an addon's file caused it).
+- **Named slots (the xpath analogue).** A profile declares `slots: {name: [fragment, ...]}` and puts
+  a line `{{slot:name}}` where the slot goes in its persona. An addon declares
+  `provides.inserts: [{profile, slot, fragment}]`; the fragment must be one of the addon's OWN
+  (`provides.fragments`), so an insert adds the addon's text, never another's. Inserts append
+  after the slot's default fragments in ACTIVATION order (dependency order, then the list), which
+  makes the result deterministic. A child inherits the parent's slots including what was inserted,
+  and may add fragments. Unknown profile, unknown slot, a declared slot with no marker, a marker
+  with no slot, and a slot marked twice are errors. An empty slot leaves no blank hole.
+- **No new authority.** Inheriting and inserting change persona text and the profile's own fields,
+  nothing policy reads: tools still need a policy `allow`, `deny` still wins, and the topology and
+  answer-schema checks run on the resolved profiles. With no `inherit`, `slots` or `insert` the
+  documents go through the same `resolve_includes` `parse_profile` uses, so the result is the one
+  it always was (a literal `{{slot:x}}` in a profile that uses none of this is left alone).
+- Console `:reload` and `preflight` call `load_profiles`, so they resolve inheritance and slots too.
+  Open, reversible: inserts may only name the addon's own fragments; lifting that would let a
+  bridge insert a dependency's text.

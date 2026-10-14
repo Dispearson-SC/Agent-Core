@@ -510,6 +510,7 @@ list above is the only switch, and everything below happens at startup (build an
 | `policy: path` | one rules file, same format as `Core/policy/*.yaml` | rules reconciled with Core's; `allow` rules may name only the addon's own tools |
 | `fragments: dir/` | `<name>.md` files | names a profile can put in `include:` |
 | `profiles: dir/` | `*.yaml` profile files | profiles served next to Core's |
+| `inserts: [{profile, slot, fragment}]` | nothing (uses one of the addon's own `fragments`) | that fragment's text at the profile's `{{slot:name}}`, after the slot's defaults, in activation order |
 | `channels: [id]` | nothing (no code) | pull-mode channel ids, like `AGENT_CORE_PULL_CHANNELS` |
 
 - Startup stops, naming the addon and the `provides.*` key, when: a declared file or directory is missing
@@ -521,4 +522,24 @@ list above is the only switch, and everything below happens at startup (build an
 - An addon's rules are part of the reviewed set: removing the addon from `AGENT_CORE_ADDONS` and
   restarting revokes them, exactly like deleting a rule from `Core/policy/`.
 - `:reload` in the console and `preflight` see the addons' profiles and toolsets too.
+
+### Profile inheritance and slots (A5, D76)
+
+Any profile file (Core's or an addon's) may build on another:
+
+```yaml
+id: shop_specialist
+inherit: shop_assistant      # a Core profile or an addon template; at most 4 levels
+max_iterations: 3            # scalars replace
+toolsets: [refunds]          # lists append (parent first, no repeats); mappings merge
+replace: [skill_namespaces]  # swap these top-level fields wholesale (never id, approval_rules)
+slots: {before_tools: [house_style]}   # add default fragments to an inherited slot
+```
+
+`id`, `public_alias` and `peers.topology` are never inherited. A profile that wants addons to extend
+it declares `slots: {before_tools: []}` and puts a line `{{slot:before_tools}}` in its persona.
+Startup stops, naming the profile (and the addon), on: an unknown parent, a cycle, more than 4
+parents, an unknown slot or profile in an insert, a slot with no marker (or a marker with no slot),
+`replace` of a field the patch does not carry. With none of this used nothing changes. Editing a
+parent gives every child a new profile version.
 

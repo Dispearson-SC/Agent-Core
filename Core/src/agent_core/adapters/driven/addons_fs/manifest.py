@@ -78,6 +78,9 @@ def _relative(value: str) -> str:
 Name = Annotated[str, _matches(_NAME, "lower case words joined by single underscores")]
 Slug = Annotated[str, _matches(_SLUG, "lower case letters, digits, '_' or '-', from a letter")]
 Ident = Annotated[str, _matches(_IDENT, "a plain identifier")]
+FragmentName = Annotated[
+    str, _matches(re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"), "a fragment file stem")
+]
 HookRef = Annotated[str, _matches(_HOOK, "'module.path:function'")]
 RelPath = Annotated[str, AfterValidator(_relative)]
 
@@ -95,6 +98,14 @@ class AuditProvides(_Strict):
     presence_only: dict[Ident, tuple[Ident, ...]] = Field(default_factory=dict)
 
 
+class ProfileInsertion(_Strict):
+    """`provides.inserts` entry: put one of the addon's fragments at a named slot of a profile."""
+
+    profile: Ident
+    slot: Ident
+    fragment: FragmentName
+
+
 class Provides(_Strict):
     toolsets: tuple[Slug, ...] = ()
     profiles: RelPath | None = None
@@ -102,6 +113,7 @@ class Provides(_Strict):
     policy: RelPath | None = None
     audit: AuditProvides = Field(default_factory=AuditProvides)
     channels: tuple[Slug, ...] = ()
+    inserts: tuple[ProfileInsertion, ...] = ()
 
 
 class Hooks(_Strict):

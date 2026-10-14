@@ -216,7 +216,13 @@ from agent_core.adapters.driven.persistence_pg.transcript_repository import (
     PgTranscriptReader,
 )
 from agent_core.adapters.driven.policy_fs.loader import apply_policy_rules, load_policy_rules
-from agent_core.adapters.driven.profiles_fs.loader import PROFILE_FILE_ERRORS, load_profile_sync
+from agent_core.adapters.driven.profiles_fs.inheritance import (
+    ProfileInheritanceError,
+    SlotInsert,
+    read_profile_document,
+    resolve_documents,
+)
+from agent_core.adapters.driven.profiles_fs.loader import PROFILE_FILE_ERRORS
 from agent_core.adapters.driven.skills_fs.registry import FilesystemSkillRegistry
 from agent_core.adapters.driven.tools import peer_background as peer_background_tools
 from agent_core.adapters.driven.tools import peers as peer_tools
@@ -1037,43 +1043,71 @@ def load_profiles(
     winner would depend on file names, and it decides what an agent is permitted to do.
 
     The reading and the YAML parsing belong to `adapters/driven/profiles_fs/`, never to
-    `AgentProfile` - see that module's docstring. `load_profile_sync` rather than the async
-    `load_profile` because this runs at startup, before there is an event loop to protect.
+    `AgentProfile` - see that module's docstring. `read_profile_document` (sync) rather than
+    the async `load_profile` because this runs at startup, before there is an event loop to protect.
     """
     assign = ProfileVersionRegistry() if registry is None else registry
     profiles: dict[str, AgentProfile] = {}
 
-    for path in sorted(profiles_dir.glob("*.yaml")):
-        profile = assign.assign(
-            _grant_peer_mechanism(load_profile_sync(path, addon_fragments=contributions.fragments))
-        )
-        if profile.id in profiles:
-            raise ValueError(
-                f"Two profile files declare id {profile.id!r}; {path.name} is the second. "
-                "Refusing to pick one: the loser's permissions would vanish silently."
-            )
-        profiles[profile.id] = profile
-
+    # Every document is read first, so a profile may inherit one that loads after it (A5, D76).
+    documents = [
+        read_profile_document(path, addon_fragments=contributions.fragments)
+        for path in sorted(profiles_dir.glob("*.yaml"))
+    ]
+    core_count = len(documents)
     # Phase 2 (A4). The profile templates enabled addons provide, after Core's own: an id that is
     # taken (by Core or by an earlier addon) stops startup naming the addon.
     for addon, path in contributions.profile_files:
         try:
-            template = load_profile_sync(path, addon_fragments=contributions.fragments)
+            documents.append(
+                read_profile_document(path, owner=addon, addon_fragments=contributions.fragments)
+            )
         except PROFILE_FILE_ERRORS as error:  # a broken rule or a document that is not YAML
             raise AddonRegistrationError(
                 addon, "provides.profiles", f"{path.name}: {error}"
             ) from error
+
+    try:
+        resolved = resolve_documents(
+            documents,
+            tuple(
+                SlotInsert(addon, profile, slot, fragment.read_text(encoding="utf-8").strip())
+                for addon, profile, slot, fragment in contributions.inserts
+            ),
+        )
+    except ProfileInheritanceError as error:
+        if error.addon is None:
+            raise
+        raise AddonRegistrationError(
+            error.addon, error.field or "provides.profiles", error.reason
+        ) from error
+
+    for index, (document, mapping) in enumerate(zip(documents, resolved, strict=True)):
+        if index < core_count:
+            profile = assign.assign(_grant_peer_mechanism(AgentProfile.from_mapping(mapping)))
+            if profile.id in profiles:
+                raise ValueError(
+                    f"Two profile files declare id {profile.id!r}; {document.name} is the "
+                    "second. Refusing to pick one: the loser's permissions would vanish silently."
+                )
+            profiles[profile.id] = profile
+            continue
+        try:
+            template = AgentProfile.from_mapping(mapping)
+        except ValueError as error:  # ProfileValidationError
+            raise AddonRegistrationError(
+                document.owner or "", "provides.profiles", f"{document.name}: {error}"
+            ) from error
         profile = assign.assign(_grant_peer_mechanism(template))
         if profile.id in profiles:
             raise AddonRegistrationError(
-                addon,
+                document.owner or "",
                 "provides.profiles",
-                f"{path.name} declares profile id {profile.id!r}, which already exists",
+                f"{document.name} declares profile id {profile.id!r}, which already exists",
             )
         profiles[profile.id] = profile
 
     return profiles
-
 
 
 def _grant_peer_mechanism(profile: AgentProfile) -> AgentProfile:

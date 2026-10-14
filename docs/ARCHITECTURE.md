@@ -142,6 +142,12 @@ undeclared contribution, or a rule or audit entry about a tool the addon does no
 with an error naming the addon. With no addon enabled each seam receives the value it always had.
 Authoring: see `docs/OPERATIONS.md`, "Addons", and the samples in `addons/sample_*`.
 
+Profile inheritance and named slots (A5, D76) are resolved by `load_profiles` before a profile
+reaches the domain: `inherit: <id>` plus a patch (scalars replace, lists append, mappings merge,
+`replace:` swaps a field), and `provides.inserts` puts an addon's own fragment at a `{{slot:name}}`
+of another profile, in activation order. The merged mapping is validated as any profile is, so
+inheritance adds no authority; cycles, unknown parents, depth past 4 and unknown slots stop startup.
+
 ---
 
 ## 3. The ports — the contract

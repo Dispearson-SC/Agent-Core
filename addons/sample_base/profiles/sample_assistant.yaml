@@ -2,7 +2,12 @@ id: sample_assistant
 description: "Sample assistant contributed by the sample_base addon."
 persona: |
   You echo what you are given, using the sample_echo tool.
+
+  {{slot:before_tools}}
 include: [sample_note]
+# A named slot (A5): the persona marks where it goes, other addons insert there (`provides.inserts`).
+slots:
+  before_tools: []
 model: minimax/MiniMax-M3
 toolsets:
   - sample_echo

@@ -146,9 +146,14 @@ def test_the_sample_addons_register_one_of_each_extension_point() -> None:
     assert [(r.rule_id, r.effect) for r in contributions.policy_rules] == [
         ("sample-base-allow-echo", Effect.ALLOW)
     ]
-    assert set(contributions.fragments) == {"sample_note"}
+    # The bridge (sample_bridge) activates with both dependencies and brings a fragment + an insert.
+    assert set(contributions.fragments) == {"sample_note", "sample_bridge_note"}
     assert [(a, p.name) for a, p in contributions.profile_files] == [
-        ("sample_base", "sample_assistant.yaml")
+        ("sample_base", "sample_assistant.yaml"),
+        ("sample_base", "sample_specialist.yaml"),
+    ]
+    assert [(a, p, s) for a, p, s, _ in contributions.inserts] == [
+        ("sample_bridge", "sample_assistant", "before_tools")
     ]
     assert contributions.pull_channels == ("sample_channel",)
     assert set(contributions.toolsets["sample_echo"]().tools) == {"sample_echo"}
@@ -171,6 +176,11 @@ def test_the_sample_addons_reach_every_seat_of_the_composition_root() -> None:
     assert "sample_echo" in packages and set(TOOL_PACKAGES) < set(packages)
     assert "sample_assistant" in profiles and profiles["sample_assistant"].version >= 1
     assert "A sample prompt fragment" in profiles["sample_assistant"].persona
+    # A5: the bridge's insert reaches the slot, and the specialist inherits the filled persona.
+    assert "Inserted by the sample_bridge addon" in profiles["sample_assistant"].persona
+    specialist = profiles["sample_specialist"]
+    assert specialist.persona == profiles["sample_assistant"].persona
+    assert specialist.max_iterations == 3 and specialist.toolsets == ("sample_echo",)
     assert (
         "sample_channel" in build_channel_registry(real, contributions.pull_channels).channel_ids()
     )
@@ -184,7 +194,7 @@ def test_a_container_builds_with_the_sample_addons_enabled() -> None:
     container = build_container(Settings(addons=_samples()))
 
     try:
-        assert "sample_assistant" in container.profiles
+        assert {"sample_assistant", "sample_specialist"} <= set(container.profiles)
     finally:
         container.domain_pool.close()
         container.audit_pool.close()
