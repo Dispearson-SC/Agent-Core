@@ -1,0 +1,159 @@
+# What the backend's OpenAPI document cannot say about the glazed tools (docs/ADDONS.md, "The overlay").
+#
+# Every entry pins the operation behind the tool (`operation:`), so a backend that moves or drops one
+# stops the startup instead of one conversation. The rest of an entry patches the generated tool:
+#   bounds / defaults / enums   what the model may send (the backend accepts more than the tool offers)
+#   `name: null`                an argument the backend has and the model must NOT see or send (a store,
+#                               an as_of date, a page the tool fixes): the case in the headers decides
+#   `fixed: v`                  a constant the tool always sends
+#   `required: true`            the backend defaults it, the tool insists
+# The model-facing descriptions live in the backend (`x-agent-description`), not here, except for the
+# second tool over /issues, which has no operation of its own.
+api_prefix: /internal/v1
+tools:
+  - name: get_kpis
+    operation: "GET /internal/v1/kpis"
+    arguments:
+      date_from: {required: true}
+      date_to: {required: true}
+  - name: get_snapshot
+    operation: "GET /internal/v1/snapshot"
+  - name: get_briefing
+    operation: "GET /internal/v1/briefing"
+  - name: get_day_summary
+    operation: "GET /internal/v1/day-summary"
+    arguments:
+      date: {required: true}
+  - name: get_issues
+    operation: "GET /internal/v1/issues"
+    arguments:
+      limit: {default: 10, minimum: 1, maximum: 20}
+      category: {enum: [operational, integrity, all]}
+  - name: explain_metric
+    operation: "GET /internal/v1/metrics/explain"
+  - name: get_order_plan
+    operation: "GET /internal/v1/order-plan"
+  - name: project_inventory
+    operation: "GET /internal/v1/inventory/projection"
+    arguments:
+      horizon: {default: 7, minimum: 1, maximum: 30}
+  - name: forecast_demand
+    operation: "GET /internal/v1/forecast/demand"
+    arguments:
+      store_id: null
+      as_of: null
+  - name: forecast_daily_flow
+    operation: "GET /internal/v1/forecast/flow"
+    arguments:
+      store_id: null
+      as_of: null
+  - name: get_supplier_performance
+    operation: "GET /internal/v1/suppliers/performance"
+  - name: get_history
+    operation: "GET /internal/v1/history"
+    arguments:
+      weeks: null
+  - name: evaluate_promo
+    operation: "GET /internal/v1/promos/{promo_id}/evaluation"
+  - name: recall_experiences
+    operation: "GET /internal/v1/experiences"
+    arguments:
+      query: {required: true, default: null}
+      limit: {default: 5, minimum: 1, maximum: 20}
+    response: {wrap_as: experiences}
+  - name: check_compliance
+    operation: "GET /internal/v1/compliance"
+  - name: get_transfer_options
+    operation: "GET /internal/v1/transfers/options"
+    arguments:
+      limit: {default: 5, minimum: 1, maximum: 20}
+  - name: get_inventory_status
+    operation: "GET /internal/v1/inventory"
+    arguments:
+      sort: {enum: [days_of_cover, turnover, slow]}
+      limit: {default: 15, minimum: 1, maximum: 50}
+      days: null
+      store_id: null
+      as_of: null
+  - name: get_expiring
+    operation: "GET /internal/v1/expiring"
+    arguments:
+      days: {default: 7, minimum: 1, maximum: 30}
+      limit: {fixed: 10}
+      store_id: null
+      as_of: null
+  - name: get_deliveries
+    operation: "GET /internal/v1/deliveries"
+    arguments:
+      days: {default: 7, minimum: 1, maximum: 14}
+      store_id: null
+      as_of: null
+  - name: get_staffing
+    operation: "GET /internal/v1/staffing"
+    arguments:
+      days: {default: 7, minimum: 1, maximum: 14}
+      store_id: null
+      as_of: null
+  - name: get_promos
+    operation: "GET /internal/v1/promos"
+    arguments:
+      status: {enum: [active, upcoming, past]}
+      days: {default: 14, minimum: 1, maximum: 365}
+      limit: {fixed: 10}
+      store_id: null
+      as_of: null
+  - name: get_outlook
+    operation: "GET /internal/v1/outlook"
+    arguments:
+      days: {default: 2, minimum: 1, maximum: 7}
+      past_days: null
+      store_id: null
+      as_of: null
+  - name: get_issue_analysis
+    operation: "GET /internal/v1/issues/{issue_id}/analysis"
+  - name: audit_promo
+    operation: "POST /internal/v1/promos/audit"
+  - name: classify_text
+    operation: "POST /internal/v1/classify"
+    arguments:
+      kind: {enum: [rejection_reason, deviation_cause]}
+  - name: record_event
+    operation: "POST /internal/v1/events"
+    arguments:
+      from_agent: null
+      to_agent: null
+      kind: null
+      payload: null
+      type: {required: true}
+      date_from: {required: true}
+      date_to: {required: true}
+  - name: propose_action
+    operation: "POST /internal/v1/proposals"
+    arguments:
+      action_type: null
+      params: null
+      tier: null
+      option_id: {required: true}
+      rationale: {required: true, default: null}
+  - name: save_manager_note
+    operation: "POST /internal/v1/notes"
+  - name: propose_transfer
+    operation: "POST /internal/v1/transfers/proposals"
+    arguments:
+      rationale: {required: true, default: null}
+  # No operation of its own: the same /issues route with the integrity category fixed.
+  - name: get_integrity_issues
+    operation: "GET /internal/v1/issues"
+    description: |-
+      Data-integrity issues of the store (SKU key mismatches, orphan SKUs...).
+
+      Same Issue shape as get_issues (issue_id, kind, evidence, data_caveats, options)
+      marked `category` integrity, `integrity` true, with `exposure_usd`: the sales amount
+      at stake (their `severity_usd` is 0 on purpose). Options are a `data_fix_task`
+      (never automatic) and `do_nothing`. A field may be absent; never estimate it
+      yourself. An empty list means no integrity issue was found.
+    method: GET
+    route: /issues
+    kind: read
+    arguments:
+      category: {type: string, in: query, fixed: integrity}

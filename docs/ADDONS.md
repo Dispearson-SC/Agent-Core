@@ -322,6 +322,10 @@ flag for that argument. A complete manual tool may carry `operation: "GET /inter
 document must declare that operation and it must be the tool's own method and route, so a second tool
 over one operation (another name, a fixed filter) still stops the startup when the backend moves it.
 
+A large consumer worked end to end is `addons/glazed_tools` (D87): thirty tools from one backend's
+OpenAPI document, an overlay of bounds, hidden arguments and pins, eight per-role toolsets sharing one
+helper module, and a few tools whose answer is shaped in code (forecasts, manager views).
+
 ### Migrating from `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*` (D86)
 
 Before D84 the bridge keys were set on the bridge itself. They now belong to the consumer addon that

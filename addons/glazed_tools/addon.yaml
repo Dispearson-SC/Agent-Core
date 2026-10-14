@@ -1,0 +1,53 @@
+# The glazed retail vertical's tools, generated from its backend's own OpenAPI document (Phase 3, G2).
+# A consumer of the HTTP tool bridge (docs/ADDONS.md "The HTTP tool bridge"): the tools are the
+# /internal/v1 operations the backend marks `x-agent-tool`, patched by overlay.yaml (what OpenAPI cannot
+# say: bounds the model gets, arguments it must not see, one operation behind two tools). Eight
+# toolsets, one per agent role, each offering exactly the tools that role had before the tools were
+# generated. Audit, policy, profiles and the channel are other addons/tasks (G3-G5).
+name: glazed_tools
+version: 1.0.0
+core: ">=0.0,<1"
+depends: [http_tool_bridge]
+provides:
+  toolsets:
+    - glazed_orchestrator
+    - glazed_present
+    - glazed_past
+    - glazed_supply
+    - glazed_strategist
+    - glazed_sentinel
+    - glazed_auditor
+    - glazed_liaison
+settings:
+  base_url:
+    type: str
+    default: "http://backend:8080"
+    description: The glazed backend (was GLAZED_BACKEND_URL). Its OpenAPI document is read from here once at startup.
+  openapi_url:
+    type: str
+    default: ""
+    description: Where the OpenAPI document comes from, an http(s) URL or a file path. Empty means base_url + /openapi.json.
+  timeout_seconds: {type: float, default: 10.0, minimum: 0.1}
+  connect_timeout_seconds: {type: float, default: 3.0, minimum: 0.1}
+  default_row_limit: {type: int, default: 20, minimum: 1}
+  session_header:
+    type: str
+    default: X-Glazed-Case
+    description: Carries the case (the asking session's id for a peer turn).
+  agent_header: {type: str, default: X-Glazed-Agent}
+  tenant_header:
+    type: str
+    default: X-Glazed-Store
+    description: Carries the store (the caller's tenant).
+  subject_header: {type: str, default: ""}
+  idempotency_header: {type: str, default: Idempotency-Key}
+  warning_header: {type: str, default: X-Glazed-Warning}
+  peer_session_prefix:
+    type: str
+    default: "peer~"
+    description: A peer turn's session id is peer~<asker session id>~<uuid>; the backend gets the asker's id.
+  peer_session_separator: {type: str, default: "~"}
+  service_name:
+    type: str
+    default: Glazed backend
+    description: How error messages name the service.

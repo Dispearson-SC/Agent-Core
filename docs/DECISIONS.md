@@ -3134,3 +3134,37 @@ decision 2026-10-13) and are described by `addon.yaml`.
   name, so it is one tool); a name another addon or Core owns is still refused. Rejected: one
   toolset module serving eight names (the manifest ties one name to one file), and putting the glazed
   code into Core (the point of the addon is that it leaves Core).
+- **The addon `glazed_tools` (consumer of the bridge).** Thirty tools in eight per-role toolsets
+  (`glazed_orchestrator` ... `glazed_liaison`), the tool sets of the hand-written ones. The backend marks
+  its `/internal/v1` operations (glazed-copilot `adapters/driving/agent_tools.py`: name, effect, the
+  description the model reads, idempotency, warning, row limit); `overlay.yaml` pins each operation
+  and patches what OpenAPI cannot say; `toolsets/_glazed.py` holds only the outcomes that are logic, not
+  data: the two forecasts (future dates only, "unavailable" never invented) and the seven manager views
+  (`{available, reason}` and a key allow-list), plus two guards (an enum refused before the call,
+  `discount_pct` in 0-100). The source is the backend URL (`base_url` + `/openapi.json`, or
+  `openapi_url`), fetched once; tests use the committed snapshot of the backend's internal contract
+  (`tests/fixtures/glazed_tools/internal_openapi.json`, exported by glazed-copilot's
+  `export_internal_openapi.py`) and the captured old tool contract (`old_tool_contract.json`). The
+  startup passes `expect=` for all thirty tools and every overlay entry carries an `operation:` pin,
+  so a backend that renames, moves or unmarks one stops Core before a conversation does.
+  Rejected: all tools generated with no code (the forecast and view outcomes are domain rules the
+  bridge must not learn), and marks that carry the allow-list (`x-agent-fields` cannot express the
+  nested picks or the `available` envelope, and a second place to edit the same keys would drift).
+- **Replay.** The old tools were all `interrupted`. Now: every plain GET read is `safe` (the backend
+  answers the same, the read adds only a trace row), every POST keeps `interrupted`, including the two
+  that read (`audit_promo`, `classify_text`: `x-agent-effect: read` for what they do, `x-agent-replay:
+  interrupted` as before, since `classify_text` costs a model call). Open: if a replayed read's extra
+  trace row is a problem, mark those operations `x-agent-replay: interrupted` in the backend.
+- **Assertions that changed in the port (all in `test_glazed_tools_addon.py`, each with a `CHANGED:`
+  note).** `default_backend_url` (now the manifest setting), `a_body_that_cannot_be_serialised` (a
+  `string` argument is stringified by the bridge, so an `object()` is sent as its text), the
+  composition-root test (addon contributions, not `TOOL_PACKAGES`), `case_id_for` (the bridge's generic
+  function with the glazed prefix), the docstring tests (the description the model reads), the
+  signature test (the JSON schema), placeholder tools (absent from every toolset) and the forecast
+  dates (an ISO string). Not ported: `test_second_ask_peer...`, a test of the vertical branch's
+  `peers._guarded_ask_peer` patch that this Core replaced with fan-out. Behavior differences that no
+  old test pinned: a junk integer falls back to the argument's default (the old `_bounded` fell back to
+  its maximum, 20); an empty-string `kind`/`decision_id` is sent, not dropped; a path argument of `""`
+  / `.` / `..` is an error value (the old tools would have built the URL); a missing required argument
+  is an error value (the old tools relied on the framework's validation); the schema now carries
+  `enum`, `minimum`, `maximum` (the old one had types only).
