@@ -26,6 +26,7 @@ are loaded by the contract tests, so they cannot drift from the rules below.
 addons/shop/
   addon.yaml            # the manifest (required)
   toolsets/cart.py      # provides.toolsets: [cart]
+  toolsets/_common.py   # not declared: a helper the toolsets import (`from ._common import x`)
   wrappers/stamp.py     # provides.wrappers
   fragments/note.md     # provides.fragments: fragments/
   profiles/clerk.yaml   # provides.profiles: profiles/
@@ -58,7 +59,7 @@ version that is not a version, or a `core` range that is not a range, fails at m
 
 | Key | Declares | Lives in | The rule |
 |---|---|---|---|
-| `toolsets: [name]` | a toolset a profile can list in `toolsets:` | `toolsets/<name>.py` with `build_toolset()` or `build_toolset(settings)` (the addon's own validated settings, D84) returning a `FunctionToolset` | tool and toolset names are global: a clash with Core or another addon stops startup |
+| `toolsets: [name]` | a toolset a profile can list in `toolsets:` | `toolsets/<name>.py` with `build_toolset()` or `build_toolset(settings)` (the addon's own validated settings, D84) returning a `FunctionToolset` | tool and toolset names are global: a clash with Core or another addon stops startup. One addon may offer the same tool in several of its own toolsets (per-role sets, D87); a toolset or wrapper file may import helper modules beside it with a relative import |
 | `audit.allow` / `audit.presence_only` | which arguments of YOUR tools the audit trail keeps (`tool: [argument]`) | `addon.yaml` only; a toolset module declaring `AUDIT_ALLOW` is refused | only your own tools; a tool with no decision records no arguments (and logs a warning) |
 | `policy: path` | rules for your tools | one YAML file, the format of `Core/policy/*.yaml` | an `allow` may reach only YOUR tools (wildcards included); `deny` and `needs_approval` may narrow any tool. Needs a deployment that manages policy from files |
 | `fragments: dir/` | prompt text a profile names in `include:` | `<name>.md` files | names are global |

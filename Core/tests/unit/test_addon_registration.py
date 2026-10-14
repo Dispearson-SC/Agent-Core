@@ -277,6 +277,105 @@ def test_a_tool_name_another_source_owns_is_refused_because_policy_and_audit_key
     assert error.addon == "shop" and builtin_tool in str(error)
 
 
+def test_an_addon_may_offer_the_same_tool_in_several_of_its_own_toolsets(tmp_path: Path) -> None:
+    """Per-role toolsets share tools (G2): a repeat inside one addon is not a clash."""
+    _addon(
+        tmp_path,
+        "shop",
+        "provides:\n  toolsets: [cart, desk]\n  audit:\n    allow:\n      shared_tool: [text]\n",
+        toolsets__cart_dot_py=TOOLSET.format(tool="shared_tool"),
+        toolsets__desk_dot_py=TOOLSET.format(tool="shared_tool"),
+    )
+
+    contributions = _register(tmp_path, ["shop"])
+
+    assert set(contributions.toolsets["cart"]().tools) == {"shared_tool"}
+    assert set(contributions.toolsets["desk"]().tools) == {"shared_tool"}
+    assert contributions.tools["shop"] == {"shared_tool"}
+
+
+def test_a_tool_repeated_across_two_addons_is_still_refused(tmp_path: Path) -> None:
+    for name, toolset in (("a", "cart"), ("b", "desk")):
+        _addon(
+            tmp_path,
+            name,
+            f"provides:\n  toolsets: [{toolset}]\n",
+            **{f"toolsets__{toolset}_dot_py": TOOLSET.format(tool="shared_tool")},
+        )
+
+    error = _refused(tmp_path, ["a", "b"])
+
+    assert error.addon == "b" and "shared_tool" in str(error) and "'a'" in str(error)
+
+
+def test_a_toolset_may_import_a_helper_module_that_sits_next_to_it(tmp_path: Path) -> None:
+    helper = """
+    def label() -> str:
+        return "from the helper"
+    """
+    toolset = """
+    from pydantic_ai.tools import Tool
+    from pydantic_ai.toolsets import FunctionToolset
+
+    from ._common import label
+
+
+    def helper_tool(text: str) -> str:
+        \"\"\"Say where the text was labelled.\"\"\"
+        return label() + ": " + text
+
+
+    def build_toolset() -> FunctionToolset[None]:
+        return FunctionToolset([Tool(helper_tool)])
+    """
+    _addon(
+        tmp_path,
+        "shop",
+        "provides:\n  toolsets: [cart]\n",
+        toolsets___common_dot_py=helper,
+        toolsets__cart_dot_py=toolset,
+    )
+
+    contributions = _register(tmp_path, ["shop"])
+
+    tool = contributions.toolsets["cart"]().tools["helper_tool"]
+    assert tool.function("x") == "from the helper: x"  # type: ignore[call-arg]
+
+
+def test_a_helper_module_is_reloaded_for_another_copy_of_the_addon(tmp_path: Path) -> None:
+    def toolset() -> str:
+        return """
+        from pydantic_ai.tools import Tool
+        from pydantic_ai.toolsets import FunctionToolset
+
+        from ._common import LABEL
+
+
+        def labelled(text: str) -> str:
+            \"\"\"Label.\"\"\"
+            return LABEL + text
+
+
+        def build_toolset() -> FunctionToolset[None]:
+            return FunctionToolset([Tool(labelled)])
+        """
+
+    results = []
+    for label in ("one:", "two:"):
+        root = tmp_path / label.rstrip(":")
+        _addon(
+            root,
+            "shop",
+            "provides:\n  toolsets: [cart]\n",
+            toolsets___common_dot_py=f"LABEL = '{label}'\n",
+            toolsets__cart_dot_py=toolset(),
+        )
+        contributions = _register(root, ["shop"])
+        results.append(contributions.toolsets["cart"]().tools["labelled"].function("x"))  # type: ignore[call-arg]
+
+    assert results == ["one:x", "two:x"]
+
+
 # --- audit ------------------------------------------------------------------------------------
 
 SHOP = "provides:\n  toolsets: [cart]\n"

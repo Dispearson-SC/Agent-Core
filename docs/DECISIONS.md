@@ -3124,3 +3124,13 @@ decision 2026-10-13) and are described by `addon.yaml`.
   ignores whatever the model sends; a manual tool may be `operation:`-pinned to a document operation.
   Rejected: marks in the backend (`x-agent-hide`), because what the model may see is the addon's
   decision, not the backend's, and the backend would need a deploy to change it.
+- **Addon files may import their siblings; one addon may repeat its own tool (loader).** The eight
+  glazed role toolsets share most tools and one body of shaping code. The registration refused a tool
+  name already provided by anything, including the same addon, and a toolset file could import nothing
+  of its own addon (files are loaded by path). Now the loader creates the synthetic packages
+  `agent_core_addons[.<addon>[.toolsets]]`, so `from ._common import x` works, and drops everything
+  imported under an addon package when the same addon name is loaded from another directory (tests,
+  never production). A tool name repeated inside ONE addon is allowed (audit and policy key on the
+  name, so it is one tool); a name another addon or Core owns is still refused. Rejected: one
+  toolset module serving eight names (the manifest ties one name to one file), and putting the glazed
+  code into Core (the point of the addon is that it leaves Core).

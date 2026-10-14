@@ -100,6 +100,26 @@ def _refuse(addon: str, field_name: str, reason: str) -> AddonRegistrationError:
     return AddonRegistrationError(addon, field_name, reason)
 
 
+def _package(name: str, directory: Path | None) -> ModuleType:
+    """The synthetic package `name` whose modules are the files of `directory`.
+
+    A toolset or wrapper file imports its siblings relatively (`from ._common import x`): the
+    parent packages exist only so that import machinery finds them. When the same package name now
+    points at another directory (another copy of the addon), everything imported under the old one
+    is forgotten, so a helper is never reused from a stale copy.
+    """
+    existing = sys.modules.get(name)
+    wanted = [] if directory is None else [str(directory)]
+    if isinstance(existing, ModuleType) and getattr(existing, "__path__", None) == wanted:
+        return existing
+    for loaded in [m for m in sys.modules if m == name or m.startswith(f"{name}.")]:
+        del sys.modules[loaded]
+    package = ModuleType(name)
+    package.__path__ = wanted
+    sys.modules[name] = package
+    return package
+
+
 def _import_addon_file(
     addon: ResolvedAddon, field_name: str, directory: str, name: str
 ) -> ModuleType:
@@ -108,6 +128,9 @@ def _import_addon_file(
     path = addon.root / directory / f"{name}.py"
     if not path.is_file():
         raise _refuse(owner, field_name, f"{name!r} has no file {directory}/{name}.py")
+    _package(_MODULE_PREFIX, None)
+    _package(f"{_MODULE_PREFIX}.{owner}", addon.root)
+    _package(f"{_MODULE_PREFIX}.{owner}.{directory}", addon.root / directory)
     module_name = f"{_MODULE_PREFIX}.{owner}.{directory}.{name.replace('-', '_')}"
     cached = sys.modules.get(module_name)
     if cached is not None and getattr(cached, "__file__", None) == str(path):
@@ -206,7 +229,7 @@ def _register_toolsets(
                 f"{name!r}: build_toolset() must return a FunctionToolset",
             )
         for tool in built.tools:
-            if tool in tools_owner:
+            if tool in tools_owner and tools_owner[tool] != f"addon {owner!r}":
                 raise _refuse(
                     owner,
                     "provides.toolsets",
