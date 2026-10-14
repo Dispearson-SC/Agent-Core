@@ -3,15 +3,14 @@
 # (layer A).
 # Anything else is the escape option `none_of_these`: the orchestrator reasons about it.
 #
-# NOT ENABLED by default. To turn it on (docs/ADDONS.md, "The System One router"):
+# glazed_orchestrator opts in (P5: `routing: {router: system_one, targets: [the seven specialists],
+# intents: true}`), which is INERT until the deployment turns routing on (docs/ADDONS.md, "The System
+# One router"; the glazed compose does this):
 #   AGENT_CORE_ADDONS=...,system_one_router
 #   AGENT_CORE_ADDON__SYSTEM_ONE_ROUTER__ROUTES_FILE=glazed_vertical/routing/system_one_routes.yaml
 #   AGENT_CORE_ADDON__SYSTEM_ONE_ROUTER__API_KEY_ENV=JEV_API_KEY
 #   AGENT_CORE_TURN_ROUTING=true
-# and give glazed_orchestrator `routing: {router: system_one, targets: [the seven specialists]}`.
-# Add `intents: true` to that block to answer the ten intents with their plans
-# (routing/intent_plans.yaml, D97); without it an intent answer runs the orchestrator
-# (reason intent_not_supported).
+# AGENT_CORE_TURN_ROUTING=false turns all of it off again; the orchestrator then runs every turn.
 #
 # BENCHMARK (2026-10-14, evals/routing_questions.yaml, 78 SYNTHETIC questions, jev-1.13.0,
 # threshold 0.5, router timeout 800 ms): English descriptions 96% accuracy (15% with routing off),

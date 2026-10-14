@@ -3,9 +3,9 @@
 # one compose call of that specialist (no tools, only these results). Anything that fails falls back
 # to the specialist's normal turn, which reasons with its full toolset.
 #
-# NOT ENABLED by default: plans are inert until AGENT_CORE_TURN_ROUTING=true, the system_one_router
-# addon is enabled and glazed_orchestrator opts in with
-#   routing: {router: system_one, targets: [the seven specialists], intents: true}
+# glazed_orchestrator opts in (`routing: {..., intents: true}`, P5); the plans stay inert until the
+# deployment sets AGENT_CORE_TURN_ROUTING=true and enables the system_one_router addon
+# (routing/system_one_routes.yaml has the variables). AGENT_CORE_TURN_ROUTING=false turns them off.
 #
 # Every tool is a GET of the backend's /internal/v1 contract (replay-safe, registration checks it)
 # and is in its owner's toolset (startup checks it). The store, the case and the as_of date are

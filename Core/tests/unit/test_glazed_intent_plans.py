@@ -3,8 +3,8 @@
 THE RULES UNDER TEST. The vertical declares one plan for each of the ten intents its System One
 routes name (the L9 table); every plan registers (each tool is exported, replay-safe and not a
 delegating tool), runs as the specialist that owns that data, which is a loaded entry point
-granted the tool; every constant argument is valid against the tool's schema; and nothing turns the
-plans on by itself (no glazed profile opts in).
+granted the tool; every constant argument is valid against the tool's schema; and only the
+orchestrator turns the plans on (P5), inert until the deployment turns routing on.
 """
 
 from __future__ import annotations
@@ -64,6 +64,12 @@ def test_every_constant_argument_is_valid_for_its_tool(intent: str) -> None:
         jsonschema.validate(arguments, schema)
 
 
-def test_no_glazed_profile_turns_the_plans_on() -> None:
+def test_only_the_orchestrator_turns_the_plans_on() -> None:
+    """P5: the orchestrator opts in (`intents: true`), inert until routing is on
+    (test_glazed_fast_comms.py); no specialist does."""
     for path in (glazed.ADDON / "profiles").glob("*.yaml"):
-        assert "routing" not in yaml.safe_load(path.read_text(encoding="utf-8")), path.name
+        routing = yaml.safe_load(path.read_text(encoding="utf-8")).get("routing")
+        if path.stem == "glazed_orchestrator":
+            assert routing["intents"] is True
+        else:
+            assert routing is None, path.name

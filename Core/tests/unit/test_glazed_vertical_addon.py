@@ -400,8 +400,11 @@ def test_the_orchestrator_is_vertical_glazeds_with_plain_language_in_its_section
     glazed_words = new.persona[len(head + slot) : -len(tail)]
     for kept in ('"producto"', "esto lo decides tú", "unos 120 dólares", "por ciento"):
         assert kept in glazed_words
-    # every other field is the old one (the content hash follows the persona)
-    assert replace(new, persona=old.persona, content_hash=old.content_hash) == old
+    # every other field is the old one (the content hash follows the persona), but the Phase 5
+    # routing opt-in (P5, inert until AGENT_CORE_TURN_ROUTING is on; test_glazed_fast_comms.py)
+    assert replace(
+        new, persona=old.persona, content_hash=old.content_hash, routing=None
+    ) == old
 
 
 def test_the_orchestrator_keeps_the_manager_communication_rules_with_glazeds_settings() -> None:

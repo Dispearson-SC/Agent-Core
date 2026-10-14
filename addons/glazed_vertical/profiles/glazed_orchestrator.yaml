@@ -148,6 +148,25 @@ toolsets:
 max_iterations: 6
 max_cost_usd: "0.50"
 
+# Phase 5 (P5, S6): layered routing. INERT until the deployment sets AGENT_CORE_TURN_ROUTING=true and
+# enables the system_one_router addon (its routes: routing/system_one_routes.yaml; key env JEV_API_KEY);
+# turn it off with AGENT_CORE_TURN_ROUTING=false and nothing else changes. A confident System One answer
+# (threshold 0.5, L12) sends the manager's turn straight to one specialist (layer A, `targets`) or answers
+# one of the ten frequent read-only intents with its fixed plan (layer B, `intents: true`,
+# routing/intent_plans.yaml); anything else, a timeout or an error runs this orchestrator as before.
+# The router is not a safety barrier: the routed profile runs with its full policy and approvals.
+routing:
+  router: system_one
+  targets:
+    - glazed_present
+    - glazed_past
+    - glazed_supply
+    - glazed_strategist
+    - glazed_sentinel
+    - glazed_auditor
+    - glazed_liaison
+  intents: true
+
 # The hub of the star: its own allowlist, replacing the specialists' way back of glazed_base.
 replace: [peers]
 peers:
@@ -184,3 +203,6 @@ peers:
   max_hops: 1
   visibility: summary
   reply_timeout_seconds: 600
+  # Phase 5 (P5): every ask of one step runs to its end and the turn resumes once with all answers (C10,
+  # Core's default, stated so the deployment says it). The persona still asks one specialist per step.
+  fan_out: all_settled

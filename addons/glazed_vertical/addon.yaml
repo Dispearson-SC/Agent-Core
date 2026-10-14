@@ -20,6 +20,6 @@ depends: [glazed_tools, plain_language]
 provides:
   profiles: profiles/
   channels: [glazed]
-  # Phase 5 P3 (D97): the layer-B plans of the ten frequent intents. Inert unless routing is on and
-  # glazed_orchestrator opts in (routing.intents); see routing/intent_plans.yaml.
+  # Phase 5 P3 (D97): the layer-B plans of the ten frequent intents. glazed_orchestrator opts in
+  # (routing.intents, P5); inert unless the deployment turns routing on; see routing/intent_plans.yaml.
   intents: routing/intent_plans.yaml
