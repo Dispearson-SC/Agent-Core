@@ -13,6 +13,8 @@ data: their replies are prose the orchestrator reads, and a typed profile cannot
 
 from __future__ import annotations
 
+import yaml
+
 from agent_core.adapters.driven.addons_fs.loader import load_addons_from_environment
 from agent_core.adapters.driven.addons_fs.registration import register_addons
 from agent_core.adapters.driven.policy_fs.loader import load_policy_rules
@@ -42,8 +44,14 @@ def test_no_other_glazed_profile_routes() -> None:
 
 
 def test_the_orchestrator_collects_every_peer_answer_of_a_step() -> None:
+    """`all_settled` is also Core's default, so the loaded value alone would pass with the line
+    deleted: the profile must SAY it, so a change of Core's default never changes glazed."""
     peers = glazed.profile("orchestrator").peers
     assert peers.enabled and peers.fan_out is FanOutPolicy.ALL_SETTLED
+    declared = yaml.safe_load(
+        (glazed.ADDON / "profiles" / "glazed_orchestrator.yaml").read_text(encoding="utf-8")
+    )
+    assert declared["peers"]["fan_out"] == "all_settled"
 
 
 def test_no_specialist_answers_typed_data() -> None:

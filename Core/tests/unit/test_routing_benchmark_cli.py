@@ -303,8 +303,12 @@ def test_a_profile_or_pass_turn_never_reads_the_event_feed() -> None:
         httpx.Response(500, text="boom"),
         httpx.Response(200, content=b"event: snapshot\ndata: {not json\n\n"),
         httpx.Response(200, content=b"event: snapshot\ndata: [1, 2]\n\n"),
+        httpx.Response(200, content=b'event: snapshot\ndata: {"turns": "t1"}\n\n'),
+        httpx.Response(
+            200, content=b'event: snapshot\ndata: {"turns": [7, {"turn_id": "t1"}]}\n\n'
+        ),
     ],
-    ids=["http_500", "bad_json", "not_a_mapping"],
+    ids=["http_500", "bad_json", "not_a_mapping", "turns_not_a_list", "turn_not_a_mapping"],
 )
 def test_a_finished_turn_whose_plan_cannot_be_read_is_still_finished(
     events: httpx.Response,
@@ -326,3 +330,29 @@ def test_a_finished_turn_whose_plan_cannot_be_read_is_still_finished(
             return await driver.run(Question("q", "x", "intent:x"), "intent:x", "front_desk")
 
     assert asyncio.run(scenario()) is None
+
+
+def test_a_bug_while_reading_the_plan_is_not_swallowed_as_an_unreadable_feed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slice 37 suggestion: only what the FEED can do wrong (HTTP, undecodable JSON, an unexpected
+    shape) reports no plan; a programming error inside the driver surfaces."""
+
+    async def broken(self: HttpTurnDriver, turn_id: str) -> str | None:
+        raise AttributeError("a bug in the driver, not in the feed")
+
+    monkeypatch.setattr(HttpTurnDriver, "_plan_of", broken)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"turn_id": "t1", "status": "accepted"})
+        return httpx.Response(200, json={"turn_id": "t1", "status": "finished", "text": "x"})
+
+    async def scenario() -> object:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport, base_url="http://core") as client:
+            driver = HttpTurnDriver(client, headers={}, poll_seconds=0)
+            return await driver.run(Question("q", "x", "intent:x"), "intent:x", "front_desk")
+
+    with pytest.raises(AttributeError, match="a bug in the driver"):
+        asyncio.run(scenario())

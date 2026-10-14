@@ -151,7 +151,9 @@ class HttpTurnDriver:
         plan ended is a diagnostic that must never turn a finished turn into a failed one."""
         try:
             return await self._plan_of(turn_id)
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        except (httpx.HTTPError, json.JSONDecodeError):
+            # Only what the feed can do wrong; an unexpected shape is already None in `_plan_of`,
+            # and a bug in this driver surfaces instead of reading as an unreadable feed.
             _LOG.warning("could not read the plan of turn %s; reporting none", turn_id)
             return None
 
@@ -166,12 +168,7 @@ class HttpTurnDriver:
                 if line.startswith("event:"):
                     event = line.removeprefix("event:").strip()
                 elif line.startswith("data:") and event == "snapshot":
-                    snapshot = json.loads(line.removeprefix("data:"))
-                    for turn in snapshot.get("turns", []):
-                        if turn.get("turn_id") == turn_id:
-                            plan = turn.get("plan")
-                            return plan if isinstance(plan, str) else None
-                    return None
+                    return _plan_in(json.loads(line.removeprefix("data:")), turn_id)
         return None
 
 
@@ -274,3 +271,13 @@ def main(env: Mapping[str, str]) -> int:
 
 if __name__ == "__main__":
     sys.exit(main(os.environ))
+
+
+def _plan_in(snapshot: object, turn_id: str) -> str | None:
+    """The `plan` of `turn_id` in a decoded snapshot; None for any shape that does not hold one."""
+    turns = snapshot.get("turns") if isinstance(snapshot, dict) else None
+    for turn in turns if isinstance(turns, list) else ():
+        if isinstance(turn, dict) and turn.get("turn_id") == turn_id:
+            plan = turn.get("plan")
+            return plan if isinstance(plan, str) else None
+    return None

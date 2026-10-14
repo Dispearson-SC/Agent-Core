@@ -367,6 +367,43 @@ def test_a_turn_recovered_mid_plan_after_routing_is_turned_off_falls_back_withou
     assert world.runner.calls == []
 
 
+def test_a_turn_recovered_before_its_reply_after_routing_is_turned_off_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slice 37 suggestion: every call was recorded before the crash; the reply step then finds no
+    executor, answers nothing (no `plan` event, nothing persisted) and the turn falls back as a
+    reply that failed, through the normal path."""
+    from agent_core.application.run_intent import PreparedPlan
+
+    world = World(monkeypatch, INTENT, Runner())
+    _recovered_after_routing_was_turned_off(monkeypatch, world)
+
+    async def recorded_prepare(turn_id: TurnId, request: TurnRequest, call: Any) -> PreparedPlan:
+        world.steps.append("_step_intent_prepare")
+        return PreparedPlan(calls=(PlannedCall("a", "read_a", {}),))
+
+    async def recorded_call(turn_id: TurnId, request: TurnRequest, call: Any) -> PlanToolResult:
+        world.steps.append("_step_intent_tool")
+        return PlanToolResult("a", "read_a", content="read_a=1")
+
+    monkeypatch.setattr(turn_workflow, "_step_intent_prepare", recorded_prepare)
+    monkeypatch.setattr(turn_workflow, "_step_intent_tool", recorded_call)
+
+    outcome = world.run()
+
+    assert outcome.result is not None and outcome.result.text == "model path"
+    assert world.steps == [
+        "_step_intent_prepare",
+        "_step_intent_tool",
+        "_step_intent_reply",
+        "_step_intent_fallback",
+    ]
+    assert [e.detail for e in world.recorder.events if e.kind is EventKind.PLANNED] == [
+        f"fallback:{PLAN_REPLY_FAILED}"
+    ]
+    assert [r.text for r in world.delivered] == ["model path"]
+
+
 def test_the_intent_steps_are_durable_steps() -> None:
     for name in (
         "_step_intent_prepare",
