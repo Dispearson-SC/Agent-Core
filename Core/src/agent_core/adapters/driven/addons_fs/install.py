@@ -74,6 +74,7 @@ __all__ = [
 _LOG = logging.getLogger(__name__)
 _MODULE_PREFIX: Final = "agent_core_addons"
 _HOOK_FIELD: Final = "hooks.post_init"
+_RECORD_STEP: Final = "record the installed version"
 # One key for the whole pass: addons install one process at a time, in activation order.
 _LOCK_SQL: Final = "SELECT pg_advisory_lock(hashtextextended('agent_core.addons.install', 0))"
 
@@ -152,7 +153,11 @@ def _is_async(function: object) -> bool:
     unwrapped = function
     while isinstance(unwrapped, functools.partial):
         unwrapped = unwrapped.func
-    return inspect.iscoroutinefunction(unwrapped)
+    if inspect.iscoroutinefunction(unwrapped):
+        return True
+    # A callable object whose `__call__` is `async def` (looked up on the type, as a call is).
+    call = getattr(type(unwrapped), "__call__", None)  # noqa: B004
+    return not inspect.isroutine(unwrapped) and inspect.iscoroutinefunction(call)
 
 
 def _import_hook(addon: ResolvedAddon, reference: str) -> PostInit:
@@ -237,12 +242,15 @@ def _refuse_downgrades(plans: Sequence[AddonInstallPlan], recorded: Mapping[str,
 
 
 def _run_migrations(connection: psycopg.Connection[Any], plan: AddonInstallPlan) -> tuple[str, ...]:
-    done = {
-        row[0]
-        for row in connection.execute(
-            "SELECT file FROM addon_migrations WHERE addon = %s", (plan.name,)
-        ).fetchall()
-    }
+    try:
+        done = {
+            row[0]
+            for row in connection.execute(
+                "SELECT file FROM addon_migrations WHERE addon = %s", (plan.name,)
+            ).fetchall()
+        }
+    except psycopg.Error as error:
+        raise _step_failure(plan.name, "read the applied migrations", error) from error
     applied: list[str] = []
     for migration in plan.migrations:
         if migration.name in done:
@@ -255,6 +263,10 @@ def _run_migrations(connection: psycopg.Connection[Any], plan: AddonInstallPlan)
                     (plan.name, migration.name, plan.version),
                 )
         except psycopg.Error as error:
+            if _lost_connection(error):
+                raise _database_failure(
+                    plan.name, f"run migration {migration.name}", error
+                ) from error
             raise _fail(
                 plan.name,
                 "migrations",
@@ -290,16 +302,25 @@ def _install_one(
         plan.name, plan.version, "the manifest version"
     ):
         return InstallResult(plan.name, "unchanged", previous, applied)
+    step = "run post_init"
     try:
         with connection.transaction():
             if plan.post_init is not None:
-                plan.post_init(
+                returned = plan.post_init(
                     AddonInstallContext(
                         plan.name, plan.version, previous, plan.settings, connection
                     )
                 )
+                if inspect.isawaitable(returned):
+                    # Wrapped in a way `_is_async` cannot see: it ran nothing. Fail, do not record.
+                    if inspect.iscoroutine(returned):
+                        returned.close()
+                    raise TypeError("post_init returned a coroutine; it must be a plain function")
+            step = _RECORD_STEP
             _record(connection, plan, previous)
     except Exception as error:
+        if isinstance(error, psycopg.Error) and (step == _RECORD_STEP or _lost_connection(error)):
+            raise _step_failure(plan.name, step, error) from error
         raise _fail(
             plan.name,
             _HOOK_FIELD,
@@ -311,15 +332,38 @@ def _install_one(
     return InstallResult(plan.name, action, previous, applied)
 
 
-def _database_failure(
-    addon: str | None, step: str, error: psycopg.OperationalError
-) -> AddonInstallError:
+def _lost_connection(error: psycopg.Error) -> bool:
+    """True when the connection itself failed, not the statement it was running.
+
+    A client-side failure (refused, dropped, timed out) carries no SQLSTATE; the server reports
+    class 08 (connection exception) and 57P01-57P03 (shutdown, crash) as it goes away. Other
+    `OperationalError`s (disk full, query cancelled) are the server answering about a statement.
+    """
+    if not isinstance(error, psycopg.OperationalError):
+        return False
+    state = error.sqlstate
+    return state is None or state.startswith("08") or state in {"57P01", "57P02", "57P03"}
+
+
+def _database_failure(addon: str | None, step: str, error: psycopg.Error) -> AddonInstallError:
     """The database became unreachable or dropped the connection DURING the install pass (A7b)."""
     return _fail(
         addon,
         "database",
         f"could not {step} ({type(error).__name__}: {str(error).strip()}); nothing past this "
         "step ran. Check that the database is reachable and start again",
+    )
+
+
+def _step_failure(addon: str | None, step: str, error: psycopg.Error) -> AddonInstallError:
+    """A database error at `step`: a lost connection says so, any other error is named as itself."""
+    if _lost_connection(error):
+        return _database_failure(addon, step, error)
+    return _fail(
+        addon,
+        "install",
+        f"could not {step} ({type(error).__name__}: {str(error).strip()}); nothing past this "
+        "step ran. Fix the cause and start again",
     )
 
 
@@ -331,21 +375,19 @@ def _install_sync(conninfo: str, plans: Sequence[AddonInstallPlan]) -> tuple[Ins
     with connection:
         try:
             connection.execute(_LOCK_SQL)  # released when the connection closes
+        except psycopg.Error as error:
+            raise _step_failure(None, "take the install lock", error) from error
+        try:
             recorded = {
                 name: version
                 for name, version in connection.execute(
                     "SELECT name, version FROM addons"
                 ).fetchall()
             }
-        except psycopg.OperationalError as error:
-            raise _database_failure(None, "read the recorded addon versions", error) from error
+        except psycopg.Error as error:
+            raise _step_failure(None, "read the recorded addon versions", error) from error
         _refuse_downgrades(plans, recorded)
-        results: list[InstallResult] = []
-        for plan in plans:
-            try:
-                results.append(_install_one(connection, plan, recorded.get(plan.name)))
-            except psycopg.OperationalError as error:
-                raise _database_failure(plan.name, "run this addon's migrations", error) from error
+        results = [_install_one(connection, plan, recorded.get(plan.name)) for plan in plans]
     for result in results:
         if result.action != "unchanged" or result.applied:
             _LOG.info(

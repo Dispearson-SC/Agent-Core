@@ -217,7 +217,11 @@ step is a no-op and Core starts exactly as it did before.
 All are raised at startup and name the addon and the field: `ManifestError` (invalid manifest),
 `AddonResolutionError` (graph), `AddonSettingsError`, `AddonRegistrationError` (an extension point
 refused or colliding), `AddonInstallError` (a migration or hook failed, a downgrade, an unreachable
-database during the install pass). `python -m agent_core addons list` shows what is installed and
+database during the install pass). An install error names the step that failed (the lock, the
+recorded versions, one migration file, `post_init`, recording the version); field `database` means
+the connection itself was lost or refused, never a SQL error or a failing hook. A hook must be a
+plain `def`: an `async def`, a callable object with an async `__call__`, or any hook that returns a
+coroutine is refused. `python -m agent_core addons list` shows what is installed and
 what the next start does.
 
 ## What addon code may import

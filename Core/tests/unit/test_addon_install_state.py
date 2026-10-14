@@ -18,7 +18,7 @@ import pytest
 
 from agent_core.adapters.driven.addons_fs import install
 from agent_core.adapters.driven.addons_fs.errors import AddonInstallError
-from agent_core.adapters.driven.addons_fs.install import AddonInstallPlan
+from agent_core.adapters.driven.addons_fs.install import AddonInstallPlan, MigrationFile
 from agent_core.adapters.driven.addons_fs.loader import load_addons
 
 
@@ -33,14 +33,15 @@ class _Rows:
 class _Connection:
     """Records statements; every SELECT answers with no rows."""
 
-    def __init__(self, fail_on: str | None = None) -> None:
+    def __init__(self, fail_on: str | None = None, error: Exception | None = None) -> None:
         self.statements: list[str] = []
         self._fail_on = fail_on
+        self._error = error or psycopg.OperationalError("server closed the connection unexpectedly")
 
     def execute(self, sql: str, params: Any = None) -> _Rows:
         self.statements.append(sql)
         if self._fail_on is not None and self._fail_on in sql:
-            raise psycopg.OperationalError("server closed the connection unexpectedly")
+            raise self._error
         return _Rows([])
 
     @contextmanager
@@ -54,8 +55,21 @@ class _Connection:
         return None
 
 
-def _plan(version: str, hook: Any = None) -> AddonInstallPlan:
-    return AddonInstallPlan(name="shop", version=version, migrations=(), post_init=hook)
+def _plan(
+    version: str, hook: Any = None, migrations: tuple[MigrationFile, ...] = ()
+) -> AddonInstallPlan:
+    return AddonInstallPlan(name="shop", version=version, migrations=migrations, post_init=hook)
+
+
+def _run(connection: _Connection, plan: AddonInstallPlan) -> AddonInstallError:
+    """Install `plan` over `connection` (a fresh install) and return the error it stops with."""
+    with pytest.raises(AddonInstallError) as caught:
+        install._install_one(connection, plan, None)  # type: ignore[arg-type]
+    return caught.value
+
+
+_SQL_ERROR = psycopg.errors.UndefinedTable('relation "nope" does not exist')
+_ONE_FILE = (MigrationFile("0001_t.sql", "CREATE TABLE t (n INT);"),)
 
 
 @pytest.mark.parametrize(
@@ -110,3 +124,119 @@ def test_a_database_that_cannot_be_reached_is_an_install_error_naming_the_step(
         )
 
     assert caught.value.field == "database"
+
+
+# --- A8b: advisories of the slice 24 review ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("fail_on", "step"),
+    [("pg_advisory_lock", "take the install lock"), ("SELECT name", "read the recorded")],
+)
+def test_a_dropped_connection_names_the_pass_step_that_failed(
+    monkeypatch: pytest.MonkeyPatch, fail_on: str, step: str
+) -> None:
+    monkeypatch.setattr(install.psycopg, "connect", lambda *a, **k: _Connection(fail_on=fail_on))
+
+    with pytest.raises(AddonInstallError) as caught:
+        install._install_sync("postgresql://x/y", [_plan("1.0.0")])
+
+    assert caught.value.field == "database" and step in caught.value.reason
+    assert caught.value.addon is None  # the pass, not one addon
+
+
+def test_a_dropped_connection_while_reading_applied_migrations_names_that_step() -> None:
+    error = _run(_Connection(fail_on="SELECT file"), _plan("1.0.0"))
+
+    assert error.field == "database" and "read the applied migrations" in error.reason
+
+
+def test_a_dropped_connection_in_a_migration_is_a_database_failure_not_a_sql_defect() -> None:
+    error = _run(_Connection(fail_on="CREATE TABLE"), _plan("1.0.0", migrations=_ONE_FILE))
+
+    assert error.field == "database" and "0001_t.sql" in error.reason
+    assert "rolled back" not in error.reason  # the connection died: what happened is unknown
+
+
+def test_a_sql_error_in_a_migration_is_a_migration_defect_not_a_database_failure() -> None:
+    connection = _Connection(fail_on="CREATE TABLE", error=_SQL_ERROR)
+
+    error = _run(connection, _plan("1.0.0", migrations=_ONE_FILE))
+
+    assert error.field == "migrations" and "0001_t.sql" in error.reason
+    assert "rolled back" in error.reason and "UndefinedTable" in error.reason
+
+
+def test_a_server_side_operational_error_is_not_mistaken_for_a_lost_connection() -> None:
+    disk_full = psycopg.errors.DiskFull("could not extend file")  # an OperationalError, class 53
+
+    error = _run(
+        _Connection(fail_on="CREATE TABLE", error=disk_full), _plan("1.0.0", migrations=_ONE_FILE)
+    )
+
+    assert error.field == "migrations" and "DiskFull" in error.reason
+
+
+def test_a_dropped_connection_inside_the_hook_is_a_database_failure_naming_post_init() -> None:
+    def hook(context: Any) -> None:
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    error = _run(_Connection(), _plan("1.0.0", hook))
+
+    assert error.field == "database" and "run post_init" in error.reason
+
+
+def test_a_hook_that_raises_is_still_a_hook_failure() -> None:
+    def hook(context: Any) -> None:
+        raise RuntimeError("seed failed")
+
+    error = _run(_Connection(), _plan("1.0.0", hook))
+
+    assert error.field == "hooks.post_init" and "seed failed" in error.reason
+
+
+def test_a_dropped_connection_while_recording_the_version_is_not_blamed_on_the_hook() -> None:
+    ran: list[object] = []
+
+    error = _run(_Connection(fail_on="INSERT INTO addons "), _plan("1.0.0", ran.append))
+
+    assert ran  # the hook did run and succeeded
+    assert error.field == "database" and "record the installed version" in error.reason
+    assert "post_init for version" not in error.reason
+
+
+def test_a_sql_error_while_recording_the_version_is_not_blamed_on_the_hook_or_the_database() -> (
+    None
+):
+    connection = _Connection(fail_on="INSERT INTO addons ", error=_SQL_ERROR)
+
+    error = _run(connection, _plan("1.0.0", lambda context: None))
+
+    assert error.field not in {"database", "hooks.post_init"}
+    assert "record the installed version" in error.reason and "UndefinedTable" in error.reason
+
+
+def test_a_sql_error_taking_the_lock_is_not_reported_as_a_database_outage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        install.psycopg,
+        "connect",
+        lambda *a, **k: _Connection(fail_on="pg_advisory_lock", error=_SQL_ERROR),
+    )
+
+    with pytest.raises(AddonInstallError) as caught:
+        install._install_sync("postgresql://x/y", [_plan("1.0.0")])
+
+    assert caught.value.field != "database" and "take the install lock" in caught.value.reason
+
+
+def test_a_hook_that_returns_a_coroutine_is_a_failure_not_a_recorded_install() -> None:
+    async def work() -> None: ...
+
+    def hook(context: Any) -> Any:
+        return work()  # a decorator that hides the coroutine function from inspection
+
+    error = _run(_Connection(), _plan("1.0.0", hook))
+
+    assert error.field == "hooks.post_init" and "coroutine" in error.reason

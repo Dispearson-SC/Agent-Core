@@ -150,8 +150,19 @@ def test_the_addons_migration_creates_the_install_state_and_never_touches_audit(
         "async def post_init(context):\n    pass\n",
         "import functools\nasync def _inner(context):\n    pass\n"
         "post_init = functools.partial(_inner)\n",
+        "import functools\nasync def _inner(context):\n    pass\n"
+        "post_init = functools.partial(functools.partial(_inner))\n",
+        "class Hook:\n    async def __call__(self, context):\n        pass\npost_init = Hook()\n",
+        "import functools\nclass Hook:\n    async def __call__(self, context):\n        pass\n"
+        "post_init = functools.partial(Hook())\n",
     ],
-    ids=["async-def", "partial-of-async"],
+    ids=[
+        "async-def",
+        "partial-of-async",
+        "nested-partial",
+        "async-callable-object",
+        "partial-of-object",
+    ],
 )
 def test_an_async_post_init_is_refused_at_load_instead_of_recorded_without_running(
     tmp_path: Path, hooks: str
