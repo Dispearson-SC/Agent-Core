@@ -17,7 +17,7 @@ def test_the_defaults_are_neutral() -> None:
 
     assert s.session_header == "X-Agent-Session" and s.agent_header == "X-Agent-Id"
     assert s.tenant_header == "X-Agent-Tenant" and s.subject_header == ""
-    assert s.idempotency_header == "Idempotency-Key" and s.warning_header == "X-Warning"
+    assert s.idempotency_header == "Idempotency-Key" and s.warning_header == "X-Agent-Warning"
     assert s.peer_session_prefix == "" and s.default_row_limit == 20
     assert (s.timeout_seconds, s.connect_timeout_seconds) == (10.0, 3.0)
 

@@ -166,7 +166,7 @@ def test_an_unconfigured_tool_returns_the_body_untouched() -> None:
 
 def test_the_warning_header_is_surfaced_to_the_model() -> None:
     backend = Backend([{"text": "good"}])
-    backend.headers = {"X-Warning": "memory degraded"}
+    backend.headers = {"X-Agent-Warning": "memory degraded"}
     toolset = _toolset(backend)
 
     degraded = _run(toolset, "recall_reviews", query="q")

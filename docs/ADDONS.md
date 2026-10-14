@@ -257,6 +257,96 @@ integer bounds with a fraction round inward (`minimum: 1.5` -> 2). The library l
 boundary scan forbids the import routes); an example manifest is
 `Core/tests/fixtures/http_bridge/example_tools.yaml`.
 
+### Tools from the backend's OpenAPI document (D85)
+
+Instead of a hand-written `tools.yaml`, a consumer can let the bridge read the backend's own OpenAPI
+3.x document and build the SAME tools from it. Only operations marked `x-agent-tool: true` become
+tools; the model sees nothing else.
+
+```python
+def build_toolset(settings):
+    here = Path(__file__).resolve().parent.parent
+    return build_bridge_toolset(
+        settings,
+        openapi=f"{settings['base_url']}/openapi.json",   # an http(s) URL (fetched ONCE, now), a file path or a dict
+        overlay=here / "overlay.yaml",                    # optional manual manifest, see below
+        expect=["get_item", "reserve_item"],              # optional: these tools must exist
+    )
+```
+
+Exactly one of `manifest=` (the YAML above, still the fallback for a backend without OpenAPI) and
+`openapi=` is passed. The marks, all on the operation:
+
+| Mark | Meaning | Default |
+|---|---|---|
+| `x-agent-tool: true` | the operation is a tool (a non-boolean is an error) | not a tool |
+| `x-agent-effect: read\|write` | replay `safe` / `interrupted` | GET -> read, other methods -> write |
+| `x-agent-name` | tool name (`^[a-z][a-z0-9_]*$`) | `operationId` |
+| `x-agent-description` | text the model reads | `summary`, then `description` |
+| `x-agent-fields: [..]` | the model-visible projection (`response.pick`) | the whole reply |
+| `x-agent-rows-key`, `x-agent-row-limit` | rows under this key; rows returned | body is the list; `default_row_limit` |
+| `x-agent-replay: safe\|interrupted` | replay after a crash | from the effect |
+| `x-agent-context: [session, agent, tenant, subject]` | identities sent as headers | `session, agent, tenant` |
+| `x-agent-warning: true` | surface the warning header | off |
+| `x-agent-idempotency: [arg, ..]` or `true` (all arguments) | what keys the `Idempotency-Key` of a write | none |
+
+Arguments come from `parameters` (path-item, then operation level) and from a flat
+`application/json` object `requestBody` (each property is a body argument). Types, `enum`,
+`minimum`/`maximum`, `default` and `required` are read from the schema; local `$ref`s are followed,
+`type: [X, "null"]` and `anyOf: [X, null]` are an optional X. Header parameters are skipped (the bridge
+sends the identity headers, never the model). Everything else is refused at startup, naming the
+operation (`GET /things (the_op)`): remote `$ref`s, cookie parameters, `oneOf`/`anyOf` with several
+real alternatives, exclusive bounds, a body that is not a flat JSON object, a schema without a type,
+duplicate tool names, no marked operation at all, and `expect=` names the document does not provide.
+A backend that drops or breaks a marked operation therefore stops the deployment instead of the
+conversation.
+
+The overlay is a manual manifest (`tools:`, optional `defaults:` and `api_prefix:`; a file or a dict).
+An entry named like a generated tool PATCHES it (`arguments` and `response` merge key by key, other
+fields replace); `operation: "GET /items/{item_id}"` pins the operation behind the tool and fails
+the startup when the document moved it. An entry with no twin must be a complete manual tool (its
+route gets the overlay's `api_prefix`); a partial entry that matches nothing is an error listing what
+the document does mark.
+
+### Vertical internal API conventions
+
+What a vertical backend does so the bridge can drive it without per-vertical code. Every item is a
+convention the bridge defaults to, and each header name is a setting.
+
+- Path prefix `/internal/v1`: the agent-facing API, separate from the public one, not exposed
+  outside the network. The OpenAPI paths carry the prefix (the bridge calls them as written).
+- Context headers `X-Agent-Session`, `X-Agent-Id`, `X-Agent-Tenant` (and `subject_header`, off by
+  default), sent per `x-agent-context`. The backend trusts them only from the agent; a vertical with
+  existing names (`X-Glazed-*`) sets `session_header` and friends in its addon settings.
+- `Idempotency-Key` on writes: a deterministic key (session + the keyed arguments) so a retried call
+  does not create a second row; the backend stores the first result under the key.
+- Errors as `application/problem+json` (RFC 9457): `type`, `title`, `status`, `detail`. The bridge
+  returns `{error, status, problem}` to the model, so `detail` is what the model can say.
+- `X-Agent-Warning` response header (`warning_header`) for a degraded answer ("memory unavailable");
+  a tool with `x-agent-warning: true` shows it to the model as `warning`.
+- Row limits: a list answers `{items: [...], total: n}` (or a bare list), the backend caps it, and
+  the tool's `x-agent-rows-key` / `x-agent-row-limit` bound what the model reads.
+- Marks, not magic: a route becomes a tool only when its author writes `x-agent-tool` on it. With
+  FastAPI:
+
+```python
+@router.get(
+    "/internal/v1/items/{item_id}",
+    operation_id="get_item",
+    summary="One item by id.",
+    openapi_extra={"x-agent-tool": True, "x-agent-fields": ["id", "name", "price"]},
+)
+def get_item(item_id: str) -> Item: ...
+
+@router.post(
+    "/internal/v1/reservations",
+    operation_id="reserve_item",
+    summary="Reserve an item for the caller.",
+    openapi_extra={"x-agent-tool": True, "x-agent-idempotency": ["item_id", "slot"]},
+)
+def reserve_item(body: Reservation, idempotency_key: str = Header(alias="Idempotency-Key")) -> Created: ...
+```
+
 ## Migrations and `post_init`
 
 ```yaml

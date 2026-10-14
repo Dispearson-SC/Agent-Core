@@ -33,7 +33,7 @@ class BridgeSettings:
     subject_header: str = ""
     idempotency_header: str = "Idempotency-Key"
     # The response header whose value is surfaced to the model (a tool opts in with `warning`).
-    warning_header: str = "X-Warning"
+    warning_header: str = "X-Agent-Warning"
     # A peer session id is `<prefix><asker id><separator><suffix>`; with a prefix set, the session
     # header carries the ASKING session's id. Empty = ids are sent as they are.
     peer_session_prefix: str = ""

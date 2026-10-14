@@ -3057,3 +3057,37 @@ decision 2026-10-13) and are described by `addon.yaml`.
   (`minimum` up, `maximum` down) both when clamping and in the schema; an integer range with no
   integer in it is a manifest error. A `number` keeps fractional bounds. (5) Tests cover number,
   boolean, array and enum arguments.
+
+## D85 - The bridge reads the backend's OpenAPI document (Phase 3, G1b)
+
+- **Why.** The backend already describes its internal API; a hand-kept `tools.yaml` drifts from it.
+  Contract A (agent -> vertical internal API) is therefore OpenAPI-driven with the manual manifest as
+  fallback and overlay. MCP for third parties and gRPC stay out (D83 analysis).
+- **Shape.** `http_bridge/openapi.py`: `load_openapi_manifest(source, *, overlay, expect, timeout,
+  transport) -> BridgeManifest`. It builds the same mapping the YAML loader builds and enters
+  `parse_bridge_manifest`, so defaults, validation, builder, client and replay are untouched. Only
+  `x-agent-tool: true` operations are tools. Source: a dict, a `.json`/`.yaml` path, or an http(s) URL
+  fetched once at build time with `timeout_seconds` (no redirects followed, other schemes refused).
+- **Consumer API.** `build_bridge_toolset(settings, *, manifest=None, openapi=None, overlay=None,
+  expect=(), transport=None)`. Exactly one of `manifest`/`openapi`; `overlay` needs `openapi`;
+  `expect` also works for a manifest. Rejected: a positional `manifest_path` first (it cannot be
+  optional before required `settings`), and a separate `build_openapi_toolset` (two entry points to
+  keep in step).
+- **Mapping.** Marks listed in ADDONS.md. `x-agent-warning` and `x-agent-idempotency` are additions
+  to the requested set (the manifest needs both; a write defaults to NO idempotency key rather than a
+  key over all arguments, which would dedupe two legitimate identical writes in one session).
+  Header parameters are skipped, never required of the model; everything the mapping cannot express
+  faithfully is an error rather than a wider tool (remote `$ref`, cookies, several-alternative
+  `oneOf`/`anyOf`, exclusive bounds, non-flat or non-JSON bodies, no type).
+- **Contract check.** Startup failures (`OpenApiContractError`, a `BridgeManifestError`) name the
+  operation as `METHOD path (operationId)`: unmappable operation, duplicate tool names (both
+  operations named), no marked operation, an `expect=` tool the document does not mark, an overlay
+  patch matching no marked operation (the marked tools are listed), an overlay `operation:` pin that
+  no longer matches. Detecting an *incompatible change* of an operation relies on the pin and on
+  `expect`; the bridge keeps no baseline of earlier documents.
+- **Overlay.** Same-name entry patches (arguments/response merged by key, other fields replaced);
+  no-twin entry must be complete and takes the overlay `api_prefix`; the generated routes are used as
+  written (the document's paths already carry `/internal/v1`).
+- **Default warning header** is now `X-Agent-Warning` (was `X-Warning`) to match the documented
+  convention; a vertical with another name sets `warning_header`.
+

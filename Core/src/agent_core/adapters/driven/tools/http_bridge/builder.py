@@ -10,7 +10,8 @@ THE CONSUMER API
         def build_toolset(settings):
             return build_bridge_toolset(settings, manifest=HERE.parent / "tools.yaml")
 
-    and gets a `FunctionToolset` with one tool per manifest entry. `settings` is the consumer
+    and gets a `FunctionToolset` with one tool per manifest entry (or, with `openapi=...`, per
+    `x-agent-tool` operation of the backend's OpenAPI document, D85). `settings` is the consumer
     addon's own validated settings (the loader hands them to a one-parameter `build_toolset`,
     D84); a `BridgeSettings` is accepted too. The environment is never read.
 
@@ -26,7 +27,7 @@ WHAT EACH TOOL DOES
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -38,9 +39,14 @@ from pydantic_ai.toolsets import FunctionToolset
 from agent_core.adapters.driven.tools.http_bridge.client import Reply, call_backend
 from agent_core.adapters.driven.tools.http_bridge.manifest import (
     ArgumentSpec,
+    BridgeManifestError,
     ResponseSpec,
     ToolSpec,
     load_bridge_manifest,
+)
+from agent_core.adapters.driven.tools.http_bridge.openapi import (
+    OpenApiSource,
+    load_openapi_manifest,
 )
 from agent_core.adapters.driven.tools.http_bridge.settings import BridgeSettings
 from agent_core.domain.tool_replay import safe_tool_metadata
@@ -257,17 +263,41 @@ def _make_tool(
 def build_bridge_toolset(
     settings: BridgeSettings | Mapping[str, Any],
     *,
-    manifest: Path,
+    manifest: Path | None = None,
+    openapi: OpenApiSource | None = None,
+    overlay: Path | Mapping[str, Any] | None = None,
+    expect: Sequence[str] = (),
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> FunctionToolset[Any]:
-    """One tool per manifest entry. Raises `BridgeManifestError` / `ValueError` at build time.
+    """One tool per manifest entry or per `x-agent-tool` operation (D85).
 
-    `settings` is a `BridgeSettings` or the consumer addon's validated settings mapping (its bridge
-    keys are used, its other keys ignored).
+    Exactly one source: `manifest` (a YAML file) or `openapi` (a document mapping, a file path or an
+    http(s) URL fetched once now). `overlay` (a manual manifest, file or mapping) patches or extends
+    the generated tools and needs `openapi`. `expect` lists tool names that must exist, so a backend
+    that dropped an operation stops the startup instead of one tool. `settings` is a
+    `BridgeSettings` or the consumer addon's validated mapping (its bridge keys are used).
+    Raises `BridgeManifestError` / `OpenApiContractError` / `ValueError` at build time.
     """
-    loaded = load_bridge_manifest(manifest)
+    if (manifest is None) == (openapi is None):
+        raise ValueError("pass exactly one of manifest= (a YAML file) or openapi= (a document)")
+    if overlay is not None and openapi is None:
+        raise ValueError("overlay= applies to an openapi= document, not to a manifest file")
     resolved = (
         settings if isinstance(settings, BridgeSettings) else BridgeSettings.from_consumer(settings)
     )
+    if openapi is not None:
+        loaded = load_openapi_manifest(
+            openapi,
+            overlay=overlay,
+            expect=expect,
+            timeout=resolved.timeout_seconds,
+            transport=transport if isinstance(transport, httpx.BaseTransport) else None,
+        )
+    else:
+        assert manifest is not None
+        loaded = load_bridge_manifest(manifest)
+        missing = [name for name in expect if name not in {t.name for t in loaded.tools}]
+        if missing:
+            raise BridgeManifestError(f"{manifest}: expected tool {missing[0]!r} is not declared")
     prefix = loaded.api_prefix.rstrip("/")
     return FunctionToolset([_make_tool(t, prefix, resolved, transport) for t in loaded.tools])

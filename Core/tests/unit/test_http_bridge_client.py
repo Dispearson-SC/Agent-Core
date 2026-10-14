@@ -158,7 +158,7 @@ def test_no_idempotency_header_without_parts_and_its_name_is_a_setting() -> None
 
 def test_the_warning_header_is_returned_beside_the_data() -> None:
     backend = Backend(body={"rows": []})
-    backend.headers = {"X-Warning": "memory degraded"}
+    backend.headers = {"X-Agent-Warning": "memory degraded"}
 
     reply = _call(backend, want_warning=True)
 

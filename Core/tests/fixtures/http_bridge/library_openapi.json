@@ -1,0 +1,99 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Library service", "version": "1.0.0"},
+  "paths": {
+    "/internal/v1/books": {
+      "get": {
+        "operationId": "list_books",
+        "summary": "List books, newest first.",
+        "x-agent-tool": true,
+        "x-agent-fields": ["id", "title", "author"],
+        "x-agent-rows-key": "items",
+        "x-agent-row-limit": 3,
+        "parameters": [
+          {"name": "limit", "in": "query", "description": "Rows wanted.",
+           "schema": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10}},
+          {"name": "genre", "in": "query", "schema": {"$ref": "#/components/schemas/Genre"}},
+          {"name": "X-Agent-Tenant", "in": "header", "required": true, "schema": {"type": "string"}}
+        ]
+      }
+    },
+    "/internal/v1/books/{book_id}": {
+      "parameters": [{"$ref": "#/components/parameters/BookId"}],
+      "get": {
+        "operationId": "books_get_one_internal_v1_books__book_id__get",
+        "summary": "Get one book",
+        "description": "One book by id, with its year.",
+        "x-agent-tool": true,
+        "x-agent-name": "get_book",
+        "x-agent-fields": ["id", "title", "author", "year"]
+      },
+      "delete": {
+        "operationId": "cancel_book",
+        "summary": "Withdraw a book from the catalogue.",
+        "x-agent-tool": true
+      }
+    },
+    "/internal/v1/reviews": {
+      "get": {
+        "operationId": "recall_reviews",
+        "summary": "Reviews of a book; the service warns when degraded.",
+        "x-agent-tool": true,
+        "x-agent-warning": true,
+        "x-agent-context": ["session", "agent"],
+        "parameters": [
+          {"name": "query", "in": "query", "required": true, "schema": {"type": "string"}}
+        ]
+      }
+    },
+    "/internal/v1/reservations": {
+      "post": {
+        "operationId": "reserve_book",
+        "summary": "Reserve a book for the caller.",
+        "x-agent-tool": true,
+        "x-agent-idempotency": ["book_id", "slot"],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Reservation"}}}
+        }
+      }
+    },
+    "/internal/v1/search": {
+      "post": {
+        "operationId": "search_books",
+        "summary": "Search by free text (a POST that only reads).",
+        "x-agent-tool": true,
+        "x-agent-effect": "read",
+        "requestBody": {
+          "content": {"application/json": {"schema": {
+            "type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}
+          }}}
+        }
+      }
+    },
+    "/internal/v1/admin/stats": {
+      "get": {"operationId": "admin_stats", "summary": "Internal statistics (not for the agent)."}
+    }
+  },
+  "components": {
+    "parameters": {
+      "BookId": {"name": "book_id", "in": "path", "required": true, "schema": {"type": "string"}}
+    },
+    "schemas": {
+      "Genre": {"type": "string", "enum": ["fiction", "science", "history"]},
+      "Reservation": {
+        "type": "object",
+        "required": ["book_id", "slot"],
+        "properties": {
+          "book_id": {"type": "string"},
+          "slot": {"type": "string", "enum": ["am", "pm"]},
+          "note": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": ""},
+          "notify": {"type": "boolean", "description": "Send a confirmation."},
+          "seats": {"type": "integer", "minimum": 1, "maximum": 6, "default": 1},
+          "ratio": {"type": "number"},
+          "tags": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}
