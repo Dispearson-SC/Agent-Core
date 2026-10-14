@@ -2715,3 +2715,17 @@ decision 2026-10-13) and are described by `addon.yaml`.
   manifest all stop startup. A value is never echoed. The resolved settings are read-only
   (`MappingProxyType`, tuples) so an addon cannot change another's.
 
+
+## D73 - Slice 19 advisories: the journal hook never lets a write replace a decided outcome (A1b)
+
+- **Journal hook.** `_record_end` now handles any `Exception` from the journal write, not only
+  `ToolJournalUnavailableError`. The adapter deliberately lets a failure the database answered (a
+  deadlock, a cancelled statement) propagate as itself (R3-operationalerror-breadth), so such an
+  error used to escape the hook and replace the `ApprovalRequired`/`CallDeferred` it was recording
+  (the turn failed instead of suspending) or a tool's result. Same logging as before (ERROR token
+  `tool_journal_abandon_failed` for an abandon, WARNING for a finish); `BaseException` still
+  passes through untouched.
+- **Settings.** A setting that declares `choices` and `minimum`/`maximum` now holds both: a
+  `Literal` cannot carry bounds, so a choice outside the declared bounds is a `ManifestError` on
+  `settings.<key>.choices`. Rejected: a runtime validator on top of the `Literal` (it would accept
+  a manifest whose declared choices can never all be valid).

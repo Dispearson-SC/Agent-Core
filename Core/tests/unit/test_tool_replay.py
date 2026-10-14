@@ -17,6 +17,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from psycopg import OperationalError
 from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.messages import (
     ModelMessage,
@@ -377,6 +378,46 @@ def test_a_failed_abandon_keeps_the_suspension_and_is_reported_with_its_ids(
     assert record.levelname == "ERROR"
     message = record.getMessage()
     assert str(TURN) in message and "risky" in message and "j1:r1:call-1" in message
+
+
+class _AbandonRaisesOther(FakeToolJournal):
+    """A store that answered with a failure that is not "unreachable" (a deadlock, say): the
+    adapter lets those propagate as themselves (R3-operationalerror-breadth)."""
+
+    async def abandon(self, turn_id: TurnId, tool_call_id: str) -> None:
+        raise OperationalError("deadlock detected")
+
+
+class _FinishRaisesOther(FakeToolJournal):
+    async def finish(self, turn_id: TurnId, tool_call_id: str) -> None:
+        raise OperationalError("deadlock detected")
+
+
+def test_any_abandon_failure_leaves_the_deferral_standing_and_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R3-abandon-reachable-error-drops-deferral: an error from the journal that is not the
+    "unreachable" kind used to escape the hook and replace the deferral, so the turn failed instead
+    of suspending for the approval."""
+    journal = _AbandonRaisesOther()
+    built = _deferring_runner(journal, [True])
+
+    with caplog.at_level("WARNING"):
+        outcome = asyncio.run(built.run(TURN, REQUEST, PROFILE, None))
+
+    assert outcome.pending
+    assert journal.rows[(str(TURN), "j1:r1:call-1")][1] is ToolRunState.STARTED
+    assert [r for r in caplog.records if "tool_journal_abandon_failed" in r.getMessage()]
+
+
+def test_any_finish_failure_after_the_tool_ran_keeps_the_result() -> None:
+    tools = _Tools()
+    journal = _FinishRaisesOther()
+    built = _runner(tools, journal, _send())
+
+    _run(built)
+
+    assert tools.runs == ["send"] and built.returned == ["sent"]
 
 
 # --- the built-in toolsets declare what they are -----------------------------------------------

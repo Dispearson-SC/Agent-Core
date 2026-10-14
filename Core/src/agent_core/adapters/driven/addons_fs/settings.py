@@ -147,6 +147,13 @@ def _compile_entry(addon: str, path: tuple[str, ...], value: Any) -> _Node:
                 element.validate_python(choice)
             except ValidationError:
                 raise bad("choices", f"every choice must be a {kind}") from None
+            # A `Literal` cannot carry bounds, so both constraints are held by refusing a choice
+            # the bounds would reject: no declared bound is silently dropped (D73).
+            if kind == "int" and (
+                (minimum is not None and choice < minimum)
+                or (maximum is not None and choice > maximum)
+            ):
+                raise bad("choices", f"every choice must lie within minimum and maximum: {choice}")
 
     if kind == "list":
         assert item_kind is not None

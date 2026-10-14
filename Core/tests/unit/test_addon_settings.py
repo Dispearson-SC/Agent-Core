@@ -249,6 +249,16 @@ def test_the_environment_variables_of_other_settings_are_not_ours() -> None:
         ("settings:\n  n: {type: list, items: object}\n", "settings.n.items"),
         ("settings:\n  n: {type: object}\n", "settings.n.fields"),
         ("settings:\n  n: {type: int, choices: [1, x]}\n", "settings.n.choices"),
+        # R3-choices-drop-bounds: a bound is not silently dropped when `choices` is declared, so
+        # a choice outside it is a contradiction in the manifest.
+        (
+            "settings:\n  n: {type: int, choices: [1, 5, 20], minimum: 2, maximum: 10}\n",
+            "settings.n.choices",
+        ),
+        (
+            "settings:\n  n: {type: int, choices: [5, 20], default: 5, maximum: 10}\n",
+            "settings.n.choices",
+        ),
         ("settings:\n  n: []\n", "settings.n"),
         ("settings:\n  n: null\n", "settings.n"),
         ("settings:\n  Big: 1\n", "settings.Big"),
@@ -263,6 +273,15 @@ def test_a_bad_schema_is_a_manifest_error_naming_the_addon_and_the_setting(
         resolve_settings([_m(body)], config={}, env={})
 
     assert caught.value.addon == "demo" and caught.value.field == field, str(caught.value)
+
+
+def test_choices_and_bounds_both_apply() -> None:
+    body = "settings:\n  n: {type: int, choices: [3, 5, 7], default: 5, minimum: 2, maximum: 10}\n"
+
+    assert _resolve(body)["n"] == 5
+    assert _resolve(body, config={"demo": {"n": 7}})["n"] == 7
+    with pytest.raises(AddonSettingsError):
+        _resolve(body, config={"demo": {"n": 4}})  # in bounds, not a choice
 
 
 # --- the deployment file -------------------------------------------------------------------------

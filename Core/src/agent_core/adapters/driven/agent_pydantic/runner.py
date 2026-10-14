@@ -170,7 +170,7 @@ from agent_core.ports.event_publisher import EventPublisher
 from agent_core.ports.knowledge_base import KnowledgeBase
 from agent_core.ports.media_store import SignedMedia
 from agent_core.ports.model_gateway import ModelGateway
-from agent_core.ports.tool_journal import ToolJournal, ToolJournalUnavailableError, ToolRunState
+from agent_core.ports.tool_journal import ToolJournal, ToolRunState
 from agent_core.ports.tool_policy import ToolPolicy
 from agent_core.ports.tool_provider import ToolProvider
 
@@ -718,11 +718,16 @@ class PolicyEnforcement(AbstractCapability[Any]):
         of running it. It is logged at ERROR under the stable token `tool_journal_abandon_failed`
         so an alert can key on it; the rows it leaves are the unfinished `tool_executions` rows
         OPERATIONS tells the operator to look at. The codebase has no metrics sink, so the log
-        line is the signal (D69).
+        line is the signal (D69). ANY `Exception` from the write is handled the same way (D73): the
+        outcome being recorded is already decided and must propagate.
         """
         try:
             await write(self._turn_id, key)
-        except ToolJournalUnavailableError as error:
+        except Exception as error:  # noqa: BLE001 - the outcome being recorded is already decided
+            # Not only `ToolJournalUnavailableError`: the adapter lets a failure the database
+            # answered (a deadlock, a cancelled statement) propagate as itself, and any error
+            # here would replace the deferral or the tool's result that is already decided
+            # (R3-abandon-reachable-error-drops-deferral, D73).
             if action == "abandon":
                 _LOG.error(
                     "tool_journal_abandon_failed: turn=%s tool=%s key=%s; the deferred call "
