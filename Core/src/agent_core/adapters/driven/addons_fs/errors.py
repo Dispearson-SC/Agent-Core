@@ -4,6 +4,7 @@ from __future__ import annotations
 
 __all__ = [
     "AddonError",
+    "AddonInstallError",
     "AddonRegistrationError",
     "AddonResolutionError",
     "AddonSettingsError",
@@ -56,3 +57,15 @@ class AddonRegistrationError(AddonError):
     """
 
     _kind = "extension point"
+
+
+class AddonInstallError(AddonError):
+    """An addon's install state cannot be brought up to date (A7, D80).
+
+    Raised at startup, after the schema is in place: a versioned migration fails, a hook fails or
+    cannot be found, or the recorded version is newer than the manifest's (a downgrade). The
+    message names the addon and the file or hook, and what was left done, because a half-installed
+    addon is the one state an operator has to reason about.
+    """
+
+    _kind = "install step"

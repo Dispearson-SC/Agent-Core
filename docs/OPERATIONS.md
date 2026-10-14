@@ -551,6 +551,44 @@ exception text goes to the log, not to the model); the original tool's own error
 even when the wrapper retries `original()` and lets the last failure through (D79). The audit key
 `_wrapped_by` is set by the runner only: a value the model sends under that name is dropped.
 
+### Install state: versioned migrations and `post_init` (A7, D80)
+
+```yaml
+# addons/shop/addon.yaml
+version: 1.1.0
+migrations: migrations/         # 0001_items.sql, 0002_label.sql: applied in name order
+hooks:
+  post_init: hooks:post_init    # addons/shop/hooks.py, function post_init(context)
+```
+
+After Core's schema is applied (migration `0044_addons` creates the `addons` and `addon_migrations`
+tables) and before policy is reconciled, startup brings each enabled addon, dependencies first, up
+to its manifest:
+
+1. Every `migrations/*.sql` file not yet recorded runs, in file-name order, each in its own
+   transaction together with its record. A file may hold several statements. Name files with a
+   zero-padded prefix; never edit a file that already ran (it is not run again, and nothing
+   compares it): add a new one.
+2. If the addon is new or its manifest `version` differs from the recorded one, `post_init(context)`
+   runs and the version is recorded in one transaction. `context` has `name`, `version`,
+   `previous_version` (`None` on first install, the old version on an upgrade), `settings` and
+   `connection` (inside that transaction: write through it, do not commit or close it). A hook must
+   be safe to run twice, because a failure re-runs it on the next start.
+
+Startup stops, naming the addon and the file or hook, when: a migration file fails (that file is
+rolled back, the earlier ones stay, the next start resumes there); `post_init` raises, is missing
+or does not import (the version is not recorded); or the database holds a NEWER version than the
+manifest (a downgrade: nothing runs for any addon, deploy the installed version or restore a
+backup). Two processes starting together do each step once (a session advisory lock; the second
+waits and finds it done). With no addon enabled nothing but the empty tables exists.
+
+Removing an addon from `AGENT_CORE_ADDONS` leaves its rows and every table its migrations made; if
+it returns it continues where it stopped. Uninstalling is deliberately manual (drop its tables, then
+`DELETE FROM addon_migrations WHERE addon = 'x'; DELETE FROM addons WHERE name = 'x';`).
+`python -m agent_core addons list` is read-only: for each installed or enabled addon it prints the
+recorded and manifest versions and what the next start does (current, installs, upgrades, refuses,
+or kept because not enabled). Exit code 0, or 2 when the database cannot be read.
+
 ### Profile inheritance and slots (A5, D76)
 
 Any profile file (Core's or an addon's) may build on another:

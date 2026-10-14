@@ -113,6 +113,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Protocol
 
+from agent_core.adapters.driving.cli.addons import add_addons_parser, run_addons
 from agent_core.adapters.driving.cli.console import Console
 from agent_core.adapters.driving.cli.peer_cache import add_peer_cache_parser, run_peer_cache
 from agent_core.adapters.driving.cli.preflight import preflight
@@ -848,6 +849,7 @@ def _argument_parser() -> argparse.ArgumentParser:
     )
 
     add_peer_cache_parser(subcommands)
+    add_addons_parser(subcommands)
 
     console = subcommands.add_parser(
         "console",
@@ -950,6 +952,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
     if arguments.command == "peer-cache":
         raise SystemExit(run_peer_cache(arguments, Settings.from_env()))
+    if arguments.command == "addons":
+        raise SystemExit(run_addons(arguments, Settings.from_env()))
     if arguments.command == "stranded-turns":
         raise SystemExit(run_stranded_check(Settings.from_env()))
     serve()

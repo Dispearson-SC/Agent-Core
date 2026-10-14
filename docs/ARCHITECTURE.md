@@ -97,7 +97,7 @@ Core/
         context/           # ContextEngine: the compaction ladder
         skills_fs/         # SkillRegistry over SKILL.md files
         profiles_fs/       # reads and parses profile YAML; the domain never does
-        addons_fs/         # addon.yaml manifests, resolution, settings (Phase 2, D70-D72)
+        addons_fs/         # addon.yaml manifests, resolution, settings, install state (Phase 2, D70-D80)
         mcp/               # MCPToolset composed into ToolProvider
         human/             # HumanGateway: channel + evidence
         media_fs/          # MediaStore
@@ -140,6 +140,12 @@ go to `load_profiles`, channels to `build_channel_registry` as pull channels. An
 only what its manifest `provides` declares; a name collision (between addons or with Core), an
 undeclared contribution, or a rule or audit entry about a tool the addon does not own stops startup
 with an error naming the addon. With no addon enabled each seam receives the value it always had.
+Install state (A7, D80) is the last step and the only one that writes: after Core's migrations,
+`start_container` calls `install_addons`, which runs each enabled addon's `migrations/*.sql` once
+(recorded in `addon_migrations`, one transaction per file) and its `post_init` hook once per new or
+bumped version, then records the version in `addons`; a session advisory lock makes concurrent
+starts do each step once, and a recorded version newer than the manifest refuses startup. It never
+uninstalls. `python -m agent_core addons list` reads the same tables.
 Authoring: see `docs/OPERATIONS.md`, "Addons", and the samples in `addons/sample_*`.
 
 Profile inheritance and named slots (A5, D76) are resolved by `load_profiles` before a profile

@@ -2895,3 +2895,41 @@ decision 2026-10-13) and are described by `addon.yaml`.
   declared wrapper is never silently skipped. Registration still requires the addon's own toolsets
   to be function toolsets and refuses wrapping an unknown tool, naming the addon (D78); MCP tools
   keep their `mcp_<server>_` names, which no manifest can name.
+
+## D80 - Install state: migration files and a hook per addon, recorded under an advisory lock (A7)
+
+- **Tables (migration `0044_addons`).** `addons (name PK, version, installed_at, upgraded_at)` is
+  the `ir.module.module` analogue; `addon_migrations (addon, file, version, applied_at; PK
+  (addon, file))` records each addon migration file once, with the addon version it ran under.
+  Additive, never read by Core's turn path. With no addon enabled both stay empty and nothing
+  else changes.
+- **Versioned migrations are a flat, ordered directory.** `migrations: migrations/` holds
+  `*.sql` files that run in file-name order, each in its own transaction with its record; recorded
+  per addon and FILE, not per version directory as Odoo's `migrations/<version>/`. A file added
+  without a version bump still runs. Rejected: version-named subdirectories (two ways to order
+  the same files, and a bump would be required to ship a fix). Open, reversible: record a checksum
+  and refuse an edited, already-applied file (today it is documented, not enforced).
+- **`post_init` is the install and the upgrade hook.** `hooks.post_init: module:function` is
+  `function(context)` with `previous_version` (`None` on first install). It runs when the recorded
+  version differs from the manifest's, in the same transaction as the version record and through
+  the same connection, so its database writes and the version commit together. Its Python side
+  effects cannot be rolled back: a hook must be safe to repeat, because a failure re-runs it.
+  Rejected: separate `post_init` and `post_upgrade` hooks (one callable with the previous version
+  covers both with less surface).
+- **Failure leaves the failed step undone and retryable.** A failing file rolls back alone and the
+  files before it stay applied; startup stops with an `AddonInstallError` naming addon and file.
+  A failing hook leaves the version unrecorded. Chosen over all-or-nothing per addon because DDL
+  that already committed cannot be un-run by a later failure, and pretending otherwise would hide
+  it.
+- **Downgrade refuses startup, for the whole pass, before anything runs.** A recorded version newer
+  than the manifest's means old code over a newer schema. Hooks that cannot be found or imported
+  also fail before any database work.
+- **One process at a time.** The pass holds `pg_advisory_lock` on its connection and reads the
+  recorded state only after taking it, so two processes starting together each find the other's
+  work done. Core's own migrations take no lock (idempotent SQL); addon files need not be
+  idempotent, hence the lock. Held only by the install pass, released on close.
+- **No uninstall.** Removing an addon from `AGENT_CORE_ADDONS` leaves its rows and tables (a
+  returning addon continues). `python -m agent_core addons list` is the read-only view (current,
+  installs, upgrades, refuses, kept). Uninstalling is a documented manual step: a destructive path
+  nobody asked for is not worth shipping.
+- `PINNED_DBOS_APPLICATION_VERSION` is unchanged: no workflow shape moved.

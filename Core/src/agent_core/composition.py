@@ -170,6 +170,7 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg_pool import ConnectionPool
 
 from agent_core.adapters.driven.addons_fs.errors import AddonRegistrationError
+from agent_core.adapters.driven.addons_fs.install import install_addons
 from agent_core.adapters.driven.addons_fs.loader import ResolvedAddon, load_addons_from_environment
 from agent_core.adapters.driven.addons_fs.registration import (
     EMPTY as NO_ADDON_CONTRIBUTIONS,
@@ -2381,10 +2382,10 @@ async def start_container(
         upgrading. Present and empty, it is a reviewer saying "no rules", and everything is
         revoked.
 
-    ORDER: DATABASES, THEN SCHEMA, THEN POLICY, THEN WIRING. Each step needs the previous
-    one to have happened - `policy_rules` is created by migration 0004 and gains its
-    `tenant_id` column in 0012 - and the container is built last so a process never holds a
-    wired container over a database it could not finish preparing.
+    ORDER: DATABASES, THEN SCHEMA, THEN ADDON INSTALL STATE (A7), THEN POLICY, THEN WIRING.
+    Each step needs the previous one to have happened - `policy_rules` is created by migration
+    0004 and gains its `tenant_id` column in 0012 - and the container is built last so a process
+    never holds a wired container over a database it could not finish preparing.
 
     Idempotent end to end, and the second start proves it: `ensure_databases` skips what
     exists, an already-applied migration id is skipped (and every migration's SQL is `IF
@@ -2404,6 +2405,10 @@ async def start_container(
         await apply_all_migrations(resolved.app_conninfo)
     except psycopg.OperationalError as error:
         raise _refused_to_start(resolved, error) from error
+
+    # Phase 2 (A7, D80). The enabled addons' versioned migrations and post_init hooks, after Core's
+    # schema and before anything reads what they set up. A no-op with none enabled.
+    await install_addons(resolved.app_conninfo, resolved.addons)
 
     if resolved.policy_dir.is_dir():
         # Phase 2 (A4): the enabled addons' rules are part of the reviewed set, so the
