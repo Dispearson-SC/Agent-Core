@@ -356,3 +356,25 @@ def test_a_bug_while_reading_the_plan_is_not_swallowed_as_an_unreadable_feed(
 
     with pytest.raises(AttributeError, match="a bug in the driver"):
         asyncio.run(scenario())
+
+
+def test_every_definition_runs_before_the_script_entry_point() -> None:
+    """Slice 38: `python -m evals.routing_cli` executes the module top to bottom, so a function
+    defined after the `__main__` guard does not exist yet when `main` calls it."""
+    import ast
+    from pathlib import Path
+
+    import evals.routing_cli as cli
+
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    guard = next(
+        i
+        for i, node in enumerate(tree.body)
+        if isinstance(node, ast.If) and "__main__" in ast.unparse(node.test)
+    )
+    late = [
+        node.name
+        for node in tree.body[guard + 1 :]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+    assert late == []
