@@ -3311,3 +3311,32 @@ decision 2026-10-13) and are described by `addon.yaml`.
 - **inheritance.py (`_declaring`).** No defect: a test now pins that a wildcard insert lands once down a
   chain that re-declares the slot, including when only the grandparent declares it, in either load
   order (it fails if only the direct parent were consulted).
+
+## D93 - Golden-turn parity with vertical/glazed; slice 30 advisories closed (Phase 3, G6)
+
+- **Golden turns (G6).** `Core/tests/support/glazed_parity.py` scripts ten glazed turns (all eight
+  roles, reads, writes, 404/503 refusals, a peer turn denied, a null optional, two bad enums) with a
+  `FunctionModel`, one fake backend over `httpx.MockTransport`, and a gate that does what
+  `before_tool_execute` does (decide on the validated arguments, write the audit row, then refuse or
+  run). `Core/tests/fixtures/glazed_parity/capture_golden.py` ran them on vertical/glazed (cfecd44, in a
+  throwaway worktree under the system temp dir) and wrote `golden.json`; `test_glazed_golden_turns.py`
+  runs them on the addon build. Compared: tools, tools left by the policy filter, the definitions the
+  model sees, persona, validated arguments, policy outcome, every request (method, path, query,
+  headers incl. `X-Glazed-*` and `Idempotency-Key`, JSON body), the result the model reads, audit rows.
+  Rejected: re-implementing the old tools as fixtures (not the old code), and running the full runner
+  (needs Postgres and DBOS; the gate reproduces its order with both Cores' real `PgToolPolicy` and
+  `PgAuditSink`).
+- **Differences allowed, each asserted on its own.** Accepted: the orchestrator's manager section is
+  `plain_language`'s; a 404/503 refusal carries the backend's reason (D91). Documented in D87: the
+  schema (no `null`/`None` default on optionals, clamps and enums in the schema, no `format: date`).
+  Found and fixed: `classify_text` answered an unknown `kind` with the bridge's message, without the
+  old final period. Found and pinned for a decision (not fixed): F1, the policy and audit arguments no
+  longer contain the defaults the old Python signatures filled in when the model did not send them
+  (`limit`, `category`, `kind`, `date_to`, `impact`); the request still carries them. F2, JSON body
+  keys and query parameters come in another order (same content).
+- **No approval in a glazed turn.** No glazed rule is `needs_approval`, in either build: a write is
+  allowed and creates a pending proposal the manager decides in the backend.
+- **Slice 30 advisories.** `_CheckedFragment` declares `FragmentFile` (mypy checks it against the
+  protocol) and refuses a read in another encoding than the UTF-8 it was checked in; a test runs both
+  consumers (include, slot insert). `clear_openapi_cache` no longer drops a fetch in flight: racing
+  builds wait on a `_Flight`, and the race tests force the overlap with events, not a sleep.
