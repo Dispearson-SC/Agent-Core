@@ -87,6 +87,7 @@ def _check_paths(manifest: AddonManifest, directory: Path) -> None:
         ("provides.profiles", manifest.provides.profiles, True),
         ("provides.fragments", manifest.provides.fragments, True),
         ("provides.policy", manifest.provides.policy, False),
+        ("provides.intents", manifest.provides.intents, False),
         ("migrations", manifest.migrations, True),
     )
     for name, relative, is_directory in declared:

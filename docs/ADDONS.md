@@ -29,6 +29,7 @@ addons/shop/
   toolsets/_common.py   # not declared: a helper the toolsets import (`from ._common import x`)
   wrappers/stamp.py     # provides.wrappers
   routers/keyword.py    # provides.routers: [keyword]
+  routing/plans.yaml    # provides.intents: routing/plans.yaml
   fragments/note.md     # provides.fragments: fragments/
   profiles/clerk.yaml   # provides.profiles: profiles/
   policy/rules.yaml     # provides.policy
@@ -68,6 +69,7 @@ version that is not a version, or a `core` range that is not a range, fails at m
 | `inserts: [{profile, slot, fragment}]` | where your fragment goes in someone else's profile | nothing (uses one of your `fragments`) | your own fragments only; the slot must exist. `profile: "*"` means every profile that declares the slot (D89) |
 | `wrappers: [{tool, wrapper}]` | a wrapper around an existing tool | `wrappers/<wrapper>.py` with `wrap(original, arguments, ctx)` | a tool of Core or of an addon you depend on (directly or not); never your own |
 | `routers: [name]` | a turn router a profile can name in `routing.router` (D95) | `routers/<name>.py` with `route(request)` or `route(request, settings)`, sync or async | names are global; consulted only when `AGENT_CORE_TURN_ROUTING` is on |
+| `intents: path` | intent plans: the read-only tool calls a typed intent runs instead of the model's tool loop (D97) | one YAML file, see "Intent plans" | intent names are global; every step tool must be exported by an enabled toolset, declared `replay: safe` and not one of Core's delegating tools (`ask_peer`, `spawn_subagent`, `request_evidence`, the background tools): a write is refused at registration |
 | `channels: [id]` | pull-mode channel ids a backend can start turns on | nothing (no code) | not an id Core or `AGENT_CORE_PULL_CHANNELS` owns |
 
 A declared directory that is missing or empty is an error, not an empty contribution.

@@ -31,6 +31,13 @@ THE RULE: AN ADDON CONTRIBUTES WHAT ITS MANIFEST `provides` DECLARES, AND NOTHIN
                    `route(request)` (or `route(request, settings)`, sync or async) that reads a
                    plain mapping and answers one (D95). Consulted before the model only when
                    `AGENT_CORE_TURN_ROUTING` is on; see `adapters/driven/routing/addon_router.py`.
+    * intents      `provides.intents: <file>` -> the plans of `domain/intents.py` (D97): which
+                   read-only tools a typed intent runs, under which profile, and how the reply
+                   is written. Every step tool must be a tool some toolset exports, declared
+                   `replay: safe`, and not one of Core's delegating tools (`ask_peer`,
+                   `spawn_subagent`, `request_evidence`, the background tools): a plan naming a
+                   write or an interrupting tool is refused here. Consulted only when
+                   `AGENT_CORE_TURN_ROUTING` is on and a profile opts in (`routing.intents`).
     Every name is global: a collision between addons, or with a built-in, stops startup naming
     the addon (`AddonRegistrationError`). With no addons enabled the result is `EMPTY` and the
     caller does exactly what it did before.
@@ -69,7 +76,9 @@ from agent_core.adapters.driven.profiles_fs.fragments import AddonFragment, Frag
 from agent_core.adapters.driven.routing.addon_router import RouterFunction
 from agent_core.adapters.driven.tools.provider import ToolsetBuilder
 from agent_core.adapters.driven.tools.wrapping import ToolWrapper
+from agent_core.domain.intents import IntentPlan, IntentPlanError, parse_intent_plans
 from agent_core.domain.policy import Effect, PolicyRule
+from agent_core.domain.tool_replay import ReplayPolicy, replay_policy
 
 __all__ = [
     "EMPTY",
@@ -101,6 +110,11 @@ class AddonContributions:
     wrappers: tuple[ToolWrapper, ...] = ()
     # D95. Router name -> its `route` function, the addon's settings already bound.
     routers: Mapping[str, RouterFunction] = field(default_factory=dict)
+    # D97. Intent -> its plan, from the addons' `provides.intents` files.
+    intents: Mapping[str, IntentPlan] = field(default_factory=dict)
+    # D97. Toolset name -> the tools it exports, built-ins and addons alike: what startup checks a
+    # plan's tools against the owning profile's grant with, without building a toolset again.
+    toolset_tools: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
 
 EMPTY: Final = AddonContributions()
@@ -211,7 +225,11 @@ def _identity_of(tool: Any) -> tuple[Any, ...]:
 
 
 def _register_toolsets(
-    addon: ResolvedAddon, known: dict[str, str], tools_owner: dict[str, str]
+    addon: ResolvedAddon,
+    known: dict[str, str],
+    tools_owner: dict[str, str],
+    replay: dict[str, ReplayPolicy],
+    toolset_tools: dict[str, frozenset[str]],
 ) -> tuple[dict[str, ToolsetBuilder], frozenset[str]]:
     owner = addon.manifest.name
     builders: dict[str, ToolsetBuilder] = {}
@@ -266,6 +284,8 @@ def _register_toolsets(
                 )
             tools_owner[tool] = f"addon {owner!r}"
             own_tools.add(tool)
+            replay[tool] = replay_policy(getattr(definition, "metadata", None))
+        toolset_tools[name] = frozenset(built.tools)
         known[name] = f"addon {owner!r}"
         builders[name] = builder
     return builders, frozenset(own_tools)
@@ -479,6 +499,68 @@ def _wrappers_of(
     return tuple(found)
 
 
+# D97. Core's tools that delegate or wait (a peer, a subagent, a person's evidence, background
+# asks):
+# replay-safe because they only defer, but never a plain read, so never a step of an intent plan.
+# Spelled here and checked against their builders by `tests/unit/test_intent_plans.py`.
+INTERRUPTING_TOOLS: Final = frozenset(
+    {
+        "ask_peer",
+        "spawn_subagent",
+        "request_evidence",
+        "peer_list",
+        "peer_status",
+        "peer_message",
+        "peer_stop",
+    }
+)
+
+
+def _intents_of(
+    addon: ResolvedAddon, replay: Mapping[str, ReplayPolicy], taken: dict[str, str]
+) -> dict[str, IntentPlan]:
+    """The addon's `provides.intents` plans, refused when a step names a tool that is unknown, not
+    replay-safe or one of Core's interrupting tools. Intent names are global."""
+    relative = addon.manifest.provides.intents
+    if relative is None:
+        return {}
+    owner = addon.manifest.name
+    try:
+        document = yaml.safe_load((addon.root / relative).read_text(encoding="utf-8"))
+        plans = parse_intent_plans(document, source=relative)
+    except (IntentPlanError, yaml.YAMLError, OSError) as error:
+        raise _refuse(owner, "provides.intents", str(error)) from error
+    for intent, plan in plans.items():
+        if intent in taken:
+            raise _refuse(
+                owner,
+                "provides.intents",
+                f"intent {intent!r} is already planned by {taken[intent]}",
+            )
+        for tool in plan.tools:
+            if tool in INTERRUPTING_TOOLS:
+                raise _refuse(
+                    owner,
+                    "provides.intents",
+                    f"intent {intent!r}: {tool!r} delegates or waits; a plan only reads",
+                )
+            if tool not in replay:
+                raise _refuse(
+                    owner,
+                    "provides.intents",
+                    f"intent {intent!r}: no enabled toolset exports the tool {tool!r}",
+                )
+            if replay[tool] is not ReplayPolicy.SAFE:
+                raise _refuse(
+                    owner,
+                    "provides.intents",
+                    f"intent {intent!r}: {tool!r} is not declared replay-safe (a write or an "
+                    "unclassified tool); a plan only reads",
+                )
+        taken[intent] = f"addon {owner!r}"
+    return plans
+
+
 def _routers_of(addon: ResolvedAddon, taken: dict[str, str]) -> dict[str, RouterFunction]:
     """The addon's `provides.routers`, imported and bound to its settings. Names are global."""
     owner = addon.manifest.name
@@ -574,9 +656,15 @@ def register_addons(
         return EMPTY
 
     toolset_owner: dict[str, str] = {name: "Core" for name in builtin_toolsets}
-    tool_owner: dict[str, str] = {
-        tool: "Core" for builder in builtin_toolsets.values() for tool in builder().tools
-    }
+    tool_owner: dict[str, str] = {}
+    replay: dict[str, ReplayPolicy] = {}
+    toolset_tools: dict[str, frozenset[str]] = {}
+    for name, builder in builtin_toolsets.items():
+        built = builder().tools
+        toolset_tools[name] = frozenset(built)
+        for tool, definition in built.items():
+            tool_owner[tool] = "Core"
+            replay[tool] = replay_policy(getattr(definition, "metadata", None))
     rule_owner: dict[str, str] = {rule_id: "Core's policy files" for rule_id in builtin_rule_ids}
     fragment_owner: dict[str, str] = {}
     channel_owner: dict[str, str] = {}
@@ -584,7 +672,9 @@ def register_addons(
     toolsets: dict[str, ToolsetBuilder] = {}
     own: dict[str, frozenset[str]] = {}
     for addon in addons:
-        builders, own_tools = _register_toolsets(addon, toolset_owner, tool_owner)
+        builders, own_tools = _register_toolsets(
+            addon, toolset_owner, tool_owner, replay, toolset_tools
+        )
         toolsets.update(builders)
         own[addon.manifest.name] = own_tools
 
@@ -597,6 +687,8 @@ def register_addons(
     wrappers: list[ToolWrapper] = []
     routers: dict[str, RouterFunction] = {}
     router_owner: dict[str, str] = {}
+    intents: dict[str, IntentPlan] = {}
+    intent_owner: dict[str, str] = {}
     depends = {a.manifest.name: a.manifest.depends for a in addons}
     core_tools = frozenset(tool for tool, who in tool_owner.items() if who == "Core")
     for addon in addons:
@@ -630,6 +722,7 @@ def register_addons(
             )
         wrappers.extend(_wrappers_of(addon, own, depends, core_tools))
         routers.update(_routers_of(addon, router_owner))
+        intents.update(_intents_of(addon, replay, intent_owner))
         channels.extend(_channels_of(addon, reserved_channels, channel_owner))
         relative = addon.manifest.provides.profiles
         if relative is not None:
@@ -647,6 +740,8 @@ def register_addons(
         tools=own,
         wrappers=tuple(wrappers),
         routers=routers,
+        intents=intents,
+        toolset_tools=toolset_tools,
     )
 
 

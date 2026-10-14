@@ -6,9 +6,12 @@ profile, the router reads the text and answers one of three things:
 
   * `pass`                 run the turn as requested (the normal path),
   * `route(profile_id)`    run it as another profile instead, and
-  * `intent(name, args)`   a typed intent a code executor would run. Accepted by the type; until
-                           intent executors exist it is treated as a `pass` with the reason
-                           recorded (`FALLBACK_INTENT_NOT_SUPPORTED`).
+  * `intent(name, args)`   a typed intent a code executor runs (D97, `domain/intents.py`): the
+                           turn runs under the plan's owning profile, which must be an allowed
+                           target like a route's. A profile that did not opt in
+                           (`routing.intents`) treats it as a `pass` with the reason recorded
+                           (`FALLBACK_INTENT_NOT_SUPPORTED`); an intent nobody declared a plan
+                           for is `FALLBACK_INTENT_UNKNOWN`.
 
 WHAT A ROUTER IS NOT
     It is not a safety barrier. A route only chooses WHICH profile runs the turn; the turn then
@@ -38,6 +41,7 @@ from typing import Final
 __all__ = [
     "FALLBACK_AUDIT_UNAVAILABLE",
     "FALLBACK_INTENT_NOT_SUPPORTED",
+    "FALLBACK_INTENT_UNKNOWN",
     "FALLBACK_TARGET_NOT_ALLOWED",
     "FALLBACK_TARGET_NOT_STARTABLE",
     "FALLBACK_TIMEOUT",
@@ -54,6 +58,7 @@ FALLBACK_TIMEOUT: Final[str] = "timeout"
 FALLBACK_TARGET_NOT_ALLOWED: Final[str] = "target_not_allowed"
 FALLBACK_TARGET_NOT_STARTABLE: Final[str] = "target_not_startable"
 FALLBACK_INTENT_NOT_SUPPORTED: Final[str] = "intent_not_supported"
+FALLBACK_INTENT_UNKNOWN: Final[str] = "intent_unknown"
 FALLBACK_AUDIT_UNAVAILABLE: Final[str] = "audit_unavailable"
 
 
@@ -114,10 +119,13 @@ class RouteDecision:
 
 @dataclass(frozen=True, slots=True)
 class RoutingPolicy:
-    """A profile's `routing:` block: the router it consults and where that router may send it."""
+    """A profile's `routing:` block: the router it consults, where that router may send it and
+    whether an intent may run its declared plan (D97; off unless the profile says `intents: true`).
+    """
 
     router: str
     targets: tuple[str, ...]
+    intents: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,23 +170,40 @@ def resolve_route(
     *,
     requested: str,
     entry_points: Collection[str],
+    plans: Mapping[str, str] | None = None,
 ) -> tuple[str, str | None]:
     """The profile the turn runs under, and why it fell back (None when it did not).
 
     `entry_points` are the loaded profiles a channel may start. A route to the requested profile
-    itself is a pass.
+    itself is a pass. `plans` maps each intent with a declared plan to its owning profile (None:
+    no intent executor is wired); an intent lands on that profile by the rules a route lands by.
     """
     match decision.kind:
         case RouteKind.PASS:
             return requested, None
         case RouteKind.INTENT:
-            return requested, FALLBACK_INTENT_NOT_SUPPORTED
+            if not policy.intents or plans is None:
+                return requested, FALLBACK_INTENT_NOT_SUPPORTED
+            owner = plans.get(decision.intent or "")
+            if owner is None:
+                return requested, FALLBACK_INTENT_UNKNOWN
+            return _land(owner, policy, requested=requested, entry_points=entry_points)
         case RouteKind.ROUTE:
-            target = decision.profile_id or requested
-            if target == requested:
-                return requested, None
-            if target not in policy.targets:
-                return requested, FALLBACK_TARGET_NOT_ALLOWED
-            if target not in entry_points:
-                return requested, FALLBACK_TARGET_NOT_STARTABLE
-            return target, None
+            return _land(
+                decision.profile_id or requested,
+                policy,
+                requested=requested,
+                entry_points=entry_points,
+            )
+
+
+def _land(
+    target: str, policy: RoutingPolicy, *, requested: str, entry_points: Collection[str]
+) -> tuple[str, str | None]:
+    if target == requested:
+        return requested, None
+    if target not in policy.targets:
+        return requested, FALLBACK_TARGET_NOT_ALLOWED
+    if target not in entry_points:
+        return requested, FALLBACK_TARGET_NOT_STARTABLE
+    return target, None

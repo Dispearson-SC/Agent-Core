@@ -35,11 +35,13 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
+from agent_core.domain.intents import IntentCall, IntentPlan
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.routing import (
     FALLBACK_AUDIT_UNAVAILABLE,
     FALLBACK_TIMEOUT,
     RouteDecision,
+    RouteKind,
     RouteRecord,
     RouteRequest,
     error_reason,
@@ -60,10 +62,13 @@ MAX_AUDIT_TEXT = 200
 
 @dataclass(frozen=True, slots=True)
 class RoutedTurn:
-    """The request the turn runs with, and the consultation (None when no router applied)."""
+    """The request the turn runs with, the consultation (None when no router applied) and, when an
+    intent landed (D97), the intent whose plan the turn runs. A record written by an older build
+    has no `intent` slot: read it with `getattr(routed, "intent", None)`."""
 
     request: TurnRequest
     record: RouteRecord | None = None
+    intent: IntentCall | None = None
 
 
 class RouteTurn:
@@ -75,6 +80,7 @@ class RouteTurn:
         profiles: Mapping[str, AgentProfile],
         timeout_ms: int = DEFAULT_ROUTER_TIMEOUT_MS,
         clock: Callable[[], float] = time.monotonic,
+        plans: Mapping[str, IntentPlan] | None = None,
     ) -> None:
         if timeout_ms < 1:
             raise ValueError(f"the router timeout must be at least 1 ms, got {timeout_ms}")
@@ -83,6 +89,11 @@ class RouteTurn:
         self._profiles = profiles
         self._timeout = timeout_ms / 1000
         self._clock = clock
+        # D97. intent -> owning profile; None when no intent executor is wired (every intent then
+        # falls back with `intent_not_supported`, as before P3).
+        self._owners = (
+            None if plans is None else {name: plan.profile_id for name, plan in plans.items()}
+        )
 
     def applies(self, request: TurnRequest) -> bool:
         """Whether `request` consults a router: a channel start of a profile declaring routing."""
@@ -124,6 +135,7 @@ class RouteTurn:
                 policy,
                 requested=request.profile_id,
                 entry_points=self._entry_points(),
+                plans=self._owners,
             )
         record = RouteRecord(
             router=policy.router,
@@ -153,9 +165,12 @@ class RouteTurn:
                 record, profile_id=request.profile_id, fallback_reason=FALLBACK_AUDIT_UNAVAILABLE
             )
             return RoutedTurn(request, unapplied)
+        intent = None
+        if decision is not None and decision.kind is RouteKind.INTENT and reason is None:
+            intent = IntentCall(decision.intent or "", decision.arguments)
         if not record.routed:
-            return RoutedTurn(request, record)
-        return RoutedTurn(replace(request, profile_id=target), record)
+            return RoutedTurn(request, record, intent)
+        return RoutedTurn(replace(request, profile_id=target), record, intent)
 
     def _entry_points(self) -> frozenset[str]:
         return frozenset(

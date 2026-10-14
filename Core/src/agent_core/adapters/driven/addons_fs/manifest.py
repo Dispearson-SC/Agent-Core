@@ -132,6 +132,8 @@ class Provides(_Strict):
     wrappers: tuple[ToolWrapperDecl, ...] = ()
     # D95. Turn routers: `routers/<name>.py` with `route(request[, settings])`.
     routers: tuple[Slug, ...] = ()
+    # D97. Intent plans: one YAML file `{intents: {<intent>: {profile, steps, reply, template}}}`.
+    intents: RelPath | None = None
 
     @field_validator("routers")
     @classmethod

@@ -730,14 +730,18 @@ def _build_fast_steps(data: object, model_fast: object) -> tuple[StepKind, ...]:
 
 
 def _build_routing(data: object) -> RoutingPolicy | None:
-    """`routing` (D95): `{router: <name>, targets: [profile ids]}`, or None. The router is an
-    addon's `provides.routers` entry; `targets` are the only profiles it may send a turn to. Both
-    are required and non-empty: a routing block that could send nowhere is a misconfiguration,
-    and one with no router would never run."""
+    """`routing` (D95): `{router: <name>, targets: [profile ids], intents: false}`, or None. The
+    router is an addon's `provides.routers` entry; `targets` are the only profiles it may send a
+    turn to. Both are required and non-empty: a routing block that could send nowhere is a
+    misconfiguration, and one with no router would never run. `intents` (D97, default false) lets
+    an intent the router answers run its declared plan instead of the normal path."""
     if data is None:
         return None
     mapping = _require_mapping(data, where="routing")
-    _reject_unknown_keys(mapping, {"router", "targets"}, where="routing")
+    _reject_unknown_keys(mapping, {"router", "targets", "intents"}, where="routing")
+    intents = mapping.get("intents", False)
+    if not isinstance(intents, bool):
+        raise ProfileValidationError("routing.intents must be true or false")
     router = mapping.get("router")
     if not isinstance(router, str) or not router.strip():
         raise ProfileValidationError("routing.router must name a router")
@@ -749,7 +753,9 @@ def _build_routing(data: object) -> RoutingPolicy | None:
     ):
         raise ProfileValidationError("routing.targets must be a non-empty list of profile ids")
     return RoutingPolicy(
-        router=router.strip(), targets=tuple(dict.fromkeys(t.strip() for t in targets))
+        router=router.strip(),
+        targets=tuple(dict.fromkeys(t.strip() for t in targets)),
+        intents=intents,
     )
 
 
