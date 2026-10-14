@@ -166,6 +166,7 @@ from agent_core.adapters.driving.peers.worker import new_peer_session
 from agent_core.application.compact_context import CompactContext
 from agent_core.application.resume_turn import ResolvedTool, ResumeTurn
 from agent_core.application.route_turn import RoutedTurn, RouteTurn
+from agent_core.application.run_intent import PreparedPlan, RunIntent
 from agent_core.application.start_turn import StartTurn
 from agent_core.domain.agent_mode import DelegationKind
 from agent_core.domain.answer_cache import (
@@ -177,6 +178,7 @@ from agent_core.domain.answer_cache import (
 )
 from agent_core.domain.compaction import ContextState
 from agent_core.domain.events import EventKind, EventOwner, ProgressEvent, progress_event_id
+from agent_core.domain.intents import PLAN_REPLY_FAILED, IntentCall, PlannedCall, PlanToolResult
 from agent_core.domain.media import MediaRef
 from agent_core.domain.peer_result import PeerResult, PeerStatus
 from agent_core.domain.peers import (
@@ -790,6 +792,10 @@ class TurnWorkflowDependencies:
     # back unchanged; the step runs either way, so the replay shape does not depend on config.
     route_turn: RouteTurn | None = None
 
+    # D97. The intent plan executor. `None` (no plans, or routing off) runs every turn the normal
+    # way; the route step never hands an intent on without one.
+    run_intent: RunIntent | None = None
+
 
 _dependencies: TurnWorkflowDependencies | None = None
 
@@ -1092,6 +1098,117 @@ async def _publish_routed(turn_id: TurnId, request: TurnRequest, record: RouteRe
         )
     except Exception:
         _LOG.warning("could not publish the routed event of turn %r", turn_id, exc_info=True)
+
+
+# --- D97: an intent plan, as recorded steps -----------------------------------------------------
+#
+# A turn whose route step handed an intent on runs its plan INSTEAD of `_step_start`: prepare (the
+# calls, resolved), one step per call, the reply. Each is a step, so a resumed turn reads back every
+# call and the compose that already finished and never runs them twice. A turn without an intent
+# never reaches these steps: its operation log is the one it always had, which is why they need no
+# new pinned version. Any failure records the fallback (`_step_intent_fallback`) and then runs
+# `_step_start` with the same request, exactly as a turn that never had an intent.
+
+
+def _require_run_intent() -> RunIntent:
+    run_intent = _require_dependencies().run_intent
+    if run_intent is None:
+        raise TurnWorkflowNotWiredError(
+            "an intent plan step ran with no RunIntent bound; composition.py binds it with the "
+            "turn router (D97)"
+        )
+    return run_intent
+
+
+@DBOS.step()
+async def _step_intent_prepare(
+    turn_id: TurnId, request: TurnRequest, call: IntentCall
+) -> PreparedPlan:
+    """The plan's calls with their arguments resolved (reads the clock for `today`: a step)."""
+    return await _require_run_intent().prepare(turn_id, request, call)
+
+
+@DBOS.step()
+async def _step_intent_tool(
+    turn_id: TurnId, request: TurnRequest, planned: PlannedCall
+) -> PlanToolResult:
+    """ONE planned call, through the runner's own policy, audit and wrapping hooks."""
+    return await _require_run_intent().call(turn_id, request, planned)
+
+
+@DBOS.step()
+async def _step_intent_reply(
+    turn_id: TurnId, request: TurnRequest, call: IntentCall, results: tuple[PlanToolResult, ...]
+) -> TurnOutcome | None:
+    """The reply (compose or template), persisted, and the `planned` event; None when it failed
+    (nothing persisted)."""
+    outcome = await _require_run_intent().reply(turn_id, request, call, results)
+    if outcome is not None:
+        await _publish_planned(turn_id, request, "plan")
+    return outcome
+
+
+@DBOS.step()
+async def _step_intent_fallback(
+    turn_id: TurnId, request: TurnRequest, call: IntentCall, reason: str, tool_count: int
+) -> None:
+    """Audit the plan that gave up and publish `planned` with `fallback:<reason>`."""
+    await _require_run_intent().fall_back(turn_id, request, call, reason, tool_count)
+    await _publish_planned(turn_id, request, f"fallback:{reason}")
+
+
+async def _publish_planned(turn_id: TurnId, request: TurnRequest, detail: str) -> None:
+    """The `planned` progress event. Fails open, like every progress event (C21)."""
+    publisher = _require_dependencies().events
+    if publisher is None:
+        return
+    try:
+        await publisher.publish(
+            ProgressEvent(
+                event_id=progress_event_id(str(turn_id), EventKind.PLANNED),
+                kind=EventKind.PLANNED,
+                tenant_id=str(request.session.tenant_id),
+                session_id=str(request.session.session_id),
+                turn_id=str(turn_id),
+                agent=request.profile_id,
+                at=datetime.now(UTC),
+                detail=detail,
+            )
+        )
+    except Exception:
+        _LOG.warning("could not publish the planned event of turn %r", turn_id, exc_info=True)
+
+
+async def _run_plan(turn_id: TurnId, request: TurnRequest, call: IntentCall) -> TurnOutcome | None:
+    """The plan's steps; the finished outcome, or None after recording why it fell back. Every
+    branch is a function of step results, so a replay takes the same path (R1)."""
+    prepared = await _step_intent_prepare(turn_id, request, call)
+    reason = prepared.fallback
+    results: list[PlanToolResult] = []
+    if reason is None:
+        for planned in prepared.calls:
+            result = await _step_intent_tool(turn_id, request, planned)
+            results.append(result)
+            if result.failure is not None:
+                reason = result.failure
+                break
+    if reason is None:
+        outcome = await _step_intent_reply(turn_id, request, call, tuple(results))
+        if outcome is not None:
+            return outcome
+        reason = PLAN_REPLY_FAILED
+    await _step_intent_fallback(turn_id, request, call, reason, len(results))
+    return None
+
+
+async def _start(turn_id: TurnId, request: TurnRequest, intent: IntentCall | None) -> TurnOutcome:
+    """The first outcome of a turn: its intent's plan when it has one that answers, else the
+    normal path. Without an intent (every peer turn, every unrouted turn) only `_step_start`."""
+    if intent is not None and _require_dependencies().run_intent is not None:
+        planned = await _run_plan(turn_id, request, intent)
+        if planned is not None:
+            return planned
+    return await _step_start(turn_id, request)
 
 
 @DBOS.step()
@@ -2715,7 +2832,7 @@ async def _step_progress(
     return at
 
 
-async def _drive_turn(request: TurnRequest) -> _TurnEnd:
+async def _drive_turn(request: TurnRequest, intent: IntentCall | None = None) -> _TurnEnd:
     """The turn itself, durably, with its progress events (C21): `started` first, then the turn,
     then `finished` (also when it gave up: `detail="closed"`) or `failed` and the error re-raised.
 
@@ -2725,7 +2842,7 @@ async def _drive_turn(request: TurnRequest) -> _TurnEnd:
     turn_id = await _step_new_turn_id()
     started_at = await _step_progress(EventKind.STARTED, turn_id, request)
     try:
-        end = await _run_turn(turn_id, request)
+        end = await _run_turn(turn_id, request, intent)
     except Exception as error:
         await _step_progress(
             EventKind.FAILED, turn_id, request, started_at, detail=type(error).__name__
@@ -2737,7 +2854,9 @@ async def _drive_turn(request: TurnRequest) -> _TurnEnd:
     return end
 
 
-async def _run_turn(turn_id: TurnId, request: TurnRequest) -> _TurnEnd:
+async def _run_turn(
+    turn_id: TurnId, request: TurnRequest, intent: IntentCall | None = None
+) -> _TurnEnd:
     """The turn itself, durably: start it, then collect or wait for whatever it suspends on,
     resume, and repeat until it finishes or gives up.
 
@@ -2748,7 +2867,8 @@ async def _run_turn(turn_id: TurnId, request: TurnRequest) -> _TurnEnd:
     it runs inside whichever workflow calls it, and its decisions are functions of step results
     (R1-R5 in `run_turn_workflow`).
     """
-    outcome = await _step_start(turn_id, request)
+    # D97. An intent's plan, when the route step handed one on; else `_step_start`, as always.
+    outcome = await _start(turn_id, request, intent)
 
     rounds = 0
     # correlation_id -> the PROVIDER's tool_call_id, accumulated across rounds. Built only
@@ -2875,9 +2995,12 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
         # D95. Before the turn exists, after the input is complete: the router reads everything
         # the person said, and the turn (its `started` event, its persisted request, its policy)
         # is the routed profile's from the start. A STEP result, so a replay re-reads the route.
-        request = (await _step_route(request)).request
+        routed = await _step_route(request)
+        request = routed.request
+        # D97. `getattr`: a route recorded by a `.12` build without intents has no such slot.
+        intent: IntentCall | None = getattr(routed, "intent", None)
 
-        end = await _drive_turn(request)
+        end = await _drive_turn(request, intent)
         if end.closed:
             await _forget_attempts()
             return end.outcome

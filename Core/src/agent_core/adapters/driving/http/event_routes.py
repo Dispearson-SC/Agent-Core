@@ -61,6 +61,7 @@ def snapshot_json(snapshot: FeedSnapshot) -> dict[str, Any]:
                 "tools_called": t.tools_called,
                 "last_tool": t.last_tool,
                 "reply_text": t.reply_text,
+                "plan": t.plan,
             }
             for t in snapshot.turns
         ],

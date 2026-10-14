@@ -28,6 +28,7 @@ from agent_core.adapters.driven.events_pg.publisher import PgEventPublisher
 from agent_core.adapters.driven.persistence_pg.route_audit import PgRouteAudit
 from agent_core.adapters.driving.workflow import turn_workflow
 from agent_core.application.route_turn import RouteTurn
+from agent_core.domain.intents import IntentRecord
 from agent_core.domain.routing import (
     FALLBACK_TIMEOUT,
     RouteDecision,
@@ -87,6 +88,33 @@ def test_a_consultation_is_one_audit_row_with_its_evidence() -> None:
          None, 12, None, "confident", 318, 34),
         ("turn-2", "t", "keyword", "front", "front", None, None, None, False, None,
          None, 1500, "timeout", None, None, None),
+    ]
+
+
+def test_an_intent_plan_is_one_audit_row_with_its_outcome() -> None:
+    """D97: `audit_turn_intents` (migration 0047) holds whether the plan answered, its tool count,
+    reply mode and fallback reason; never an argument or a result."""
+
+    async def scenario() -> None:
+        await w.fresh_databases(_DATABASE)
+        audit = PgRouteAudit(_connect)
+        await audit.record_intent(
+            TurnId("turn-1"), "t", IntentRecord("stock", "shop", True, 2, "compose", None)
+        )
+        await audit.record_intent(
+            TurnId("turn-2"), "t", IntentRecord("stock", "shop", False, 1, "template", "tool_error")
+        )
+
+    asyncio.run(scenario())
+
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT turn_id, tenant_id, intent, profile_id, plan_used, tool_count, reply_mode, "
+            "fallback_reason FROM audit_turn_intents ORDER BY id"
+        ).fetchall()
+    assert rows == [
+        ("turn-1", "t", "stock", "shop", True, 2, "compose", None),
+        ("turn-2", "t", "stock", "shop", False, 1, "template", "tool_error"),
     ]
 
 

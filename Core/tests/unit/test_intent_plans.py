@@ -427,3 +427,41 @@ def test_the_interrupting_tools_are_exactly_cores_delegating_tools() -> None:
         peer_background.build_toolset,
     )
     assert frozenset(tool for build in builders for tool in build().tools) == INTERRUPTING_TOOLS
+
+
+# --- startup -------------------------------------------------------------------------------------
+
+
+def test_startup_refuses_a_plan_whose_owner_is_missing_unstartable_typed_or_not_granted() -> None:
+    from agent_core.composition import refuse_unplannable_intents
+
+    toolsets = {"delivery": frozenset({"pricing_quote", "routing_estimate", "orders_lookup"})}
+    good = {"billing": AgentProfile(id="billing", persona="b", model="m", toolsets=("delivery",))}
+    plans = _plans()
+
+    refuse_unplannable_intents(good, plans, toolsets)  # the plans' tools are all granted
+
+    bad = {
+        **good,
+        "helper": AgentProfile(
+            id="helper", persona="h", model="m", mode=AgentMode.PEER, toolsets=("delivery",)
+        ),
+        "typed": AgentProfile(
+            id="typed", persona="t", model="m", toolsets=("delivery",),
+            answer_schema='{"type": "object"}',
+        ),
+        "bare": AgentProfile(id="bare", persona="x", model="m"),
+    }
+    import dataclasses
+
+    owned = {
+        f"{name}_plan": dataclasses.replace(plans["orders"], intent=f"{name}_plan", profile_id=name)
+        for name in ("helper", "typed", "bare", "ghost")
+    }
+    with pytest.raises(ValueError) as raised:
+        refuse_unplannable_intents(bad, owned, toolsets)
+    message = str(raised.value)
+    assert "'ghost' is not loaded" in message
+    assert "'helper' has mode 'peer'" in message
+    assert "'typed' answers typed data" in message
+    assert "'bare' is not granted ['orders_lookup']" in message

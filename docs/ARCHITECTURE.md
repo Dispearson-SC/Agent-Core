@@ -193,7 +193,8 @@ Each port answers exactly one question. A port that answers two is cut wrong.
 | `AgentMailbox` | How does one agent ask another? | durable queue, A2A-shaped | no |
 | `TranscriptReader` | What happened in this conversation? | Postgres projection | no |
 | `TurnRouter` | Which way should this turn go, before the model is asked? (D95) | addons' `provides.routers` | no (a router is an addon) |
-| `RouteAudit` | Which way did a router send a turn, and why? (D95) | Postgres append-only, audit pool | no |
+| `RouteAudit` | Which way did a router send a turn, and how did its intent plan end? (D95, D97) | Postgres append-only, audit pool | no |
+| `IntentRunner` | Run one piece of an intent plan as the owning profile would (D97) | the Pydantic AI runner (same hooks as a model's tool call) | no (plans are an addon's data) |
 
 **The contract:** fifteen ports, and still only two change when a vertical is added —
 `ToolProvider` and the rows behind `ToolPolicy`. Every capability added since the first

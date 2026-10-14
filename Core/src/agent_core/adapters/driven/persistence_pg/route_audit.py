@@ -1,4 +1,5 @@
-"""Driven adapter: `RouteAudit` on Postgres (`audit_turn_routes`, migrations 0045-0046, D95).
+"""Driven adapter: `RouteAudit` on Postgres (`audit_turn_routes`, migrations 0045-0046, D95, and
+`audit_turn_intents`, migration 0047, D97).
 
 Phase:   Phase 5 (fast communication), P1
 Tests:   Core/tests/integration/test_route_audit.py
@@ -13,6 +14,7 @@ from __future__ import annotations
 import asyncio
 
 from agent_core.adapters.driven.persistence_pg.audit_repository import ConnectionFactory
+from agent_core.domain.intents import IntentRecord
 from agent_core.domain.routing import RouteRecord
 from agent_core.domain.turn import TurnId
 
@@ -23,6 +25,11 @@ _INSERT = (
     "decision, label, confidence, calibrated, model, intent, elapsed_ms, fallback_reason, "
     "reason, input_tokens, output_tokens) "
     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+)
+
+_INSERT_INTENT = (
+    "INSERT INTO audit_turn_intents (turn_id, tenant_id, intent, profile_id, plan_used, "
+    "tool_count, reply_mode, fallback_reason) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 
@@ -49,8 +56,21 @@ class PgRouteAudit:
             record.input_tokens,
             record.output_tokens,
         )
-        await asyncio.to_thread(self._insert, params)
+        await asyncio.to_thread(self._insert, _INSERT, params)
 
-    def _insert(self, params: tuple[object, ...]) -> None:
+    async def record_intent(self, turn_id: TurnId, tenant_id: str, record: IntentRecord) -> None:
+        params = (
+            str(turn_id),
+            tenant_id,
+            record.intent,
+            record.profile_id,
+            record.plan_used,
+            record.tool_count,
+            record.reply_mode,
+            record.fallback_reason,
+        )
+        await asyncio.to_thread(self._insert, _INSERT_INTENT, params)
+
+    def _insert(self, sql: str, params: tuple[object, ...]) -> None:
         with self._connect() as connection:
-            connection.execute(_INSERT, params)
+            connection.execute(sql, params)

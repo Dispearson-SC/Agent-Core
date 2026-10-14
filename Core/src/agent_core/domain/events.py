@@ -53,6 +53,10 @@ class EventKind(StrEnum):
     # is that profile, `detail` the outcome (`routed`, `passed`, `fallback:<reason>`), `elapsed_ms`
     # how long the router took. Never a label or text. It does not change a turn's state.
     ROUTED = "routed"
+    # D97. An intent plan answered the turn (`detail` `plan`) or gave up and handed it to the
+    # normal path (`fallback:<reason>`); `agent` is the plan's profile. After `started`; the feed
+    # keeps the detail on the turn (`TurnProgress.plan`) and the turn's state does not change.
+    PLANNED = "planned"
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +192,8 @@ class TurnProgress:
     # C26. The reply this turn has streamed so far: the chunks of its latest model response, in
     # order. Empty for a turn that does not stream. The recorded answer, not this, is the truth.
     reply_text: str = ""
+    # D97. How an intent plan ended for this turn (`plan` or `fallback:<reason>`); None: no plan.
+    plan: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +256,8 @@ def fold_snapshot(
             turns[event.turn_id] = current
         if event.kind is EventKind.DELTA:
             replies.setdefault(event.turn_id, _Reply()).add(event)
+        elif event.kind is EventKind.PLANNED:
+            turns[event.turn_id] = replace(current, plan=event.detail)
         elif event.kind is EventKind.TOOL_CALLED:
             turns[event.turn_id] = replace(
                 current, tools_called=current.tools_called + 1, last_tool=event.tool

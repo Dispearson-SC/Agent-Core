@@ -215,8 +215,25 @@ FROM audit_turn_routes ORDER BY id DESC LIMIT 50;
 additive).
 
 `fallback_reason` is `timeout`, `error:<ExceptionClass>`, `target_not_allowed`,
-`target_not_startable`, `intent_not_supported` or `audit_unavailable` (a route is applied only after
-its audit row is written). The event feed shows a `routed` event before `started`, its `detail`
+`target_not_startable`, `intent_not_supported` (the profile did not opt into intents, or no addon
+declares plans), `intent_unknown` (no plan for that intent) or `audit_unavailable` (a route is
+applied only after its audit row is written).
+
+### Intent plans (D97)
+
+An addon's `provides.intents` plans run when routing is on and the entry profile says
+`routing.intents: true` (docs/ADDONS.md, "Intent plans"). Startup stops when a plan's owner is not
+loaded, cannot be started by a channel, is typed or lacks a step's tool. No drain: a turn without
+an intent records exactly the steps it did under `.12`, and migration `0047`
+(`audit_turn_intents`) is additive. How the plans did:
+
+```postgresql
+SELECT intent, plan_used, fallback_reason, count(*), avg(tool_count)
+FROM audit_turn_intents GROUP BY 1, 2, 3 ORDER BY 1, 2 DESC;
+```
+
+The plan's tool calls are ordinary `audit_tool_calls` rows of the turn; the feed shows a `planned`
+event (`plan` or `fallback:<reason>`) after `started`. The event feed shows a `routed` event before `started`, its `detail`
 `routed`, `passed` or `fallback:<reason>`, never the label.
 
 ### Subagents: looking and stopping

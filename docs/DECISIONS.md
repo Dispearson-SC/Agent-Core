@@ -3413,3 +3413,39 @@ decision 2026-10-13) and are described by `addon.yaml`.
 - **Why the columns and not a JSON blob.** The two numbers are what an operator sums (the cost of
   routing) and the reason is what they group by (abstentions); a blob would need a query per key.
 
+## D97 - Intent plans: a typed intent runs a declared read-only plan, the model only writes (Phase 5, P3)
+
+- **What.** S3/S6 layer B. An addon declares plans (`provides.intents: <file>`): intent -> owning
+  profile, 1-8 tool calls with arguments (constants, the router's arguments with optional
+  defaults, `today` / `channel` / `tenant_id`), and a reply (`compose`: one tool-less model call
+  of the owner, told to use only the results; `template`: deterministic text). A profile opts in
+  with `routing.intents: true`; an intent then lands on the plan's owner by the rules of a route
+  (`resolve_route`), and `RoutedTurn.intent` carries it to the workflow.
+- **The extension point is its own file, not part of a router's routes.** A plan is Core's
+  contract (it runs Core's tools under Core's policy); a routes file is one router's input. Any
+  router (keyword, System One, a model) can answer an intent a plan covers.
+- **Same pipeline, no second enforcement point.** A planned call is one `agent.run` of the owner's
+  cached agent whose model is a script (`FunctionModel`, `intent_plan.py`) that emits the call and
+  reads back how it ended. So the toolset (grant, wrappers), `PolicyEnforcement` (verdict, audit
+  row, `tool_called` event, journal, approval deferral), `UntrustedResultWrapping` and the usage
+  limits are the production ones. Rejected: calling the tool functions directly (a parallel
+  policy/audit path that would drift).
+- **Read-only, checked three times.** Registration refuses a tool no toolset exports, one not
+  declared `replay: safe`, and Core's delegating tools (`INTERRUPTING_TOOLS`); startup refuses an
+  owner that is missing, unstartable, typed, or not granted the tool; each call re-checks the
+  tool's definition. A NEEDS_APPROVAL verdict or a deferring tool aborts the plan.
+- **Fallback, never a failed turn.** Any problem audits the reason (`audit_turn_intents`,
+  migration 0047, via `RouteAudit.record_intent`) and runs `_step_start` with the same request. The
+  turn is persisted only once the reply exists, so the normal path writes the request once.
+- **Replay safety, no version bump.** prepare, each call, the reply and the fallback are DBOS
+  steps (`_step_intent_*`): a resumed turn reads back finished calls and the compose. A turn
+  WITHOUT an intent takes exactly the steps it took (`_step_start` first), so its operation log is
+  unchanged; an intent turn's shape is decided by the recorded `_step_route` result. A `.12` route
+  record has no `intent` slot and is read with `getattr(..., None)`: it runs the normal path. So
+  `PINNED_DBOS_APPLICATION_VERSION` stays `agent-core-turns.12`; no drain is needed for this.
+- **Compose without history.** The intent was read from this message alone, and a provider that
+  refuses tool parts without tools would reject an earlier turn's tool calls; the reply message is
+  stored, the prompt with the results is not (`_messages_the_turn_added`).
+- **Observability.** `planned` progress event (`plan` / `fallback:<reason>`), folded onto the turn
+  in the feed snapshot (`plan`), so a client (the routing benchmark) can count plan vs fallback.
+

@@ -108,11 +108,13 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    TextPart,
     ToolCallPart,
     UserPromptPart,
     VideoUrl,
 )
 from pydantic_ai.models import Model
+from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.output import StructuredDict
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import (
@@ -127,6 +129,13 @@ from pydantic_ai.tools import (
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 
+from agent_core.adapters.driven.agent_pydantic.intent_plan import (
+    COMPOSE_INSTRUCTIONS,
+    PLAN_PROMPT,
+    PlanRefusedError,
+    PlanScript,
+    compose_prompt,
+)
 from agent_core.adapters.driven.agent_pydantic.reply_stream import ReplyStreamHandler
 from agent_core.adapters.driven.mcp.toolsets import result_budget_for
 from agent_core.adapters.driven.peers.catalogue import (
@@ -138,6 +147,12 @@ from agent_core.adapters.driven.tools.background import BackgroundAgents, Backgr
 from agent_core.adapters.driven.tools.context import PeerEntry, TurnContext
 from agent_core.application.ingest_media import sniff_media
 from agent_core.domain.compaction import CompactionPolicy, ContextState
+from agent_core.domain.intents import (
+    PLAN_NEEDS_APPROVAL,
+    PLAN_OVER_BUDGET,
+    PlannedCall,
+    PlanToolResult,
+)
 from agent_core.domain.knowledge import KnowledgeHit, TenantKnowledgePolicy
 from agent_core.domain.media import MediaDelivery, MediaKind
 from agent_core.domain.policy import Effect, PolicyDecision, RuleSet
@@ -489,6 +504,10 @@ def build_knowledge_toolset(
     return FunctionToolset([Tool(knowledge_search, metadata=safe_tool_metadata())])
 
 
+# The fixed start of every refusal the model reads; a planned call (D97) recognises a denial by it.
+REFUSAL_PREFIX: Final[str] = "Tool call refused by policy and did not run."
+
+
 def refusal_result(decision: PolicyDecision) -> str:
     """The text the MODEL receives in place of the tool result when policy REFUSES a call.
 
@@ -510,7 +529,7 @@ def refusal_result(decision: PolicyDecision) -> str:
         would keep a sentence in the file that nothing can reach and that describes a
         wait this adapter no longer performs.
     """
-    return f"Tool call refused by policy and did not run. Reason: {decision.reason}"
+    return f"{REFUSAL_PREFIX} Reason: {decision.reason}"
 
 
 # The version of the key's shape, written into every key (`j<version>:r<n>:<id>`). The key is only
@@ -1603,6 +1622,8 @@ class PydanticAgentRunner:
         # after a crash does not run it twice. None keeps every call as it was: no journal.
         self._tool_journal = tool_journal
         self._agents: dict[tuple[str, str, str], Agent[Any, RunOutput]] = {}
+        # D97. One tool-less agent per profile for the compose reply of an intent plan.
+        self._composers: dict[tuple[str, str, str], Agent[Any, str]] = {}
 
     def usage_limits_for(self, profile: AgentProfile) -> UsageLimits:
         """The profile's ceilings, as Pydantic AI enforces them.
@@ -1677,17 +1698,7 @@ class PydanticAgentRunner:
                 toolsets=self._per_turn_toolsets(request.caller, profile),
                 # The turn's identity for tools that need it (tools/context.py). Per turn,
                 # never on the cached agent: the agent is shared across tenants.
-                deps=TurnContext(
-                    caller=request.caller,
-                    session=request.session,
-                    agent_id=request.profile_id,
-                    peer_catalogue=self._peer_catalogue(profile, rules),
-                    subagent_catalogue=self._subagent_catalogue(profile, rules),
-                    can_spawn=self._can_spawn(request.owner, profile),
-                    allow_continuation=profile.peers.allow_continuation,
-                    allow_background=profile.peers.allow_background,
-                    **self._background_deps(profile, turn_id, request.caller, request.session),
-                ),
+                deps=self._turn_context(turn_id, request, profile, rules),
                 usage_limits=self.usage_limits_for(profile),
                 event_stream_handler=self._reply_stream(turn_id, request),
             )
@@ -1707,6 +1718,120 @@ class PydanticAgentRunner:
         # production that produces it (t-f11-29). The store writes it in `append_outcome`;
         # see `_messages_the_turn_added` for the one message that is NOT in it.
         return self._outcome(turn_id, result)
+
+    def _turn_context(
+        self, turn_id: TurnId, request: TurnRequest, profile: AgentProfile, rules: RuleSet
+    ) -> TurnContext:
+        """The turn's identity for tools that need it (tools/context.py). Per turn, never on the
+        cached agent: the agent is shared across tenants."""
+        return TurnContext(
+            caller=request.caller,
+            session=request.session,
+            agent_id=request.profile_id,
+            peer_catalogue=self._peer_catalogue(profile, rules),
+            subagent_catalogue=self._subagent_catalogue(profile, rules),
+            can_spawn=self._can_spawn(request.owner, profile),
+            allow_continuation=profile.peers.allow_continuation,
+            allow_background=profile.peers.allow_background,
+            **self._background_deps(profile, turn_id, request.caller, request.session),
+        )
+
+    # --- D97: the pieces of an intent plan (ports/intent_runner.py) ------------------------------
+
+    async def call_tool(
+        self, turn_id: TurnId, request: TurnRequest, profile: AgentProfile, call: PlannedCall
+    ) -> PlanToolResult:
+        """ONE planned call of `profile`, through the very hooks a model's call goes through.
+
+        The profile's cached agent runs with `PlanScript` as its model (intent_plan.py): it emits
+        the call, the toolset, `PolicyEnforcement` (verdict, audit row, `tool_called` event,
+        journal) and `UntrustedResultWrapping` handle it as they handle any call, and the script
+        reads back how it ended. A DENY is a `policy_denied` result; an approval the policy asks
+        for (or a tool that defers) is `needs_approval`: a plan never waits for a person.
+        """
+        agent = await self._agent_for(profile)
+        rules = await self._policy.load_rules(request.caller)
+        script = PlanScript(call, f"plan-{call.step_id}", REFUSAL_PREFIX)
+        capabilities: list[AbstractCapability[Any]] = [
+            PolicyEnforcement(
+                policy=self._policy,
+                rules=rules,
+                audit=self._audit,
+                turn_id=turn_id,
+                caller=request.caller,
+                journal=self._tool_journal,
+            ),
+            UntrustedResultWrapping(profile),
+        ]
+        try:
+            result: AgentRunResult[Any] = await agent.run(
+                PLAN_PROMPT,
+                model=FunctionModel(script),
+                output_type=[str, DeferredToolRequests],
+                capabilities=capabilities,
+                toolsets=self._per_turn_toolsets(request.caller, profile),
+                deps=self._turn_context(turn_id, request, profile, rules),
+                usage_limits=self.usage_limits_for(profile),
+            )
+        except PlanRefusedError as refused:
+            return PlanToolResult(call.step_id, call.tool, failure=refused.reason)
+        except UsageLimitExceeded:
+            return PlanToolResult(call.step_id, call.tool, failure=PLAN_OVER_BUDGET)
+        if isinstance(result.output, DeferredToolRequests):
+            return PlanToolResult(call.step_id, call.tool, failure=PLAN_NEEDS_APPROVAL)
+        return script.result()
+
+    async def compose_reply(
+        self,
+        turn_id: TurnId,
+        request: TurnRequest,
+        profile: AgentProfile,
+        results: tuple[PlanToolResult, ...],
+    ) -> TurnOutcome:
+        """ONE model call of `profile`, offered no tools, that answers from `results` only.
+
+        The profile's persona and its channel instructions, plus `COMPOSE_INSTRUCTIONS`; the
+        question and the results are the one prompt. No history: the intent was read from this
+        message alone, and an earlier turn's tool calls could not be sent to a provider that
+        refuses tool parts without tools. Streamed like any person's turn (C26). A request limit
+        of one: a compose that wants a second request has failed, and the turn falls back.
+        """
+        agent = self._composer_for(profile)
+        instructions = [*(_turn_instructions(profile, request.caller) or []), COMPOSE_INSTRUCTIONS]
+        result = await agent.run(
+            compose_prompt(request.input.text, results),
+            instructions=instructions,
+            usage_limits=UsageLimits(request_limit=1, cost_limit=profile.max_cost_usd),
+            event_stream_handler=self._reply_stream(turn_id, request),
+        )
+        return TurnOutcome(
+            turn_id=turn_id,
+            messages=_messages_the_turn_added(result.new_messages()),
+            result=TurnResult(
+                text=str(result.output),
+                usage=_domain_usage(result.usage),
+                finished_at=self._clock(),
+            ),
+        )
+
+    def template_reply(self, turn_id: TurnId, text: str) -> TurnOutcome:
+        """`text` as the agent's reply: one response message, no model call, no usage."""
+        return TurnOutcome(
+            turn_id=turn_id,
+            messages=(ModelResponse(parts=[TextPart(text)]),),
+            result=TurnResult(text=text, finished_at=self._clock()),
+        )
+
+    def _composer_for(self, profile: AgentProfile) -> Agent[Any, str]:
+        key = (profile.id, profile.model, profile.content_hash or profile_content_hash(profile))
+        cached = self._composers.get(key)
+        if cached is None:
+            model = self._model_factory(
+                self._model.model_id_for(profile.model), self._model.base_url()
+            )
+            cached = Agent(model, instructions=profile.persona, output_type=str)
+            self._composers[key] = cached
+        return cached
 
     def _reply_stream(self, turn_id: TurnId, request: TurnRequest) -> ReplyStreamHandler | None:
         """The handler that streams this turn's reply to the event feed (C26), or None.

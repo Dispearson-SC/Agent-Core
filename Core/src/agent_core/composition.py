@@ -269,7 +269,9 @@ from agent_core.application.event_feed import EventFeed
 from agent_core.application.ingest_media import IngestMedia
 from agent_core.application.resume_turn import ResumeTurn
 from agent_core.application.route_turn import DEFAULT_ROUTER_TIMEOUT_MS, RouteTurn
+from agent_core.application.run_intent import RunIntent
 from agent_core.application.start_turn import StartTurn
+from agent_core.domain.intents import IntentPlan
 from agent_core.domain.media import MediaRef
 from agent_core.domain.policy import PolicyRule
 from agent_core.domain.profile import AgentProfile, ProfileVersionRegistry
@@ -311,6 +313,7 @@ __all__ = [
     "build_container",
     "dbos_config",
     "load_profiles",
+    "refuse_unplannable_intents",
     "refuse_unroutable_profiles",
     "start_container",
 ]
@@ -1248,6 +1251,44 @@ def refuse_unroutable_profiles(
         raise ValueError("unroutable profiles:\n  " + "\n  ".join(problems))
 
 
+def refuse_unplannable_intents(
+    profiles: Mapping[str, AgentProfile],
+    plans: Mapping[str, IntentPlan],
+    toolset_tools: Mapping[str, frozenset[str]],
+) -> None:
+    """Fail startup on an intent plan that could never answer a turn (D97), naming every one.
+
+    Called only when `AGENT_CORE_TURN_ROUTING` is on. The plan's owner must be a loaded profile a
+    channel may start (an intent lands on it like a route), must not be a typed profile (a plan's
+    reply is prose), and must be granted every tool the plan calls by one of its toolsets.
+    Registration already refused unknown, write and delegating tools.
+    """
+    problems: list[str] = []
+    for intent, plan in sorted(plans.items()):
+        owner = profiles.get(plan.profile_id)
+        if owner is None:
+            problems.append(f"intent {intent!r}: profile {plan.profile_id!r} is not loaded")
+            continue
+        if not owner.mode.startable_by_channel:
+            problems.append(
+                f"intent {intent!r}: profile {plan.profile_id!r} has mode "
+                f"{owner.mode.value!r}, which a channel cannot start"
+            )
+        if owner.answer_schema is not None:
+            problems.append(
+                f"intent {intent!r}: profile {plan.profile_id!r} answers typed data "
+                "(answer_schema); a plan's reply is prose"
+            )
+        granted = frozenset().union(*(toolset_tools.get(t, frozenset()) for t in owner.toolsets))
+        missing = [tool for tool in plan.tools if tool not in granted]
+        if missing:
+            problems.append(
+                f"intent {intent!r}: profile {plan.profile_id!r} is not granted {missing}"
+            )
+    if problems:
+        raise ValueError("unplannable intents:\n  " + "\n  ".join(problems))
+
+
 def _refuse_unusable_answer_schemas(profiles: Mapping[str, AgentProfile]) -> None:
     """Fail startup on a profile whose `answer_schema` is not a valid JSON Schema (C9, D44).
 
@@ -1454,6 +1495,8 @@ class Container:
     events_connections: EventConnections | None = None
     # D95. The turn router; None when `AGENT_CORE_TURN_ROUTING` is off (the default).
     route_turn: RouteTurn | None = None
+    # D97. The intent plan executor; None unless routing is on and an addon declares plans.
+    run_intent: RunIntent | None = None
     # C1q. The publisher's own pool, so the feed's long reads never make a publish wait.
     events_publisher_connections: EventConnections | None = None
 
@@ -2062,6 +2105,7 @@ def bind_turn_workflow(container: Container) -> None:
             max_attempts=container.settings.max_turn_attempts,
             events=container.events,
             route_turn=container.route_turn,
+            run_intent=container.run_intent,
         )
     )
 
@@ -2095,6 +2139,7 @@ def build_container(
     # D95. Only when routing is on: off, a `routing:` block is inert and checked by nobody.
     if resolved.turn_routing:
         refuse_unroutable_profiles(profiles, frozenset(addons.routers))
+        refuse_unplannable_intents(profiles, addons.intents, addons.toolset_tools)
 
     model = LiteLLMGateway(resolved.proxy_base_url)
     policy = PgToolPolicy(PoolConnections(domain_pool))
@@ -2218,15 +2263,35 @@ def build_container(
     task_graph = PgTaskGraphReader(events_connections)
     # D95. The turn router: None unless the deployment switched routing on. Audited on the AUDIT
     # pool (CLAUDE.md #6), like every other trail.
+    route_audit = PgRouteAudit(PoolConnections(audit_pool))
+    # D97. Intent plans run only with routing on and at least one plan declared; with none, an
+    # intent falls back as before P3 (`intent_not_supported`). The executor runs on the SAME runner,
+    # store, audit sink and context engine `StartTurn` holds, so a planned call is policed, audited
+    # and accounted exactly as a model's call is.
+    plans = addons.intents if resolved.turn_routing and addons.intents else None
     route_turn = (
         RouteTurn(
             routers=AddonTurnRouter(addons.routers),
-            audit=PgRouteAudit(PoolConnections(audit_pool)),
+            audit=route_audit,
             profiles=profiles,
             timeout_ms=resolved.turn_router_timeout_ms,
+            plans=plans,
         )
         if resolved.turn_routing
         else None
+    )
+    run_intent = (
+        None
+        if plans is None
+        else RunIntent(
+            runner=runner,
+            store=store,
+            audit=audit,
+            routes=route_audit,
+            context=context,
+            profiles=profiles,
+            plans=plans,
+        )
     )
     container = Container(
         settings=resolved,
@@ -2276,6 +2341,7 @@ def build_container(
             is_follow_up=mailbox.is_background_followup,
         ),
         route_turn=route_turn,
+        run_intent=run_intent,
         # t-f3-20. The SAME runner, store, audit sink and profile map `start_turn` holds.
         # A second set here would police the continuation with rules loaded from another
         # container and file its tool calls through another sink - and the two would only

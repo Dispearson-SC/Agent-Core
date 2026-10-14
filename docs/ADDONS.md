@@ -224,8 +224,8 @@ def route(request, settings):          # or route(request); `async def` works to
 ```
 
 `decision` is `pass` (run as asked), `route` (run as `profile_id` instead) or `intent` (`intent`
-and `arguments`: a typed intent; until intent executors exist it runs the normal path with the
-reason recorded). Every other key is optional; an unknown key, a wrong type or a confidence outside
+and `arguments`: a typed intent whose declared plan runs, see "Intent plans" below; without a plan
+or the profile's opt-in it runs the normal path with the reason recorded). Every other key is optional; an unknown key, a wrong type or a confidence outside
 [0, 1] is a malformed answer and the turn runs as asked. A profile opts in:
 
 ```yaml
@@ -248,6 +248,57 @@ A router may add three diagnostic keys: `reason` (why it answered so, e.g. `belo
 INFO with the router's name, label, confidence and model (never the person's text); they do not
 change the decision. A sync `route` runs on a capped daemon thread in a copy of the caller's
 context; a call over the cap waits up to 0.25 s for a slot, then runs the turn as asked.
+
+### Intent plans (`provides.intents`, layer B, D97)
+
+An intent plan answers a typed intent with code instead of the model's tool loop: a fixed list of
+read-only tool calls, then ONE model call that writes the reply from their results (or a template,
+no model at all). It is data in the addon:
+
+```yaml
+# routing/plans.yaml  (provides.intents: routing/plans.yaml)
+intents:
+  low_stock:                              # the name a router answers in `intent`
+    profile: shop_supply                  # the profile the plan runs as (an allowed route target)
+    steps:                                # 1-8 calls, in order
+      - tool: get_inventory               # a tool of that profile's toolsets
+        arguments:
+          sort: days_of_cover             # a constant
+          sku: {argument: sku}            # the router's extracted argument (required)
+          limit: {argument: limit, default: 15}   # ... or its default
+          as_of: {context: today}         # today | channel | tenant_id
+          raw: {constant: {argument: x}}  # a constant that looks like a source
+      - id: deliveries                    # the step's name in a template (default: the tool)
+        tool: get_deliveries
+    reply: compose                        # or `template` with `template: "Low: {get_inventory}"`
+```
+
+The entry profile opts in with `routing: {router: ..., targets: [...], intents: true}` (default
+false). When its router answers `intent: low_stock`, the turn runs as `shop_supply` (the plan's
+owner must be a listed target a channel may start, like a route), and Core:
+
+1. resolves every step's arguments (an argument the router did not extract and that has no
+   default, or more calls than the owner's `max_iterations`, stops here);
+2. runs each call as a recorded step through the SAME path a model's call takes: the profile's
+   grant, the caller's policy (the audit row and its `tool_called` event are written as for any
+   call), wrappers, the result budget and the profile's limits; no provider model is called;
+3. writes the reply: `compose` is one call of the owner's model with its persona and channel
+   instructions, offered no tools, told to use only the results (no history); `template` puts each
+   result's text in its `{step_id}`;
+4. persists the turn (request, reply, turn end) and audits the plan (`audit_turn_intents`).
+
+Any failure falls back to the normal model path of the owner, from scratch, with the reason in
+`audit_turn_intents.fallback_reason` and in a `planned` progress event (`detail`
+`fallback:<reason>`; `plan` when the plan answered): `argument_invalid`, `over_budget`,
+`tool_not_granted`, `tool_not_read_only`, `policy_denied`, `needs_approval` (a plan never waits for
+a person), `tool_error` (a raise, a `ModelRetry`, or an `{"error": ...}` result), `timeout` (20 s per
+call), `reply_failed`, `error:<Class>`.
+
+Only reads: registration refuses a step whose tool no enabled toolset exports, that is not declared
+`replay: safe`, or that is one of Core's delegating tools; startup (routing on) refuses a plan
+whose owner is not loaded, not startable, typed (`answer_schema`) or not granted a step's tool; and
+each call checks the tool's definition again before it runs. With `AGENT_CORE_TURN_ROUTING` off,
+or no profile opted in, plans are inert.
 
 ### The System One router (`system_one_router`, Phase 5 P2)
 
