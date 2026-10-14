@@ -507,6 +507,34 @@ opt-in, because against a real model it takes minutes and costs money.
 - To add a scenario: an async function in `evals/scenarios.py` that drives agents through
   `PydanticAgentRunner` and returns `CheckResult`s, plus the scripts the scripted model plays.
 
+### The routing benchmark (Phase 5 P4, D95)
+
+`python -m evals.routing_cli` (from `Core/`) measures a turn router against a labelled question
+set: each question names the route it should take, `pass`, `profile:<id>` or `intent:<name>`. The
+set runs twice, routing off (every turn on the entry profile) and routing on, and `routing.json`
+and `routing.md` report accuracy, accuracy over what the router committed to, the confusion
+(expected x got), the fallback rate (timeout, error), the abstention rate (the router said pass)
+and p50/p95 latency of the router and, when whole turns run, of the turn. The set format (YAML or
+JSONL) is documented in `Core/evals/routing.py`; a vertical ships its set in its addon (for
+example `addons/glazed_vertical/evals/routing_questions.yaml`, synthetic until real recorded
+questions replace it).
+
+- Offline, no opt-in: `AGENT_CORE_EVAL_ROUTING_SET=<set file>` alone runs the set's own
+  `keyword_router` rules. A floor and a check of the machinery, not a real router.
+- A real router (an addon's `provides.routers`): `AGENT_CORE_EVAL=1 AGENT_CORE_EVAL_ROUTER=<name>`
+  plus the addon variables Core reads (`AGENT_CORE_ADDONS`, `AGENT_CORE_ADDONS_DIR`, the
+  `AGENT_CORE_ADDON__<ADDON>__<KEY>` settings). Without `AGENT_CORE_EVAL=1` it is a clean skip.
+- Whole turns: add `AGENT_CORE_EVAL_TURNS_URL=<a running Agent-Core>` (and
+  `AGENT_CORE_EVAL_TURNS_TENANT`/`_SUBJECT`/`_CHANNEL`, `AGENT_CORE_EVAL_TURN_TIMEOUT`). Each
+  question is a real turn: on the profile its route names, else on the entry profile (an intent
+  runs the entry profile until intent executors exist). It costs model calls.
+- Knobs: `AGENT_CORE_EVAL_ROUTER_TIMEOUT_MS` (default 1500, as production),
+  `AGENT_CORE_EVAL_REPORT_DIR` (default `Core/evals/reports`), `AGENT_CORE_EVAL_MIN_ACCURACY`
+  (exit 1 when routing-on accuracy is below it).
+- The later real run (not done yet): a classifier router addon enabled, the glazed set, whole
+  turns against a deployment with the glazed vertical, routing off in that deployment (the
+  benchmark routes on the client side, posting each turn where the route lands).
+
 ## Addons: enabling them and setting them (Phase 2, D70-D72)
 
 This section is the operator's side. Writing an addon: [ADDONS.md](ADDONS.md).

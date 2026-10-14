@@ -9,6 +9,8 @@ scripted fake model, by `tests/unit/test_evals.py`.
     sources.py    where the models come from: a real provider, or the scripted fake
     scenarios.py  the scenarios (each: a multi-agent flow and the checks its outcome must pass)
     __main__.py   the opt-in switches and the entry point (`python -m evals`)
+    routing.py    the routing benchmark: labelled question sets, routing off vs on, the metrics
+    routing_cli.py  its entry point (`python -m evals.routing_cli`; the offline run needs no opt-in)
 
 Dev tooling, so it may import the test fakes (the scripted model, the in-memory ports) that the
 unit suite already trusts. Nothing under `src/` imports it.
