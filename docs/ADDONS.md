@@ -4,7 +4,7 @@ An addon is how a vertical adds to Agent-Core without patching it: tools, policy
 prompt text, profiles, channels, tool wrappers and database tables, all declared in one manifest.
 This is the authoring guide. The operator's side (variables, startup errors) is
 [OPERATIONS.md](OPERATIONS.md#addons-enabling-them-and-setting-them-phase-2-d70-d72); the design is
-[ARCHITECTURE.md](ARCHITECTURE.md#addons-phase-2); the decisions are D70-D83 in
+[ARCHITECTURE.md](ARCHITECTURE.md#addons-phase-2); the decisions are D70-D88 in
 [DECISIONS.md](DECISIONS.md). The shipped samples in `addons/sample_*` are the worked examples and
 are loaded by the contract tests, so they cannot drift from the rules below.
 
@@ -325,6 +325,29 @@ over one operation (another name, a fixed filter) still stops the startup when t
 A large consumer worked end to end is `addons/glazed_tools` (D87): thirty tools from one backend's
 OpenAPI document, an overlay of bounds, hidden arguments and pins, eight per-role toolsets sharing one
 helper module, and a few tools whose answer is shaped in code (forecasts, manager views).
+
+### The glazed audit and policy (`glazed_tools`, D88)
+
+`addons/glazed_tools/addon.yaml` declares which arguments of its thirty tools the audit keeps and
+`policy/rules.yaml` the 33 rules that decide who may call them (read rows for `peer` and
+`glazed-service`, the manager's own two writes and `get_briefing`, the two peer-turn denies and a
+`glazed_*` catch-all deny). Enabling the addon needs a deployment with a policy directory
+(`AGENT_CORE_POLICY_DIR`): without one startup stops naming `glazed_tools`.
+
+The one glazed rule an addon cannot carry is the grant of Core's `ask_peer` to the orchestrator. The
+glazed deployment adds it to its own policy directory:
+
+```yaml
+rules:
+  - rule_id: glazed-orchestrator-asks-specialists
+    tool_pattern: ask_peer
+    effect: allow
+    subject_roles: [glazed-manager]
+    channels: [glazed]
+    reason: >-
+      The orchestrator delegates to its specialists. The two-sided allowlist and the hop
+      limit still decide which peer.
+```
 
 ### Migrating from `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*` (D86)
 

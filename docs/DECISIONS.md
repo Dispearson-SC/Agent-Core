@@ -3168,3 +3168,50 @@ decision 2026-10-13) and are described by `addon.yaml`.
   / `.` / `..` is an error value (the old tools would have built the URL); a missing required argument
   is an error value (the old tools relied on the framework's validation); the schema now carries
   `enum`, `minimum`, `maximum` (the old one had types only).
+
+## D88 - Slice 28 advisories closed; glazed audit and policy live in `glazed_tools` (Phase 3, G2b + G3)
+
+- **Advisories (G2b).** The OpenAPI fetch cache is keyed by `(url, transport)`: a document fetched
+  through one transport (a test double, a second backend's own route) is never served to another; a
+  production build passes no transport, so one process still asks the backend once. A tool repeated
+  across toolsets of ONE addon must be the same definition (description, argument schema, replay
+  class); a divergent twin stops startup naming the addon, because policy and audit key on the name
+  alone. A `fixed` value on a `path` argument is refused at manifest load when it is empty, `.` or
+  `..` (it would leave the route; the model never sends it, so only the manifest could). In
+  `_glazed.py`: a forecast called without its `sku` and a view called without a required argument now
+  answer `{"error": "<name> is required"}` before any request (the bridge's wording; its argument
+  refusal carries no HTTP status, which the forecast and view outcomes read as "the backend is down"
+  and answered "unavailable"); a delivery calendar whose `days` is not a list is "unavailable: unexpected
+  reply" instead of a `TypeError` into the turn. Open, left as the old tool had it: a 404/503 from the
+  backend is still "unavailable" even when its problem body names a reason (the old tool did the same;
+  surfacing the detail would change what the manager is told). The auditor tool is one more than the
+  backend marks (29 marked operations, 30 tools): `get_integrity_issues` is the overlay's second tool
+  over `GET /internal/v1/issues`, pinned to it, and a test says so. The generated argument schemas are
+  compared with the old-tool oracle field by field, with the differences (bounds, enums, no
+  `default: null`, no `format: date`) listed in the test. In glazed-copilot the snapshot is now the
+  OpenAPI document of a fresh app mounting only the internal router (no public route, schema, title or
+  version can move it; it also gained two body schemas the old walk dropped), `--check` fails clearly
+  on a missing snapshot, and the description assertion checks a trimmed sentence of real length with no
+  route text and no duplicate across tools.
+- **Audit and policy go with the tools: `glazed_tools`, not a second addon.** An addon audits only its
+  own tools and `allow`s only its own, so the audit entries and the allow rows must sit in the addon
+  that owns the thirty tools. A separate `glazed_vertical` addon could hold the profiles and the channel
+  (G5) but not these. The rules name identities (`glazed-manager`, `glazed-service`, `peer`) and the
+  channel `glazed`, which G5's addon provides; the coupling is by name, as it was in `rules.yaml`.
+  Rejected: splitting the deny rows into a second addon (they share one file, one header and the same
+  reading of "absent constraint widens").
+- **Audit.** `addon.yaml` carries the thirty entries of the vertical branch's allowlist and presence map
+  unchanged (`propose_action`: ids by value, `rationale` by presence; `classify_text`: `kind` by value,
+  `text` by presence; tools with no model argument decided with an empty list). A test compares the map
+  entry by entry with a verbatim copy and another derives the decided arguments from each generated
+  tool's schema.
+- **Policy.** `policy/rules.yaml` carries 33 of the 34 glazed rules, same ids, patterns, identities and
+  reasons (the audit trail joins on `rule_id`). `glazed-orchestrator-asks-specialists` allows
+  `ask_peer`, which is Core's tool, so an addon may not grant it (D74); it stays in the deployment's own
+  policy directory (text in docs/ADDONS.md "The glazed policy"; the glazed infra switch, G7, must carry
+  it). Without it the orchestrator's `ask_peer` is refused. The brief counted 44 rules; the vertical
+  branch's file has 42, of which 34 are glazed's and 8 are the delivery/peer rules Core already has.
+  Proof: the oracle file (`old_glazed_policy_rules.yaml`, verbatim) and the addon's rules plus the
+  deployment rule are reduced by the real `PgToolPolicy.decide` for every glazed tool, six foreign tools
+  and nine identities (effect, rule id and reason equal), plus a hand-written table of rule id -> outcome.
+  An addon with policy still needs a policy directory (D74); a test pins the refusal where there is none.
