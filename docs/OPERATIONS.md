@@ -543,3 +543,9 @@ parents, an unknown slot or profile in an insert, a slot with no marker (or a ma
 `replace` of a field the patch does not carry. With none of this used nothing changes. Editing a
 parent gives every child a new profile version.
 
+A child that sets its own `persona` must keep a `{{slot:name}}` line for every inherited slot that
+holds content (defaults or addon inserts), or startup stops naming the slot and who filled it (D77);
+an empty inherited slot may be left out. An empty slot removes only its own marker line. A
+`{{slot:x}}` line in a profile that neither inherits, declares slots nor receives an insert is plain
+text.
+

@@ -25,6 +25,7 @@ INHERITANCE  (`inherit: <profile id>`)
       persona         a scalar: the child's replaces the parent's (and with it the parent's
                       `include:` text); its own `include:` fragments are appended to whichever
                       persona results.
+                      The parent's slots stay: see NAMED SLOTS.
       not inherited   `id` (always the child's own), `peers.topology` (declared once, on the hub:
                       `topology_violations`) and `public_alias` (an alias names one profile).
 
@@ -41,6 +42,13 @@ NAMED SLOTS  (`slots:` and `{{slot:name}}`)
     may add fragments to them. Declared-but-unmarked, marked-but-undeclared, twice-marked and
     unknown slots are errors; so is an insert naming a profile that does not exist.
 
+    A child that REPLACES the persona must carry the marker of every inherited slot that holds
+    content (defaults or inserts): dropping one is an error naming the slot and who put content in
+    it, never a silent loss (D77). An inherited slot nothing was put into may be left out.
+    An empty slot removes its own marker line and one adjoining blank line, nothing else.
+    The machinery applies only to a profile that inherits, declares slots or is the target of an
+    insert; in any other a literal `{{slot:x}}` line is plain text, whatever the other profiles do.
+
 BOUNDS
     Chains longer than `MAX_INHERIT_DEPTH` parents, cycles and unknown parents fail at load.
 
@@ -53,7 +61,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
@@ -158,6 +166,10 @@ class _Layer:
     includes: list[str]
     slots: dict[str, list[str]]
     replace: tuple[str, ...]
+    # The slots this document declares itself (`slots:`), before any insert is aimed at it.
+    declared: frozenset[str] = frozenset()
+    # slot -> the addons whose inserts were appended to `slots[slot]` (they sit after the defaults).
+    inserted: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _fail(layer: _Layer, message: str) -> ProfileInheritanceError:
@@ -185,10 +197,11 @@ def _layer_of(document: ProfileDocument) -> _Layer:
     if "include" in fields:
         names = fields.pop("include")
         if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
-            raise ProfileInheritanceError("include must be a list of fragment names")
+            raise _fail(layer, "include must be a list of fragment names")
         layer.includes = [document.read_fragment(n) for n in names]
     if "slots" in fields:
         layer.slots = _slots_of(layer, fields.pop("slots"))
+        layer.declared = frozenset(layer.slots)
     if layer.parent is None and layer.replace:
         raise _fail(layer, "replace is only meaningful with inherit")
     return layer
@@ -254,6 +267,8 @@ def _merge_mapping(base: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[st
 class _Resolved:
     fields: dict[str, Any]
     slots: dict[str, list[str]]
+    # slot -> who put content in it (profiles with defaults, addons with inserts), for messages.
+    sources: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _inheritable(fields: Mapping[str, Any]) -> dict[str, Any]:
@@ -262,6 +277,18 @@ def _inheritable(fields: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(peers, dict) and "topology" in peers:
         kept["peers"] = {key: value for key, value in peers.items() if key != "topology"}
     return kept
+
+
+def _sources_of(layer: _Layer) -> dict[str, list[str]]:
+    """Who put content into each slot this document holds: its defaults, then each insert."""
+    found: dict[str, list[str]] = {}
+    for name, texts in layer.slots.items():
+        who = [f"addon {addon!r}" for addon in layer.inserted.get(name, [])]
+        if len(texts) > len(who):
+            who.insert(0, f"profile {layer.profile_id!r}")
+        if who:
+            found[name] = who
+    return found
 
 
 def _apply(layer: _Layer, parent: _Resolved | None) -> _Resolved:
@@ -288,7 +315,10 @@ def _apply(layer: _Layer, parent: _Resolved | None) -> _Resolved:
     persona = fields.get("persona")
     if layer.includes and isinstance(persona, str):
         fields["persona"] = "\n\n".join([persona, *layer.includes])
-    return _Resolved(fields, slots)
+    sources = {name: list(who) for name, who in (parent.sources if parent else {}).items()}
+    for name, who in _sources_of(layer).items():
+        sources[name] = [*sources.get(name, []), *who]
+    return _Resolved(fields, slots, sources)
 
 
 def _filled(layer: _Layer, resolved: _Resolved) -> dict[str, Any]:
@@ -302,19 +332,60 @@ def _filled(layer: _Layer, resolved: _Resolved) -> dict[str, Any]:
             raise _fail(layer, f"the persona marks slot {name!r}, which is not declared in slots:")
         if names.count(name) > 1:
             raise _fail(layer, f"the persona marks slot {name!r} twice")
+    slots = dict(resolved.slots)
     for name in resolved.slots:
-        if name not in names:
+        if name in names:
+            continue
+        who = resolved.sources.get(name, [])
+        if who:
+            # Content would be lost without a word: the persona must say where it goes.
+            raise _fail(
+                layer,
+                f"slot {name!r} has no {{{{slot:{name}}}}} marker in the persona, and it holds "
+                f"content from {', '.join(who)}"
+                + (f" (inherited from {layer.parent!r})" if layer.parent else "")
+                + "; carry the marker line in the persona",
+            )
+        if name in layer.declared or layer.parent is None:
             raise _fail(layer, f"slot {name!r} has no {{{{slot:{name}}}}} marker in the persona")
-
-    def fill(match: re.Match[str]) -> str:
-        return "\n\n".join(resolved.slots[match.group(1)])
-
-    text = _MARKER.sub(fill, persona)
-    # An empty slot leaves its marker line blank: close the gap rather than leave a hole.
-    fields["persona"] = (
-        re.sub(r"\n{3,}", "\n\n", text) if not all(resolved.slots.values()) else text
-    )
+        del slots[name]  # inherited, empty and not marked here: nothing to place, nothing lost
+    fields["persona"] = _place(persona, slots)
     return fields
+
+
+def _place(persona: str, slots: Mapping[str, list[str]]) -> str:
+    """`persona` with each marker line replaced by its slot's fragments.
+
+    An empty slot removes its own marker line and ONE adjoining blank line (the one after it, or
+    the one before it at the end), so the gap the marker sat in closes; every other line, blank
+    ones included, stays exactly as written.
+    """
+    lines = persona.split("\n")
+    out: list[str] = []
+    skip_blank = False
+    for index, line in enumerate(lines):
+        match = _MARKER.fullmatch(line)
+        if match is None:
+            if not (skip_blank and line.strip() == ""):
+                out.append(line)
+            skip_blank = False
+            continue
+        skip_blank = False
+        texts = slots[match.group(1)]
+        if texts:
+            out.extend("\n\n".join(texts).split("\n"))
+        elif index == len(lines) - 1:
+            if out and out[-1].strip() == "":
+                out.pop()
+        else:
+            skip_blank = True
+    return "\n".join(out)
+
+
+def _participates(layer: _Layer, aimed_at: set[str]) -> bool:
+    """Whether the slot machinery applies to this document: it inherits, declares slots or is
+    the target of an insert. Anything else is resolved by `resolve_includes` alone."""
+    return bool(layer.parent or layer.declared or layer.profile_id in aimed_at)
 
 
 def _includes_only(document: ProfileDocument) -> Any:
@@ -373,6 +444,7 @@ def resolve_documents(
                 field="provides.inserts",
             )
         target.slots.setdefault(insert.slot, []).append(insert.text)
+        target.inserted.setdefault(insert.slot, []).append(insert.addon)
 
     resolved: dict[int, _Resolved] = {}
 
@@ -383,10 +455,16 @@ def resolve_documents(
             resolved[id(layer)] = _apply(layer, parent)
         return resolved[id(layer)]
 
+    aimed_at = {insert.profile for insert in inserts}
     out: list[Any] = []
     for layer in layers:
         if not isinstance(layer.document.data, dict):
             out.append(layer.document.data)
+            continue
+        if not _participates(layer, aimed_at):
+            # Outside the machinery, a literal `{{slot:x}}` is text, as it is with no machinery
+            # anywhere: the answer must not depend on what OTHER profiles do.
+            out.append(_owned(layer.document, _includes_only))
             continue
         out.append(_filled(layer, resolve(layer)))
     return out

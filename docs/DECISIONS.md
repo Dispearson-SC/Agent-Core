@@ -2810,3 +2810,27 @@ decision 2026-10-13) and are described by `addon.yaml`.
 - Console `:reload` and `preflight` call `load_profiles`, so they resolve inheritance and slots too.
   Open, reversible: inserts may only name the addon's own fragments; lifting that would let a
   bridge insert a dependency's text.
+
+## D77 - Slice 21 advisories: slots never lose content silently, the machinery is local (A5b)
+
+- **A child persona must carry the markers of inherited slots that hold content.** The child's
+  `persona` replaces the parent's (D76), but the parent's slots, their defaults and every addon
+  insert stay. If the new persona has no `{{slot:x}}` line for a slot that holds content, startup
+  stops with an error naming the slot, the profile it came from and who put content there (the
+  profile's defaults, `addon 'x'`). Chosen over "append the lost content at the end" because the
+  position of an insert is part of what the author of the persona decides; placing it elsewhere
+  would be a second, silent rule. An inherited slot nothing was put into may be omitted (nothing is
+  lost; a later insert would then hit the error above). A slot a document declares itself, and every
+  slot of a profile with no parent, still needs its marker.
+- **An empty slot removes its own marker line only** (plus one adjoining blank line, so the gap
+  closes). Before, every run of three newlines in the whole persona collapsed.
+- **Includes errors in an inheriting addon profile name the addon and the file** (a malformed
+  `include:` raised an unwrapped error, so startup failed without saying which addon).
+- **The slot machinery is decided per profile, not per deployment.** It applies to a profile that
+  has `inherit`, `slots:` or an insert aimed at it. Any other profile is resolved by
+  `resolve_includes` alone, so a literal `{{slot:x}}` line in it is text whether or not some other
+  profile uses slots. Before, the same file was left alone in one deployment and rejected in
+  another. Rejected: validating markers in every profile (it would break a profile that merely
+  quotes the syntax, and the "nothing used, nothing changes" guarantee of D76). Consequence: a
+  profile that uses the machinery cannot hold a literal marker line; no escape syntax is added
+  (reversible: add one if an author needs it).

@@ -272,6 +272,121 @@ def test_a_slot_without_its_marker_and_a_marker_without_its_slot_are_refused() -
             resolve_documents([_doc(text.replace("[first]", "[]"))], ())
 
 
+# --- A5b (D77): slice 21 advisories ---------------------------------------------------------------
+
+PARENT_WITH_SLOT = SLOTTED.replace("[first]", "[]")
+
+
+def test_a_child_persona_dropping_a_slot_with_inserts_is_refused_naming_who() -> None:
+    child = "id: child\ninherit: slotted\npersona: Brand new persona.\n"
+    inserts = (SlotInsert("alpha", "slotted", "before_tools", "FROM ALPHA."),)
+
+    with pytest.raises(ProfileInheritanceError) as caught:
+        resolve_documents(
+            [_doc(PARENT_WITH_SLOT, name="a.yaml"), _doc(child, name="b.yaml")], inserts
+        )
+
+    message = str(caught.value)
+    assert "before_tools" in message and "alpha" in message and "slotted" in message
+    assert "b.yaml" in message
+
+
+def test_a_child_persona_dropping_a_slot_with_defaults_is_refused(tmp_path: Path) -> None:
+    fragments = _fragments(tmp_path, first="FIRST.")
+    parent = _doc(SLOTTED, name="a.yaml", fragments_dir=fragments)
+    child = _doc("id: child\ninherit: slotted\npersona: New.\n", name="b.yaml")
+
+    with pytest.raises(ProfileInheritanceError, match="before_tools"):
+        resolve_documents([parent, child], ())
+
+
+def test_a_child_persona_may_drop_an_inherited_slot_nothing_was_put_into() -> None:
+    child = "id: child\ninherit: slotted\npersona: Brand new persona.\n"
+
+    resolved = resolve_documents(
+        [_doc(PARENT_WITH_SLOT, name="a.yaml"), _doc(child, name="b.yaml")], ()
+    )
+
+    assert resolved[1]["persona"] == "Brand new persona."
+
+
+def test_a_child_persona_that_carries_the_marker_keeps_every_insert() -> None:
+    child = "id: child\ninherit: slotted\npersona: |-\n  Mine.\n  {{slot:before_tools}}\n"
+    inserts = (SlotInsert("alpha", "slotted", "before_tools", "FROM ALPHA."),)
+
+    resolved = resolve_documents(
+        [_doc(PARENT_WITH_SLOT, name="a.yaml"), _doc(child, name="b.yaml")], inserts
+    )
+
+    assert resolved[1]["persona"] == "Mine.\nFROM ALPHA."
+
+
+@pytest.mark.parametrize(
+    ("persona", "expected"),
+    [
+        ("A\n\n\nB\n\n{{slot:before_tools}}\n\nC", "A\n\n\nB\n\nC"),
+        ("{{slot:before_tools}}\n\nText", "Text"),
+        ("Text\n\n{{slot:before_tools}}", "Text"),
+        ("Line\n{{slot:before_tools}}\nNext", "Line\nNext"),
+    ],
+    ids=["keeps-other-gaps", "at-start", "at-end", "tight-lines"],
+)
+def test_an_empty_slot_removes_only_its_own_marker_line(persona: str, expected: str) -> None:
+    text = (
+        PARENT_WITH_SLOT.split("persona:")[0]
+        + "persona: |-\n"
+        + "".join(f"  {line}\n" for line in persona.split("\n"))
+        + "model: m\nslots:\n  before_tools: []\nmax_iterations: 5\nmax_cost_usd: '0.10'\n"
+    )
+    text = text.replace("  \n", "\n")  # blank lines stay blank inside the block scalar
+
+    assert resolve_documents([_doc(text)], ())[0]["persona"] == expected
+
+
+def test_a_malformed_include_in_an_addon_profile_names_the_addon_and_the_file() -> None:
+    document = _doc("id: kid\ninherit: base\ninclude: tone\n", name="kid.yaml", owner="shop")
+
+    with pytest.raises(ProfileInheritanceError) as caught:
+        resolve_documents([_doc(BASE, name="a.yaml"), document], ())
+
+    assert caught.value.addon == "shop" and "kid.yaml" in str(caught.value)
+
+
+def test_a_missing_fragment_in_an_inheriting_addon_profile_names_the_addon_and_the_file() -> None:
+    document = _doc("id: kid\ninherit: base\ninclude: [ghost]\n", name="kid.yaml", owner="shop")
+
+    with pytest.raises(ProfileInheritanceError) as caught:
+        resolve_documents([_doc(BASE, name="a.yaml"), document], ())
+
+    assert caught.value.addon == "shop" and "kid.yaml" in str(caught.value)
+
+
+def test_a_literal_marker_outside_the_machinery_is_left_alone_wherever_it_loads() -> None:
+    literal = BASE.replace("id: base", "id: literal").replace(
+        "persona: You help.", "persona: |-\n  Docs say:\n  {{slot:x}}\n  end."
+    )
+    other = "id: kid\ninherit: base\n"
+
+    alone = resolve_documents([_doc(literal, name="l.yaml")], ())[0]["persona"]
+    beside = resolve_documents(
+        [_doc(literal, name="l.yaml"), _doc(BASE, name="a.yaml"), _doc(other, name="k.yaml")], ()
+    )[0]["persona"]
+    aimed_elsewhere = resolve_documents(
+        [_doc(literal, name="l.yaml"), _doc(PARENT_WITH_SLOT, name="s.yaml")],
+        (SlotInsert("alpha", "slotted", "before_tools", "X."),),
+    )[0]["persona"]
+
+    assert alone == beside == aimed_elsewhere == "Docs say:\n{{slot:x}}\nend."
+
+
+def test_a_marker_in_a_profile_that_uses_the_machinery_must_be_declared() -> None:
+    child = BASE.replace("id: base", "id: kid") + "inherit: base\n"
+    child = child.replace("persona: You help.", "persona: |-\n  Docs:\n  {{slot:x}}")
+
+    with pytest.raises(ProfileInheritanceError, match="slot 'x'"):
+        resolve_documents([_doc(BASE, name="a.yaml"), _doc(child, name="k.yaml")], ())
+
+
 # --- nothing used: nothing changes ------------------------------------------------------------
 
 
