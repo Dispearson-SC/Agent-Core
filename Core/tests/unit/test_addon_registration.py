@@ -294,6 +294,31 @@ def test_an_addon_may_offer_the_same_tool_in_several_of_its_own_toolsets(tmp_pat
     assert contributions.tools["shop"] == {"shared_tool"}
 
 
+def test_a_repeat_inside_one_addon_must_be_the_same_definition(tmp_path: Path) -> None:
+    """G2b: the second toolset may not quietly offer a different tool under the same name, because
+    policy and audit key on the name alone."""
+    for variant, kwargs in (
+        ("description", {"doc": "Something else entirely."}),
+        ("argument", {"argument": "words"}),
+    ):
+        root = tmp_path / variant
+        root.mkdir()
+        _addon(
+            root,
+            "shop",
+            "provides:\n  toolsets: [cart, desk]\n",
+            toolsets__cart_dot_py=TOOLSET.format(tool="shared_tool"),
+            toolsets__desk_dot_py=TOOLSET.replace("text", kwargs.get("argument", "text"))
+            .replace("Return the", kwargs.get("doc", "Return the") + " Return the")
+            .format(tool="shared_tool"),
+        )
+
+        error = _refused(root, ["shop"])
+
+        assert error.addon == "shop" and "shared_tool" in str(error), variant
+        assert "differs" in str(error), variant
+
+
 def test_a_tool_repeated_across_two_addons_is_still_refused(tmp_path: Path) -> None:
     for name, toolset in (("a", "cart"), ("b", "desk")):
         _addon(

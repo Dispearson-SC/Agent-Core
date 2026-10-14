@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import sys
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -191,12 +192,22 @@ def _bind_settings(
     return partial(builder, settings)
 
 
+def _identity_of(tool: Any) -> tuple[Any, ...]:
+    """What the model and the runner see of a tool: description, argument schema, metadata."""
+    return (
+        tool.description,
+        json.dumps(tool.function_schema.json_schema, sort_keys=True, default=repr),
+        json.dumps(tool.metadata, sort_keys=True, default=repr),
+    )
+
+
 def _register_toolsets(
     addon: ResolvedAddon, known: dict[str, str], tools_owner: dict[str, str]
 ) -> tuple[dict[str, ToolsetBuilder], frozenset[str]]:
     owner = addon.manifest.name
     builders: dict[str, ToolsetBuilder] = {}
     own_tools: set[str] = set()
+    definitions: dict[str, tuple[Any, ...]] = {}
     for name in addon.manifest.provides.toolsets:
         if name in known:
             raise _refuse(
@@ -228,12 +239,21 @@ def _register_toolsets(
                 "provides.toolsets",
                 f"{name!r}: build_toolset() must return a FunctionToolset",
             )
-        for tool in built.tools:
+        for tool, definition in built.tools.items():
             if tool in tools_owner and tools_owner[tool] != f"addon {owner!r}":
                 raise _refuse(
                     owner,
                     "provides.toolsets",
                     f"tool {tool!r} of {name!r} is already provided by {tools_owner[tool]}",
+                )
+            identity = _identity_of(definition)
+            if definitions.setdefault(tool, identity) != identity:
+                raise _refuse(
+                    owner,
+                    "provides.toolsets",
+                    f"tool {tool!r} of {name!r} differs from the same tool in another toolset "
+                    "of this addon (description, arguments or replay class); policy and audit "
+                    "key on the name, so one name is one definition",
                 )
             tools_owner[tool] = f"addon {owner!r}"
             own_tools.add(tool)
