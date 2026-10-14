@@ -58,7 +58,7 @@ version that is not a version, or a `core` range that is not a range, fails at m
 
 | Key | Declares | Lives in | The rule |
 |---|---|---|---|
-| `toolsets: [name]` | a toolset a profile can list in `toolsets:` | `toolsets/<name>.py` with a zero-argument `build_toolset()` returning a `FunctionToolset` | tool and toolset names are global: a clash with Core or another addon stops startup |
+| `toolsets: [name]` | a toolset a profile can list in `toolsets:` | `toolsets/<name>.py` with `build_toolset()` or `build_toolset(settings)` (the addon's own validated settings, D84) returning a `FunctionToolset` | tool and toolset names are global: a clash with Core or another addon stops startup |
 | `audit.allow` / `audit.presence_only` | which arguments of YOUR tools the audit trail keeps (`tool: [argument]`) | `addon.yaml` only; a toolset module declaring `AUDIT_ALLOW` is refused | only your own tools; a tool with no decision records no arguments (and logs a warning) |
 | `policy: path` | rules for your tools | one YAML file, the format of `Core/policy/*.yaml` | an `allow` may reach only YOUR tools (wildcards included); `deny` and `needs_approval` may narrow any tool. Needs a deployment that manages policy from files |
 | `fragments: dir/` | prompt text a profile names in `include:` | `<name>.md` files | names are global |
@@ -194,8 +194,15 @@ provides: {toolsets: [catalog], audit: {allow: {get_item: [item_id]}}}
 from pathlib import Path
 from agent_core.adapters.driven.tools.http_bridge import build_bridge_toolset
 
-def build_toolset():
-    return build_bridge_toolset(Path(__file__).resolve().parent.parent / "tools.yaml")
+def build_toolset(settings):    # the shop addon's validated settings (D84)
+    return build_bridge_toolset(settings, manifest=Path(__file__).resolve().parent.parent / "tools.yaml")
+```
+
+```yaml
+# addons/shop/addon.yaml (settings: any subset of the bridge keys below, plus the addon's own)
+settings:
+  base_url: {type: str, default: "http://localhost:8080"}
+  service_name: {type: str, default: shop}
 ```
 
 ```yaml
@@ -234,10 +241,18 @@ Rules: the manifest is validated when the consumer's toolset is built (a bad one
 the file and field); an argument problem, an HTTP error, a timeout or a network failure is returned
 to the model as `{"error": ..., "status"?: ...}`, never raised (an `application/problem+json` error body also adds a structured `problem` {type, title, status, detail} and puts `title: detail` in the message); a reply with a warning and no
 `wrap_as` gets a `warning` key (a list becomes `{"data": [...], "warning": ...}`). Settings
-(`base_url`, timeouts, `default_row_limit`, the header names, `peer_session_prefix`, `service_name`) are
-the bridge addon's: `build_bridge_toolset(path)` reads them from the enabled `http_tool_bridge`
-(file defaults, `AGENT_CORE_ADDONS_CONFIG`, `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*`) because a
-toolset's `build_toolset()` receives none. The library lives in
+are the CONSUMER's own (D84): the addon loader hands the consumer's validated `settings:` to a
+one-parameter `build_toolset(settings)`, and the bridge uses the keys it knows (`base_url`,
+`timeout_seconds`, `connect_timeout_seconds`, `default_row_limit`, `session_header`, `agent_header`,
+`tenant_header`, `subject_header`, `idempotency_header`, `warning_header`, `peer_session_prefix`
+with its non-empty `peer_session_separator`, `service_name`; an empty header name turns that header
+off) and ignores the rest. The bridge reads no environment, so two consumers can point at two
+backends (`AGENT_CORE_ADDON__SHOP__BASE_URL`); `http_tool_bridge` itself has no settings. Safety
+rules of the builder: a path argument is one percent-encoded segment (an empty one, `.` or `..` is an
+error value and no call is made); with `response.pick`, only the picked top-level keys of an object
+or of each row reach the model (rows that are not objects are dropped; a reply that is not the
+declared shape is an error value; a `rows_key` envelope keeps its other keys such as `total`);
+integer bounds with a fraction round inward (`minimum: 1.5` -> 2). The library lives in
 `agent_core.adapters.driven.tools.http_bridge` because addon code cannot import another addon (the
 boundary scan forbids the import routes); an example manifest is
 `Core/tests/fixtures/http_bridge/example_tools.yaml`.

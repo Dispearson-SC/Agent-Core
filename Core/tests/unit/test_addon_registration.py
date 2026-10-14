@@ -11,6 +11,7 @@ else; a name another addon or Core owns, or anything undeclared, stops startup w
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from textwrap import dedent
 
@@ -547,3 +548,68 @@ def test_a_declared_directory_with_nothing_in_it_is_refused(
 
     assert error.addon == "shop" and error.field == f"provides.{point}"
     assert pattern in str(error)
+
+
+# --- build_toolset(settings): the validated addon settings reach a toolset (D84) ---------------
+
+SETTINGS_TOOLSET = '''
+from pydantic_ai.tools import Tool
+from pydantic_ai.toolsets import FunctionToolset
+
+
+def build_toolset(settings):
+    label = settings["label"]
+
+    def {tool}(text: str) -> str:
+        """Return the label."""
+        return label
+
+    return FunctionToolset([Tool({tool})])
+'''
+SETTINGS_SHOP = (
+    "settings:\n  label: {type: str, default: from-default}\nprovides:\n  toolsets: [cart]\n"
+)
+
+
+def test_a_one_parameter_build_toolset_receives_its_own_addons_validated_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_CORE_ADDON__SHOP__LABEL", "from-env")
+    _addon(
+        tmp_path,
+        "shop",
+        SETTINGS_SHOP,
+        toolsets__cart_dot_py=SETTINGS_TOOLSET.format(tool="cart_label"),
+    )
+    monkeypatch.setenv("AGENT_CORE_ADDONS", "shop")
+    monkeypatch.setenv("AGENT_CORE_ADDONS_DIR", str(tmp_path))
+    addons = load_addons_from_environment(dict(os.environ))
+
+    contributions = register_addons(
+        addons, builtin_toolsets={}, builtin_fragments_dir=None, reserved_channels=()
+    )
+    toolset = contributions.toolsets["cart"]()
+
+    assert set(toolset.tools) == {"cart_label"}
+    assert toolset.tools["cart_label"].function("x") == "from-env"
+
+
+def test_a_zero_argument_build_toolset_is_still_supported(tmp_path: Path) -> None:
+    _shop(tmp_path, SHOP)
+
+    contributions = _register(tmp_path, ["shop"])
+
+    assert set(contributions.toolsets["cart"]().tools) == {"cart_add"}
+
+
+def test_a_build_toolset_needing_two_arguments_is_refused(tmp_path: Path) -> None:
+    _addon(
+        tmp_path,
+        "shop",
+        SHOP,
+        toolsets__cart_dot_py="def build_toolset(settings, other):\n    return None\n",
+    )
+
+    error = _refused(tmp_path, ["shop"])
+
+    assert error.addon == "shop" and "build_toolset" in str(error) and "parameter" in str(error)

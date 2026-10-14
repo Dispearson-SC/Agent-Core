@@ -3003,7 +3003,7 @@ decision 2026-10-13) and are described by `addon.yaml`.
   loader hands settings only to `post_init`, so `settings_from_environment()` re-reads the same
   sources (addon defaults, `AGENT_CORE_ADDONS_CONFIG`, `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*`) and
   fails at build time, naming the addon, when it is not enabled. A test keeps `BridgeSettings` and
-  `addon.yaml` in step. Open (reversible): let the loader pass settings to `build_toolset(settings)`.
+  `addon.yaml` in step. SUPERSEDED by D84: the loader passes the consumer's settings.
 - **Manifest** (see ADDONS.md): per tool name, description, method, route template, `kind`
   read/write, typed arguments with `in` path/query/body, `enum`, clamped `minimum`/`maximum`,
   `context` headers (session, agent, tenant, subject; header NAMES are settings, an empty name turns
@@ -3026,3 +3026,34 @@ decision 2026-10-13) and are described by `addon.yaml`.
   `X-Agent-Id`, `X-Agent-Tenant`; the first vertical sets its own via settings). An
   `application/problem+json` error body is kept as a structured `problem` in the error value.
 
+## D84 - Slice 26 advisories closed; the loader hands settings to `build_toolset(settings)` (Phase 3, G1a)
+
+- **Loader.** A toolset module may declare `build_toolset()` (as before) or `build_toolset(settings)`;
+  registration detects it by signature and binds the OWNING addon's loader-validated settings
+  (`ResolvedAddon.settings`, a read-only mapping) so `ToolsetBuilder` stays zero-argument for every
+  caller. More than one required parameter is refused naming the addon. Rejected: always passing
+  settings (breaks every shipped zero-argument builder).
+- **Whose settings.** The consumer's own, not the bridge addon's. A consumer declares in its own
+  `addon.yaml` the subset of bridge keys it wants operators to edit (everything else keeps the
+  `BridgeSettings` default) and `BridgeSettings.from_consumer` takes the keys it knows and ignores
+  the consumer's other keys. Why: each vertical is configured under its own name, two verticals can
+  have two backends (a shared bridge setting could not), and the operator edits one addon per
+  vertical. Consequence: `http_tool_bridge` loses its `settings:` and becomes a marker (version
+  1.1.0); `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*` is refused by the existing loader rule (not a
+  setting of the addon) instead of being silently ignored; `settings_from_environment` is gone and the
+  builder reads no environment. Cost: a consumer repeats the key names it exposes. Open (reversible):
+  drop the marker addon and let `depends` name nothing.
+- **Builder signature.** `build_bridge_toolset(settings, *, manifest, transport=None)`, with `settings`
+  a `BridgeSettings` or the consumer's mapping (D85 adds `openapi`/`overlay`).
+- **Advisories.** (1) A path argument is one percent-encoded segment (`/`, `%2e`, `\`, `?`, `#` are
+  encoded, so `%2e%2e` reaches the backend as the literal `%252e%252e`); an empty value, `.` or `..`
+  survive encoding and are refused as an error value with no call. (2) `pick` fails closed: only the
+  picked top-level keys of an object or row reach the model, non-object rows are dropped, and a reply
+  that is not the shape the manifest declares (`rows_key` missing or not a list, a scalar with `pick`)
+  is `{"error": "... expected shape ..."}` instead of the raw body; a `rows_key` envelope keeps its
+  other keys (`total`, cursors) by design. A tool with neither `pick` nor `rows_key` is unchanged.
+  (3) `peer_session_prefix` with an empty `peer_session_separator` is refused when settings load;
+  `case_id_for` also tolerates it. (4) A fractional bound of an integer argument rounds inward
+  (`minimum` up, `maximum` down) both when clamping and in the schema; an integer range with no
+  integer in it is a manifest error. A `number` keeps fractional bounds. (5) Tests cover number,
+  boolean, array and enum arguments.

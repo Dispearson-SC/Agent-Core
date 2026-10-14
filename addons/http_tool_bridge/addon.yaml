@@ -1,67 +1,9 @@
-# Library addon: builds tools from a consumer addon's tool manifest (docs/ADDONS.md, "The HTTP tool
-# bridge"). It provides no tool of its own; a consumer lists it under `depends` and its toolset
-# module calls `build_bridge_toolset(manifest_path)` from
-# `agent_core.adapters.driven.tools.http_bridge`. The settings below are the only thing a
-# deployment edits; nothing here names a vertical.
+# Library addon (marker): the HTTP tool bridge (docs/ADDONS.md, "The HTTP tool bridge"). It provides
+# no tool of its own and has no settings of its own. A consumer lists it under `depends`; its toolset
+# module declares `build_toolset(settings)` and calls `build_bridge_toolset(settings, manifest=...)`
+# (or `openapi=...`) from `agent_core.adapters.driven.tools.http_bridge`. The bridge keys a consumer
+# may expose in its OWN `settings:` are the fields of `BridgeSettings` (D84). Nothing here names a
+# vertical.
 name: http_tool_bridge
-version: 1.0.0
+version: 1.1.0
 core: ">=0.0,<1"
-settings:
-  base_url:
-    type: str
-    default: "http://localhost:8080"
-    description: Base URL of the backend the tools call, without a trailing slash.
-  timeout_seconds:
-    type: float
-    default: 10.0
-    minimum: 0.1
-    maximum: 300.0
-    description: Total timeout of one call.
-  connect_timeout_seconds:
-    type: float
-    default: 3.0
-    minimum: 0.1
-    maximum: 60.0
-    description: Connect timeout of one call.
-  default_row_limit:
-    type: int
-    default: 20
-    minimum: 1
-    maximum: 1000
-    description: Rows returned to the model when a tool declares no row_limit of its own.
-  session_header:
-    type: str
-    default: X-Agent-Session
-    description: Header carrying the session (or the asking session, see peer_session_prefix). Empty = not sent.
-  agent_header:
-    type: str
-    default: X-Agent-Id
-    description: Header carrying the running profile id. Empty = not sent.
-  tenant_header:
-    type: str
-    default: X-Agent-Tenant
-    description: Header carrying the caller's tenant id. Empty = not sent.
-  subject_header:
-    type: str
-    default: ""
-    description: Header carrying the caller's subject id. Empty = not sent.
-  idempotency_header:
-    type: str
-    default: Idempotency-Key
-    description: Header carrying the deterministic key of a write that declares idempotency.
-  warning_header:
-    type: str
-    default: X-Warning
-    description: Response header whose value is shown to the model by a tool that opts in. Empty = off.
-  peer_session_prefix:
-    type: str
-    default: ""
-    description: Prefix of a peer session id (for example "peer~"). When set, the session header carries the asking session's id.
-  peer_session_separator:
-    type: str
-    default: "~"
-    description: Separator inside a peer session id.
-  service_name:
-    type: str
-    default: backend
-    description: How error messages name the service ("The <name> timed out").

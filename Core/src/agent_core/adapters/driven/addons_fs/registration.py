@@ -11,8 +11,9 @@ WHAT THIS MODULE DOES
     `Settings.pull_channels`. It touches none of them itself.
 
 THE RULE: AN ADDON CONTRIBUTES WHAT ITS MANIFEST `provides` DECLARES, AND NOTHING ELSE
-    * toolsets     `provides.toolsets: [name]` -> `<addon>/toolsets/<name>.py` with a zero-argument
-                   `build_toolset()` returning a `FunctionToolset`. The module may NOT declare
+    * toolsets     `provides.toolsets: [name]` -> `<addon>/toolsets/<name>.py` with a
+                   `build_toolset()` (or `build_toolset(settings)`: the addon's own validated
+                   settings, D84) returning a `FunctionToolset`. The module may NOT declare
                    `AUDIT_ALLOW` / `AUDIT_PRESENCE_ONLY` (audit is declared in the manifest, so a
                    reviewer reads one file); that is refused rather than ignored.
     * audit        `provides.audit.allow|presence_only` for tools of the addon's OWN toolsets,
@@ -38,12 +39,14 @@ ADDON CODE RUNS HERE, AND ONLY HERE
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import sys
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from types import ModuleType
-from typing import Final
+from typing import Any, Final
 
 import yaml  # type: ignore[import-untyped]  # no stub package installed; see pyproject.toml
 from pydantic_ai.toolsets import FunctionToolset
@@ -128,6 +131,43 @@ def _import_toolset(addon: ResolvedAddon, name: str) -> ModuleType:
     return _import_addon_file(addon, "provides.toolsets", "toolsets", name)
 
 
+def _bind_settings(
+    owner: str,
+    name: str,
+    builder: Callable[..., FunctionToolset[None]],
+    settings: Mapping[str, Any],
+) -> ToolsetBuilder:
+    """A zero-argument builder, whichever of the two shapes the module declared (D84).
+
+    `build_toolset()` is used as it is. A builder that takes a parameter (`build_toolset(settings)`)
+    is handed the addon's own validated settings; more than one required parameter is refused.
+    """
+    try:
+        parameters = list(inspect.signature(builder).parameters.values())
+    except (TypeError, ValueError):
+        return builder
+    positional = [
+        p
+        for p in parameters
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)
+    ]
+    required = [
+        p
+        for p in parameters
+        if p.default is p.empty and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    if len(required) > 1:
+        raise _refuse(
+            owner,
+            "provides.toolsets",
+            f"{name!r}: build_toolset() takes at most one parameter (the addon's settings), "
+            f"but declares {len(required)} required parameters",
+        )
+    if not positional:
+        return builder
+    return partial(builder, settings)
+
+
 def _register_toolsets(
     addon: ResolvedAddon, known: dict[str, str], tools_owner: dict[str, str]
 ) -> tuple[dict[str, ToolsetBuilder], frozenset[str]]:
@@ -150,6 +190,7 @@ def _register_toolsets(
         builder = getattr(module, "build_toolset", None)
         if not callable(builder):
             raise _refuse(owner, "provides.toolsets", f"{name!r} has no build_toolset()")
+        builder = _bind_settings(owner, name, builder, addon.settings)
         try:
             built = builder()
         except Exception as error:

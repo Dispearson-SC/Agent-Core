@@ -1,25 +1,23 @@
-"""Settings of the HTTP tool bridge: what a deployment may change (Phase 3, G1, D83).
+"""Settings of the HTTP tool bridge: what a deployment may change (Phase 3, G1, D83, D84).
 
 Phase:   Phase 3 (white-label addons)
 Tests:   Core/tests/unit/test_http_bridge_settings.py
-Implements: no port - the typed view of the `http_tool_bridge` addon's validated settings.
+Implements: no port - the typed view of the settings a CONSUMER addon declares.
 
-The schema an operator edits is `addons/http_tool_bridge/addon.yaml`; a test keeps the two in step.
-A toolset module is built by a zero-argument `build_toolset()` and receives no settings from the
-addon loader, so `settings_from_environment` reads the same sources the loader does (the addon
-file defaults, `AGENT_CORE_ADDONS_CONFIG`, `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*`).
+A consumer addon declares the keys it wants an operator to edit in its own `addon.yaml` `settings:`
+(any subset of the fields below; the rest keep these defaults) and its `build_toolset(settings)`
+hands the loader-validated mapping to `build_bridge_toolset`. The bridge reads no environment: each
+vertical is configured under its own name (`AGENT_CORE_ADDON__<CONSUMER>__BASE_URL`), so two
+consumers can point at two backends.
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
-from typing import Any, Final
+from typing import Any
 
-__all__ = ["BRIDGE_ADDON", "BridgeSettings", "settings_from_environment"]
-
-BRIDGE_ADDON: Final = "http_tool_bridge"
+__all__ = ["BridgeSettings"]
 
 
 @dataclass(frozen=True)
@@ -48,6 +46,12 @@ class BridgeSettings:
             raise ValueError("peer_session_separator must not be empty when a prefix is set")
 
     @classmethod
+    def from_consumer(cls, values: Mapping[str, Any]) -> BridgeSettings:
+        """The bridge keys of a consumer addon's settings; its own other keys are ignored."""
+        known = {f.name for f in fields(cls)}
+        return cls.from_mapping({k: v for k, v in values.items() if k in known})
+
+    @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> BridgeSettings:
         known = {f.name for f in fields(cls)}
         unknown = sorted(set(values) - known)
@@ -57,17 +61,3 @@ class BridgeSettings:
         if "base_url" in data:
             data["base_url"] = str(data["base_url"]).rstrip("/")
         return cls(**data)
-
-
-def settings_from_environment(env: Mapping[str, str] | None = None) -> BridgeSettings:
-    """The enabled `http_tool_bridge` addon's settings; `ValueError` when it is not enabled."""
-    from agent_core.adapters.driven.addons_fs.loader import load_addons_from_environment
-
-    loaded = load_addons_from_environment(os.environ if env is None else env)
-    for addon in loaded:
-        if addon.manifest.name == BRIDGE_ADDON:
-            return BridgeSettings.from_mapping(dict(addon.settings))
-    raise ValueError(
-        f"the {BRIDGE_ADDON} addon is not enabled: add it to AGENT_CORE_ADDONS "
-        "(a consumer addon should list it under `depends`)"
-    )

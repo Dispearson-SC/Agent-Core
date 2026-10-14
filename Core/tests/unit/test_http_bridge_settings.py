@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from agent_core.adapters.driven.addons_fs.loader import load_addons_from_environment
-from agent_core.adapters.driven.tools.http_bridge import BridgeSettings, settings_from_environment
+from agent_core.adapters.driven.tools.http_bridge import BridgeSettings
 
 ADDONS_ROOT = Path(__file__).resolve().parents[3] / "addons"
 
@@ -30,29 +30,16 @@ def test_from_mapping_takes_known_keys_and_refuses_unknown_ones() -> None:
         BridgeSettings.from_mapping({"nope": 1})
 
 
-def test_the_addon_declares_exactly_the_settings_the_class_reads() -> None:
-    env = {"AGENT_CORE_ADDONS": "http_tool_bridge"}
-    (loaded,) = load_addons_from_environment(env)
-
-    assert loaded.manifest.name == "http_tool_bridge"
-    assert set(loaded.settings) == set(BridgeSettings.__dataclass_fields__)
-    assert BridgeSettings.from_mapping(dict(loaded.settings)) == BridgeSettings(
-        base_url=loaded.settings["base_url"]
+def test_from_consumer_takes_the_bridge_keys_and_ignores_the_consumers_own() -> None:
+    s = BridgeSettings.from_consumer(
+        {"base_url": "http://x/", "service_name": "shop", "currency": "MXN", "page_size": 5}
     )
 
-
-def test_settings_come_from_the_enabled_addon_and_its_variables() -> None:
-    env = {
-        "AGENT_CORE_ADDONS": "http_tool_bridge",
-        "AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__BASE_URL": "http://svc.internal:8080/",
-        "AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__SESSION_HEADER": "X-Case",
-    }
-
-    s = settings_from_environment(env)
-
-    assert s.base_url == "http://svc.internal:8080" and s.session_header == "X-Case"
+    assert s.base_url == "http://x" and s.service_name == "shop"
+    assert s == BridgeSettings.from_mapping({"base_url": "http://x", "service_name": "shop"})
 
 
-def test_reading_settings_with_the_addon_not_enabled_says_how_to_enable_it() -> None:
-    with pytest.raises(ValueError, match="http_tool_bridge"):
-        settings_from_environment({})
+def test_the_bridge_addon_is_a_marker_that_declares_no_settings_of_its_own() -> None:
+    (loaded,) = load_addons_from_environment({"AGENT_CORE_ADDONS": "http_tool_bridge"})
+
+    assert loaded.manifest.name == "http_tool_bridge" and dict(loaded.settings) == {}

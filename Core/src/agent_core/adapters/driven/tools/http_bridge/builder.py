@@ -7,10 +7,12 @@ Implements: no port - the consumer-facing API of the HTTP tool bridge.
 THE CONSUMER API
     A consumer addon's `toolsets/<name>.py` calls, from its zero-argument `build_toolset()`:
 
-        build_bridge_toolset(Path(__file__).parent.parent / "tools.yaml")
+        def build_toolset(settings):
+            return build_bridge_toolset(settings, manifest=HERE.parent / "tools.yaml")
 
-    and gets a `FunctionToolset` with one tool per manifest entry. Settings default to the enabled
-    `http_tool_bridge` addon's (`settings_from_environment`); tests pass them and a transport.
+    and gets a `FunctionToolset` with one tool per manifest entry. `settings` is the consumer
+    addon's own validated settings (the loader hands them to a one-parameter `build_toolset`,
+    D84); a `BridgeSettings` is accepted too. The environment is never read.
 
 WHAT EACH TOOL DOES
     1. Validates the model's arguments against the manifest (required, type, enum, numeric clamp).
@@ -24,6 +26,7 @@ WHAT EACH TOOL DOES
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -39,10 +42,7 @@ from agent_core.adapters.driven.tools.http_bridge.manifest import (
     ToolSpec,
     load_bridge_manifest,
 )
-from agent_core.adapters.driven.tools.http_bridge.settings import (
-    BridgeSettings,
-    settings_from_environment,
-)
+from agent_core.adapters.driven.tools.http_bridge.settings import BridgeSettings
 from agent_core.domain.tool_replay import safe_tool_metadata
 
 __all__ = ["build_bridge_toolset"]
@@ -168,7 +168,7 @@ def _rows(rows: Any, pick: tuple[str, ...] | None, limit: int) -> list[Any]:
     Fail closed: a projection that cannot apply to a row (not an object) drops that row, so only
     picked fields ever reach the model.
     """
-    taken = rows[:limit]
+    taken: list[Any] = rows[:limit]
     if pick is None:
         return taken
     return [_pick(r, pick) for r in taken if isinstance(r, dict)]
@@ -255,13 +255,19 @@ def _make_tool(
 
 
 def build_bridge_toolset(
-    manifest_path: Path,
-    settings: BridgeSettings | None = None,
+    settings: BridgeSettings | Mapping[str, Any],
     *,
+    manifest: Path,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> FunctionToolset[Any]:
-    """One tool per manifest entry. Raises `BridgeManifestError` / `ValueError` at build time."""
-    manifest = load_bridge_manifest(manifest_path)
-    resolved = settings if settings is not None else settings_from_environment()
-    prefix = manifest.api_prefix.rstrip("/")
-    return FunctionToolset([_make_tool(t, prefix, resolved, transport) for t in manifest.tools])
+    """One tool per manifest entry. Raises `BridgeManifestError` / `ValueError` at build time.
+
+    `settings` is a `BridgeSettings` or the consumer addon's validated settings mapping (its bridge
+    keys are used, its other keys ignored).
+    """
+    loaded = load_bridge_manifest(manifest)
+    resolved = (
+        settings if isinstance(settings, BridgeSettings) else BridgeSettings.from_consumer(settings)
+    )
+    prefix = loaded.api_prefix.rstrip("/")
+    return FunctionToolset([_make_tool(t, prefix, resolved, transport) for t in loaded.tools])

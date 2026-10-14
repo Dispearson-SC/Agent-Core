@@ -41,7 +41,7 @@ class Backend:
 
 
 def _toolset(backend: Backend, settings: BridgeSettings = SETTINGS) -> Any:
-    return build_bridge_toolset(EXAMPLE, settings, transport=httpx.MockTransport(backend))
+    return build_bridge_toolset(settings, manifest=EXAMPLE, transport=httpx.MockTransport(backend))
 
 
 def _run(toolset: Any, name: str, **arguments: Any) -> Any:
@@ -204,31 +204,25 @@ def test_a_transport_failure_comes_back_as_a_value() -> None:
     def boom(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("down")
 
-    toolset = build_bridge_toolset(EXAMPLE, SETTINGS, transport=httpx.MockTransport(boom))
+    toolset = build_bridge_toolset(SETTINGS, manifest=EXAMPLE, transport=httpx.MockTransport(boom))
 
     assert "unreachable" in _run(toolset, "get_book", book_id="b1")["error"]
 
 
-def test_settings_default_to_the_enabled_addon_when_not_passed(
+def test_settings_may_be_the_consumer_addons_validated_mapping_and_the_environment_is_not_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = Backend({"id": 1})
     monkeypatch.setenv("AGENT_CORE_ADDONS", "http_tool_bridge")
     monkeypatch.setenv("AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__BASE_URL", "http://from-env.test:5")
-    toolset = build_bridge_toolset(EXAMPLE, transport=httpx.MockTransport(backend))
+    mapping = {"base_url": "http://from-consumer.test:7/", "label": "a key of the consumer"}
+    toolset = build_bridge_toolset(
+        mapping, manifest=EXAMPLE, transport=httpx.MockTransport(backend)
+    )
 
     _run(toolset, "get_book", book_id="b1")
 
-    assert backend.requests[0].url.host == "from-env.test"
-
-
-def test_building_without_settings_and_without_the_addon_fails_at_build_time(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("AGENT_CORE_ADDONS", raising=False)
-
-    with pytest.raises(ValueError, match="http_tool_bridge"):
-        build_bridge_toolset(EXAMPLE)
+    assert backend.requests[0].url.host == "from-consumer.test"
 
 
 # --- slice 26 advisories (G1a, D84) ------------------------------------------------------------
@@ -237,7 +231,9 @@ def test_building_without_settings_and_without_the_addon_fails_at_build_time(
 def _yaml_toolset(tmp_path: Path, tools: str, backend: Backend, **kwargs: Any) -> Any:
     path = tmp_path / "tools.yaml"
     path.write_text("tools:\n" + tools, encoding="utf-8")
-    return build_bridge_toolset(path, SETTINGS, transport=httpx.MockTransport(backend), **kwargs)
+    return build_bridge_toolset(
+        SETTINGS, manifest=path, transport=httpx.MockTransport(backend), **kwargs
+    )
 
 
 @pytest.mark.parametrize("value", ["..", ".", ""])

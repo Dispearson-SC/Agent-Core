@@ -507,7 +507,7 @@ list above is the only switch, and everything below happens at startup (build an
 
 | `provides.` | Where it lives in the addon | Registered as |
 |---|---|---|
-| `toolsets: [name]` | `toolsets/<name>.py` with a zero-argument `build_toolset()` returning a `FunctionToolset` | a toolset a profile lists in `toolsets:` |
+| `toolsets: [name]` | `toolsets/<name>.py` with `build_toolset()` or `build_toolset(settings)` returning a `FunctionToolset` | a toolset a profile lists in `toolsets:` |
 | `audit.allow` / `audit.presence_only` | `addon.yaml` only (`tool: [argument, ...]`); the toolset module may NOT declare `AUDIT_ALLOW` | audit argument policy, for the addon's own tools only |
 | `policy: path` | one rules file, same format as `Core/policy/*.yaml` | rules reconciled with Core's; `allow` rules may name only the addon's own tools |
 | `fragments: dir/` | `<name>.md` files | names a profile can put in `include:` |
