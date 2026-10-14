@@ -575,5 +575,6 @@ A child that sets its own `persona` must keep a `{{slot:name}}` line for every i
 holds content (defaults or addon inserts), or startup stops naming the slot and who filled it (D77);
 an empty inherited slot may be left out. An empty slot removes only its own marker line. A
 `{{slot:x}}` line in a profile that neither inherits, declares slots nor receives an insert is plain
-text.
+text. In a profile that does, a marker must be alone on its line: `see {{slot:x}} here` stops
+startup naming the slot (D79).
 
