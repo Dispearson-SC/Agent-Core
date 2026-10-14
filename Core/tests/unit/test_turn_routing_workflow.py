@@ -93,8 +93,11 @@ def _install(
     )
     deps = turn_workflow._dependencies  # noqa: SLF001
     assert deps is not None
-    turn_workflow._dependencies = dataclasses.replace(  # noqa: SLF001
-        deps, events=recorder, route_turn=route_turn
+    # Through monkeypatch, so the wired dependencies are restored after the test.
+    monkeypatch.setattr(
+        turn_workflow,
+        "_dependencies",
+        dataclasses.replace(deps, events=recorder, route_turn=route_turn),
     )
     return started, recorder
 
