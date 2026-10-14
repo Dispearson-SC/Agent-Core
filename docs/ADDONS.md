@@ -515,6 +515,10 @@ AGENT_CORE_ADDONS=http_tool_bridge,glazed_tools,plain_language,glazed_vertical
 AGENT_CORE_ADDONS_CONFIG=<addons dir>/glazed_vertical/addons_config.yaml
 ```
 
+`routing/system_one_routes.yaml` is the vertical's routes file for `system_one_router` (ten
+layer-B intents, the seven specialists). It is not enabled by default; the file's header says how to
+turn it on and holds its benchmark (96% on the synthetic routing set at threshold 0.5).
+
 ### Migrating from `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*` (D86)
 
 Before D84 the bridge keys were set on the bridge itself. They now belong to the consumer addon that

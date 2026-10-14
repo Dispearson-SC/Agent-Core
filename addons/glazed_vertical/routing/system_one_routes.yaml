@@ -1,0 +1,88 @@
+# The glazed copilot's System One routes (Phase 5 P2), for addons/system_one_router.
+# Ten layer-B intents (a fixed tool plan; executors are P3) and the seven specialists (layer A).
+# Anything else is the escape option `none_of_these`: the orchestrator reasons about it.
+#
+# NOT ENABLED by default. To turn it on (docs/ADDONS.md, "The System One router"):
+#   AGENT_CORE_ADDONS=...,system_one_router
+#   AGENT_CORE_ADDON__SYSTEM_ONE_ROUTER__ROUTES_FILE=glazed_vertical/routing/system_one_routes.yaml
+#   AGENT_CORE_ADDON__SYSTEM_ONE_ROUTER__API_KEY_ENV=JEV_API_KEY
+#   AGENT_CORE_TURN_ROUTING=true
+# and give glazed_orchestrator `routing: {router: system_one, targets: [the seven specialists]}`.
+# An intent answer runs the orchestrator (reason intent_not_supported) until P3 lands.
+#
+# BENCHMARK (2026-10-14, evals/routing_questions.yaml, 78 SYNTHETIC questions, jev-1.13.0,
+# threshold 0.5, router timeout 800 ms): English descriptions 96% accuracy (15% with routing off),
+# 100% of committed routes right, 19% abstention, router p50 113 ms / p95 167 ms. The same routes
+# with Spanish descriptions: 94%, 98% committed, p50 105 ms / p95 150 ms; English kept. Thresholds
+# 0.5-0.6 are the best plateau (0.4: 95%, one wrong commit at 0.44; 0.7: 94%; 0.9: 85%).
+# The descriptions were written knowing the set, so expect less on recorded questions.
+instructions: >-
+  A bakery store manager sent this message to the store copilot. Which single option is it asking
+  for? Choose none_of_these when it asks for advice, a recommendation or a proposal, needs two or
+  more options at once, asks to write down a note, rejects something, or is small talk.
+escape_description: >-
+  Advice, a recommendation, a proposal or a decision on what to do; a mix of several options;
+  a note or reminder to write down; a complaint or rejection of a plan; the general overview of the
+  store; holidays or weather; greetings and thanks.
+routes:
+  - label: day_summary
+    target: intent:day_summary
+    description: Today's or yesterday's numbers for the store - sales, waste and lost sales of one day.
+  - label: active_issues
+    target: intent:active_issues
+    description: The open problems, alerts or urgent operational items of the store right now.
+  - label: order_plan
+    target: intent:order_plan
+    description: What to order or how much to order - the purchase order plan and its deadlines.
+  - label: stockout_risk
+    target: intent:stockout_risk
+    description: Products about to run out, whether stock lasts until a day, risk of stockouts.
+  - label: expiring_items
+    target: intent:expiring_items
+    description: Products about to expire or close to their best-before date.
+  - label: upcoming_deliveries
+    target: intent:upcoming_deliveries
+    description: Supplier deliveries arriving in the next days - when an order or supplier arrives.
+  - label: staffing
+    target: intent:staffing
+    description: Scheduled staff, employees and shifts for the coming days.
+  - label: promo_list
+    target: intent:promo_list
+    description: The list of promotions or offers that are active, upcoming or ran recently.
+  - label: data_integrity
+    target: intent:data_integrity
+    description: Data problems - records or products that do not add up, money lost unnoticed.
+  - label: transfer_options
+    target: intent:transfer_options
+    description: Which surplus could be sent to another branch - transfer options between stores.
+  - label: present_metrics
+    target: profile:glazed_present
+    description: >-
+      Meaning of a store metric or term, KPIs or sales of a week or month compared with another
+      period, or the outlook for tomorrow.
+  - label: supply_analysis
+    target: profile:glazed_supply
+    description: >-
+      Supplier reliability, expected demand of a product, days of coverage, slow-moving products,
+      or an in-depth analysis of one inventory problem.
+  - label: strategy_flow
+    target: profile:glazed_strategist
+    description: >-
+      Whether a discount or promotion is a good idea, how many customers will come on a day, and
+      whether the staff fits the expected customer flow.
+  - label: past_experience
+    target: profile:glazed_past
+    description: >-
+      What happened in the past - how a past promotion went, what was decided before, whether a
+      similar event happened already.
+  - label: execution_followup
+    target: profile:glazed_sentinel
+    description: >-
+      Whether an approved decision or order was carried out, why something agreed was not done,
+      or recording an operational event that happened (a road closure, an outage).
+  - label: transfer_proposal
+    target: profile:glazed_liaison
+    description: Put forward a concrete transfer of products to a named branch for approval.
+  - label: integrity_finding
+    target: profile:glazed_auditor
+    description: Explain one specific data-integrity finding in depth, such as the costliest one.
