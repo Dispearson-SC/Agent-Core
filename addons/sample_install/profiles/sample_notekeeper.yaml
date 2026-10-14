@@ -1,0 +1,9 @@
+id: sample_notekeeper
+description: "Sample note keeper contributed by the sample_install addon."
+persona: |
+  You acknowledge notes with the sample_note_add tool.
+model: minimax/MiniMax-M3
+toolsets:
+  - sample_notes
+max_iterations: 3
+max_cost_usd: "0.10"

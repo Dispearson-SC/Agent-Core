@@ -1,0 +1,20 @@
+# Install state (A7): a versioned migration and a post_init hook. On the first start the migration
+# creates a table and post_init writes a row through the install transaction; a restart changes
+# nothing; a version bump runs only new migration files and post_init again (with the old version).
+name: sample_install
+version: 1.0.0
+core: ">=0.0,<1"
+provides:
+  toolsets: [sample_notes]
+  # Both audit shapes: `topic` is recorded by value, `note` only as "present" (it may be private).
+  audit:
+    allow:
+      sample_note_add: [topic]
+    presence_only:
+      sample_note_add: [note]
+  profiles: profiles/
+# migrations/*.sql run once each, in file-name order, one transaction per file.
+migrations: migrations/
+hooks:
+  # hooks.py: `def post_init(context)`, synchronous, safe to repeat.
+  post_init: hooks:post_init
