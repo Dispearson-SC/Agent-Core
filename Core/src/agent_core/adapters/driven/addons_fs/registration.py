@@ -38,6 +38,7 @@ ADDON CODE RUNS HERE, AND ONLY HERE
 
 from __future__ import annotations
 
+import codecs
 import importlib.util
 import inspect
 import json
@@ -379,11 +380,17 @@ def _fragments_of(
 
 
 @dataclass(frozen=True)
-class _CheckedFragment:
+class _CheckedFragment(FragmentFile):
     """A fragment as registration rendered and checked it (slice 29 advisory).
 
     Serving the checked text, not the file, means a fragment edited or removed after startup can
     neither reach a profile unchecked nor fail later with an error that names no addon.
+
+    It DECLARES `FragmentFile` (slice 30 advisory) instead of resembling it: mypy checks it against
+    the protocol here, and a consumer can rely on nothing the protocol does not name (it is not a
+    `Path` and not an `AddonFragment`; it never renders again). `name` and `stem` are kept for
+    messages. The text was decoded once, as UTF-8, so a read asking for another encoding is
+    refused rather than answered with text it did not ask for.
     """
 
     path: Path
@@ -401,6 +408,10 @@ class _CheckedFragment:
         return True
 
     def read_text(self, encoding: str | None = None) -> str:
+        if encoding is not None and codecs.lookup(encoding).name != "utf-8":
+            raise ValueError(
+                f"{self.path.name} was checked as UTF-8 text; it cannot be read as {encoding!r}"
+            )
         return self.text
 
 

@@ -22,9 +22,13 @@ import pytest
 from agent_core.adapters.driven.addons_fs.errors import AddonRegistrationError
 from agent_core.adapters.driven.addons_fs.loader import load_addons
 from agent_core.adapters.driven.addons_fs.registration import register_addons
-from agent_core.adapters.driven.profiles_fs.fragments import AddonFragment, render_fragment
+from agent_core.adapters.driven.profiles_fs.fragments import (
+    AddonFragment,
+    FragmentFile,
+    render_fragment,
+)
 from agent_core.adapters.driven.profiles_fs.loader import fragment_reader, parse_profile
-from agent_core.composition import TOOL_PACKAGES
+from agent_core.composition import TOOL_PACKAGES, load_profiles
 
 SETTINGS = {
     "audience": "a shop manager",
@@ -181,3 +185,66 @@ def test_the_text_served_is_the_text_registration_checked(tmp_path: Path) -> Non
     path.unlink()
     assert contributions.fragments["style"].is_file()
     assert contributions.fragments["style"].read_text(encoding="utf-8") == "For people."
+
+
+def _addon_with_profile(root: Path) -> None:
+    """`shop` with a fragment, a profile that includes it and an insert into a Core profile."""
+    _addon(root, "For {{setting:audience}}.")
+    directory = root / "shop"
+    (directory / "addon.yaml").write_text(
+        "name: shop\nversion: 1.0.0\ncore: '>=0'\nprovides:\n  fragments: fragments/\n"
+        "  profiles: profiles/\n"
+        "  inserts:\n    - {profile: core_helper, slot: style, fragment: style}\n"
+        "settings:\n  audience: {type: str, default: people}\n",
+        encoding="utf-8",
+    )
+    (directory / "profiles").mkdir()
+    (directory / "profiles" / "shop_helper.yaml").write_text(
+        "id: shop_helper\nmodel: minimax/MiniMax-M3\npersona: SHOP\ninclude: [style]\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_checked_fragment_is_declared_a_fragment_file_and_nothing_wider(
+    tmp_path: Path,
+) -> None:
+    """Slice 30 advisory (registration.py:381-404): the checked fragment duck-typed the loader's
+    interface, so nothing tied it to what consumers read. It now declares `FragmentFile` itself:
+    mypy checks it against the protocol where it is defined, and every Core consumer of an addon
+    fragment reads it only through that protocol (the tests below run each one)."""
+    _addon(tmp_path, "For {{setting:audience}}.")
+
+    fragment = _register(tmp_path).fragments["style"]
+
+    assert FragmentFile in type(fragment).__mro__
+    assert not hasattr(fragment, "settings"), "not an AddonFragment: it never renders again"
+
+
+def test_the_checked_text_is_utf8_and_another_encoding_is_refused(tmp_path: Path) -> None:
+    """The text was decoded once, as UTF-8. Answering a request for another encoding with it
+    would be a silent lie, so it is refused; `None` and any spelling of UTF-8 are served."""
+    _addon(tmp_path, "For {{setting:audience}}.")
+    fragment = _register(tmp_path).fragments["style"]
+
+    assert fragment.read_text() == fragment.read_text(encoding="UTF-8") == "For people."
+    with pytest.raises(ValueError, match="latin-1"):
+        fragment.read_text(encoding="latin-1")
+
+
+def test_every_consumer_of_an_addon_fragment_is_served_the_checked_text(tmp_path: Path) -> None:
+    """The two Core consumers: a profile's `include` and a slot insert, through `load_profiles`."""
+    _addon_with_profile(tmp_path / "addons")
+    contributions = _register(tmp_path / "addons")
+    core = tmp_path / "core_profiles"
+    core.mkdir()
+    (core / "core_helper.yaml").write_text(
+        "id: core_helper\nmodel: minimax/MiniMax-M3\nslots: {style: []}\n"
+        "persona: |-\n  CORE\n  {{slot:style}}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "addons" / "shop" / "fragments" / "style.md").unlink()
+
+    served = load_profiles(core, None, contributions)
+
+    assert served["shop_helper"].persona == "SHOP\n\nFor people."
+    assert "For people." in served["core_helper"].persona
