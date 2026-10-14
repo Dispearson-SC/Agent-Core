@@ -1,0 +1,21 @@
+# The glazed retail vertical's agents (Phase 3, G5): the eight copilot roles as profiles and the pull-mode
+# channel the glazed backend starts turns on. The tools, their audit and their policy are glazed_tools';
+# the manager-communication text of the orchestrator is plain_language's, filled at the slot
+# `plain_language` with the settings in addons_config.yaml (D90).
+#
+# PROFILES. `glazed_base` holds what the eight share (model, budgets of a template, compaction, media and
+# the specialists' way back to the orchestrator, switched off); each role inherits it and sets its own
+# persona, toolset and budget. Changing the model of the whole vertical is one line of glazed_base.yaml.
+#
+# THE CHANNEL. The backend enqueues a turn on channel `glazed` and polls `GET /turns/{id}`: the answer is
+# already where its reader looks, so delivery is pull mode. Without it every glazed turn finished and then
+# failed at delivery (`UnknownChannelError: no channel registered under 'glazed'`).
+#
+# NOT HERE. `glazed-orchestrator-asks-specialists` (the `ask_peer` allow for the manager turn) stays a rule
+# of the deployment's policy directory: an addon may allow only its own tools (D88).
+name: glazed_vertical
+version: 1.0.0
+core: ">=0.0,<1"
+depends: [glazed_tools, plain_language]
+provides:
+  profiles: profiles/

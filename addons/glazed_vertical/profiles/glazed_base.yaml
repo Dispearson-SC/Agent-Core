@@ -1,0 +1,44 @@
+# The template of the eight glazed copilot roles (G5): what they share. It is a profile like any other
+# (inheritance needs a parent that loads), so it is made harmless on its own: no tools, no peers, one
+# iteration and a tiny budget. Every role replaces the persona, the toolset and the budget.
+id: glazed_base
+persona: |
+  You are the shared template of the Glazed store copilot roles and not an agent of your own. Say,
+  in Spanish, that this assistant is not configured and that the manager should use the copilot.
+model: minimax/MiniMax-M3.1-flash-preview
+
+mcp_servers: []
+skill_namespaces: []
+
+max_iterations: 1
+max_cost_usd: "0.01"
+
+approval_rules: []
+
+compaction:
+  trigger_fraction: 0.75
+  target_fraction: 0.40
+  head_exchanges: 2
+  tail_tokens: 8000
+
+media:
+  accepted_kinds: []
+  delivery: bytes
+  max_bytes: 8388608
+  allow_evidence_requests: false
+  allow_speech_output: false
+
+# The specialists' way back to the orchestrator. The Core checks the allowlist on BOTH sides, so a
+# specialist must name the orchestrator back to be askable; max_hops 1 plus the `ask_peer` deny for the
+# peer channel in glazed_tools' policy keep it from asking anybody itself (star topology). Off here: a
+# specialist turns it on with `peers: {enabled: true}`, the orchestrator replaces the block.
+peers:
+  enabled: false
+  peers:
+    - agent_id: glazed_orchestrator
+      display_name: Orchestrator
+      capabilities:
+        - glazed.orchestrate
+  max_hops: 1
+  visibility: none
+  reply_timeout_seconds: 600

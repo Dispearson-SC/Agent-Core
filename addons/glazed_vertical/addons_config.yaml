@@ -1,0 +1,30 @@
+# The glazed deployment's settings for the generic addons it uses (AGENT_CORE_ADDONS_CONFIG, D90).
+# An addon cannot set another addon's settings, so the vertical ships them here and the deployment
+# points AGENT_CORE_ADDONS_CONFIG at this file (or copies it). Variables still win over the file.
+plain_language:
+  audience: >-
+    the store manager, who may have only finished secondary school and in the voice channel hears
+    your answer read aloud
+  language: Spanish
+  avoided_terms:
+    - cuartiles
+    - percentil
+    - p10
+    - p90
+    - intervalo
+    - sesgo
+    - MAPE
+    - WAPE
+    - desviación
+    - nivel de servicio
+    - newsvendor
+    - elasticidad
+    - lift
+    - tier
+    - backtest
+    - holdout
+    - issue
+    - option_id
+    - or a SKU code used as a name
+  voice_style: true
+  voice_marker: "[canal: voz]"

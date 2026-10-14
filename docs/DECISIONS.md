@@ -3251,3 +3251,31 @@ decision 2026-10-13) and are described by `addon.yaml`.
   (`test_orchestrator_has_the_manager_communication_section`) and is ported in generic form to
   `test_plain_language_addon.py`. The other 32 are about the eight glazed personas (and the tool
   docstrings) and stay for G5 (docstrings are already covered by the contract tests of G2).
+
+## D90 - The glazed vertical as addons: inheriting profiles, a template base, a pull channel (Phase 3, G5)
+
+- **Why.** The eight `glazed_*.yaml` profiles and `_glazed_channel` were patched into Core on
+  `vertical/glazed`. Phase 3 moves them into `addons/glazed_vertical` with nothing but Phase 2 machinery.
+- **A template base.** `glazed_base` carries what the eight files repeated (model, mcp/skill lists,
+  approval rules, compaction, media) and the specialists' peer block switched off. Inheritance needs a
+  parent that loads, and Core has no abstract profile, so the base is a real profile made harmless: no
+  tools, no peers, `max_iterations: 1`, `max_cost_usd: "0.01"` (zero would mean no cap). Rejected: an
+  `abstract:` flag (a Core change for one convenience; reversible if a second vertical wants it) and
+  copying the shared block into every file (the old drift: one model line per file).
+- **Personas stay whole.** A persona is a scalar, so each role carries its own text verbatim. The seven
+  specialists are byte for byte the vertical branch's (the parity test compares the served profiles with
+  the old files, kept in `tests/fixtures/glazed_vertical/`).
+- **The orchestrator differs in one section, on purpose.** Its "How to talk to the manager" section is
+  now the `plain_language` fragment rendered with the glazed settings, followed by the glazed-only words
+  (Rule 3 in plain Spanish, rounding in voice, the examples). Byte identity there would mean not using
+  `plain_language` (or templating every word of it), which defeats G4. The parity test pins everything
+  else of the orchestrator (head, tail, every non-persona field) to the old file. Open for G6: the golden
+  turn compares behaviour, not bytes, for this section.
+- **Settings of another addon.** An addon cannot set `plain_language`'s settings; the vertical ships
+  `addons_config.yaml` for `AGENT_CORE_ADDONS_CONFIG`.
+- **The channel.** `provides.channels: [glazed]`, the pull-mode registration `_glazed_channel` did.
+- **Not carried.** `Core/scripts/set_glazed_model.py` (rewrote eight model lines; now one line of
+  `glazed_base.yaml`).
+- **Ported tests.** `test_glazed_vertical.py` (all of it, assertions unchanged, plus parity tests) and
+  the 32 deferred tests of `test_glazed_prompts.py` (docstring tests read the generated description).
+

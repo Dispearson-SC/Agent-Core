@@ -4,7 +4,7 @@ An addon is how a vertical adds to Agent-Core without patching it: tools, policy
 prompt text, profiles, channels, tool wrappers and database tables, all declared in one manifest.
 This is the authoring guide. The operator's side (variables, startup errors) is
 [OPERATIONS.md](OPERATIONS.md#addons-enabling-them-and-setting-them-phase-2-d70-d72); the design is
-[ARCHITECTURE.md](ARCHITECTURE.md#addons-phase-2); the decisions are D70-D89 in
+[ARCHITECTURE.md](ARCHITECTURE.md#addons-phase-2); the decisions are D70-D90 in
 [DECISIONS.md](DECISIONS.md). The shipped samples in `addons/sample_*` are the worked examples and
 are loaded by the contract tests, so they cannot drift from the rules below.
 
@@ -393,6 +393,28 @@ rules:
     reason: >-
       The orchestrator delegates to its specialists. The two-sided allowlist and the hop
       limit still decide which peer.
+```
+
+### The glazed agents and channel (`glazed_vertical`, D90)
+
+`addons/glazed_vertical` is the worked example of a vertical built only from addons: it ships no code,
+the eight copilot roles as profiles and the pull-mode channel `glazed`. It depends on `glazed_tools`
+(their toolsets and policy) and `plain_language` (the orchestrator's manager-communication text).
+
+- `profiles/glazed_base.yaml` holds what the eight share (model, compaction, media, the specialists'
+  way back to the orchestrator, switched off) and is harmless on its own: no tools, no peers, one
+  iteration. Each role `inherit`s it and sets its persona, toolset and budget; a specialist adds
+  `peers: {enabled: true}`, the orchestrator `replace: [peers]` with its own star.
+- The orchestrator declares the slot `plain_language` where the vertical branch had "How to talk to the
+  manager"; the generic text lands there and the glazed-only words (the Spanish examples, rounding in
+  voice, Rule 3 in plain words) follow it in the persona.
+- An addon cannot set another addon's settings, so the glazed values for `plain_language` (Spanish, the
+  Spanish jargon list, `[canal: voz]`) are in `addons/glazed_vertical/addons_config.yaml`; the deployment
+  points `AGENT_CORE_ADDONS_CONFIG` at it.
+
+```
+AGENT_CORE_ADDONS=http_tool_bridge,glazed_tools,plain_language,glazed_vertical
+AGENT_CORE_ADDONS_CONFIG=<addons dir>/glazed_vertical/addons_config.yaml
 ```
 
 ### Migrating from `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*` (D86)
