@@ -22,8 +22,11 @@ WHAT IT GUARANTEES
       call (`error:<Class>`, `timeout`), and the workflow then runs the normal model path from
       scratch, with the reason audited (`fall_back`).
     * The turn is persisted ONLY when the reply exists: the request, the reply message, the
-      turn-end audit. A compose that fails leaves no trace in the conversation, so the normal
-      path's `StartTurn` writes the request exactly once. The calls before it were reads; their
+      turn-end audit. A request that cannot be written falls back (nothing was written); a reply
+      that cannot be written after it fails the turn (`PlanReplyNotPersistedError`); the turn-end
+      row and the context update after it are logged when they fail, never fatal. A compose that
+      fails leaves no trace in the conversation, so the normal path's `StartTurn` writes the
+      request exactly once. The calls before it were reads; their
       audit rows stay, as a model's would.
     * The reply never invents data: `compose_reply` is told to use only the results (adapter), and
       a template only puts the results in.
@@ -62,7 +65,7 @@ from agent_core.ports.conversation_store import ConversationStore
 from agent_core.ports.intent_runner import IntentRunner
 from agent_core.ports.route_audit import RouteAudit
 
-__all__ = ["DEFAULT_TOOL_TIMEOUT_MS", "PreparedPlan", "RunIntent"]
+__all__ = ["DEFAULT_TOOL_TIMEOUT_MS", "PlanReplyNotPersistedError", "PreparedPlan", "RunIntent"]
 
 _LOG = logging.getLogger(__name__)
 
@@ -72,6 +75,11 @@ DEFAULT_TOOL_TIMEOUT_MS = 20_000
 
 def _today() -> date:
     return datetime.now(UTC).date()
+
+
+class PlanReplyNotPersistedError(RuntimeError):
+    """The planned reply could not be written after the turn's request was. The turn fails: the
+    normal path cannot start it again without writing the request twice."""
 
 
 class _PlanMismatchError(LookupError):
@@ -180,12 +188,35 @@ class RunIntent:
             return None
         if outcome.result is None:
             return None
-        await self._store.append_request(turn_id, request)
-        self._context.update_from_response(request.session, outcome.result.usage)
-        await self._store.append_outcome(turn_id, outcome)
-        await self._audit.record_turn_end(
-            turn_id, outcome.result.usage, outcome.result.usage.cost_usd
-        )
+        # The request is one transaction: when it fails nothing of the turn exists and the normal
+        # path starts it from scratch. Once it is written, the normal path would write it twice, so
+        # a reply that cannot follow it fails the turn with a named error instead (slice 36).
+        try:
+            await self._store.append_request(turn_id, request)
+        except Exception:
+            _LOG.warning(
+                "could not persist the request of turn %s; the turn falls back",
+                turn_id,
+                exc_info=True,
+            )
+            return None
+        try:
+            await self._store.append_outcome(turn_id, outcome)
+        except Exception as error:
+            raise PlanReplyNotPersistedError(
+                f"the planned reply of turn {turn_id} could not be persisted after its request "
+                f"was: {type(error).__name__}"
+            ) from error
+        # The turn answered; what follows is bookkeeping and never fails it.
+        try:
+            self._context.update_from_response(request.session, outcome.result.usage)
+            await self._audit.record_turn_end(
+                turn_id, outcome.result.usage, outcome.result.usage.cost_usd
+            )
+        except Exception:
+            _LOG.warning(
+                "could not account the planned reply of turn %s", turn_id, exc_info=True
+            )
         await self._record(
             turn_id,
             request,

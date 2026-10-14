@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from agent_core.application.run_intent import RunIntent
+from agent_core.application.run_intent import PlanReplyNotPersistedError, RunIntent
 from agent_core.domain.intents import (
     PLAN_ARGUMENT_INVALID,
     PLAN_OVER_BUDGET,
@@ -285,6 +285,59 @@ def test_a_reply_that_fails_persists_nothing_so_the_normal_path_starts_clean() -
     assert outcome is None
     assert world.store.requests == [] and world.store.outcomes == []
     assert world.audit.calls == [] and world.routes.intents == []
+
+
+async def _down(*args: Any) -> None:
+    raise RuntimeError("database down")
+
+
+def _one_result() -> tuple[PlanToolResult, ...]:
+    return (PlanToolResult("quote", "t", content="x"),)
+
+
+def test_a_request_that_cannot_be_persisted_falls_back_with_nothing_written() -> None:
+    """Slice 36: the request write is one transaction, so when it fails nothing of the turn exists
+    and the normal path can start it from scratch; no turn end, no plan audited as used."""
+    world = World(Runner())
+    world.store.append_request = _down  # type: ignore[method-assign]
+
+    outcome = _run(world.use_case.reply(TURN, _request(), IntentCall("quote"), _one_result()))
+
+    assert outcome is None
+    assert world.store.outcomes == []
+    assert world.audit.calls == [] and world.routes.intents == []
+    assert world.context.updates == []
+
+
+def test_a_reply_that_cannot_be_persisted_after_its_request_fails_the_turn_cleanly() -> None:
+    """Slice 36: the request is already written, so the normal path would write it twice; the
+    reply step fails the turn with a named error instead, and nothing claims the plan answered."""
+    world = World(Runner())
+    world.store.append_outcome = _down  # type: ignore[method-assign]
+
+    with pytest.raises(PlanReplyNotPersistedError, match="turn-1"):
+        _run(world.use_case.reply(TURN, _request(), IntentCall("quote"), _one_result()))
+
+    assert world.store.requests == [(TURN, _request())]
+    assert world.audit.calls == [] and world.routes.intents == []
+
+
+def test_a_turn_end_audit_that_fails_after_the_reply_is_persisted_never_fails_the_turn() -> None:
+    """Slice 36: the reply is persisted, so the turn answered; the turn-end row and the context
+    update are bookkeeping, logged when they fail, and the plan is still audited as used."""
+    world = World(Runner())
+    world.audit.record_turn_end = _down  # type: ignore[method-assign]
+
+    def broken(*args: Any) -> None:
+        raise RuntimeError("context down")
+
+    world.context.update_from_response = broken  # type: ignore[method-assign]
+
+    outcome = _run(world.use_case.reply(TURN, _request(), IntentCall("quote"), _one_result()))
+
+    assert outcome is not None
+    assert world.store.outcomes == [(TURN, outcome)]
+    assert world.routes.intents[0][2].plan_used is True
 
 
 def test_a_fallback_is_audited_with_its_reason_and_the_calls_made() -> None:

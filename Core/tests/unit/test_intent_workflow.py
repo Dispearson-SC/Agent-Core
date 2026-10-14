@@ -290,6 +290,74 @@ def test_a_route_recorded_by_a_build_without_intents_runs_the_normal_path(
     assert world.steps == []
 
 
+def _recovered_after_routing_was_turned_off(
+    monkeypatch: pytest.MonkeyPatch, world: World
+) -> None:
+    """The route step's recorded result (an intent) is read back, but the redeployed process has
+    no executor bound: the operator turned routing off between the run and its recovery."""
+    from agent_core.application.route_turn import RoutedTurn
+    from agent_core.domain.intents import IntentCall
+
+    async def replayed(request: TurnRequest) -> Any:
+        routed = dataclasses.replace(request, profile_id=OWNER)
+        return RoutedTurn(routed, None, IntentCall("balance"))
+
+    monkeypatch.setattr(turn_workflow, "_step_route", replayed)
+    deps = turn_workflow._dependencies  # noqa: SLF001
+    assert deps is not None
+    monkeypatch.setattr(turn_workflow, "_dependencies", dataclasses.replace(deps, run_intent=None))
+
+
+def test_a_recovered_intent_turn_keeps_its_step_shape_after_routing_is_turned_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slice 36 (replay): which steps a turn runs is a function of recorded results only. A turn
+    whose recorded route handed an intent on runs the prepare step even when no executor is bound
+    any more (a recovered run reads its recorded result back; a fresh one records `not_wired`), so
+    a config flip between the run and its recovery never changes the operation log
+    (DBOSUnexpectedStepError, the P1 lesson); it then falls back to the normal path."""
+    from agent_core.domain.intents import PLAN_NOT_WIRED
+
+    world = World(monkeypatch, INTENT, Runner())
+    _recovered_after_routing_was_turned_off(monkeypatch, world)
+
+    outcome = world.run()
+
+    assert outcome.result is not None and outcome.result.text == "model path"
+    assert world.steps == ["_step_intent_prepare", "_step_intent_fallback"]
+    assert [r.profile_id for r in world.started] == [OWNER]
+    assert world.recorder.events[-2].detail == f"fallback:{PLAN_NOT_WIRED}"
+
+
+def test_a_turn_recovered_mid_plan_after_routing_is_turned_off_falls_back_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The prepare step was recorded with its calls before the crash; the call steps that had not
+    run yet find no executor and fail as calls (`not_wired`), never as an unwired turn."""
+    from agent_core.application.run_intent import PreparedPlan
+    from agent_core.domain.intents import PLAN_NOT_WIRED
+
+    world = World(monkeypatch, INTENT, Runner())
+    _recovered_after_routing_was_turned_off(monkeypatch, world)
+
+    async def recorded(turn_id: TurnId, request: TurnRequest, call: Any) -> PreparedPlan:
+        world.steps.append("_step_intent_prepare")
+        return PreparedPlan(calls=(PlannedCall("a", "read_a", {}), PlannedCall("b", "read_b", {})))
+
+    monkeypatch.setattr(turn_workflow, "_step_intent_prepare", recorded)
+
+    outcome = world.run()
+
+    assert outcome.result is not None and outcome.result.text == "model path"
+    assert world.steps == [
+        "_step_intent_prepare",
+        "_step_intent_tool",
+        "_step_intent_fallback",
+    ]
+    assert world.recorder.events[-2].detail == f"fallback:{PLAN_NOT_WIRED}"
+    assert world.runner.calls == []
+
+
 def test_the_intent_steps_are_durable_steps() -> None:
     for name in (
         "_step_intent_prepare",

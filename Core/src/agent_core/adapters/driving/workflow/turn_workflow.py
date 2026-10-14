@@ -178,7 +178,13 @@ from agent_core.domain.answer_cache import (
 )
 from agent_core.domain.compaction import ContextState
 from agent_core.domain.events import EventKind, EventOwner, ProgressEvent, progress_event_id
-from agent_core.domain.intents import PLAN_REPLY_FAILED, IntentCall, PlannedCall, PlanToolResult
+from agent_core.domain.intents import (
+    PLAN_NOT_WIRED,
+    PLAN_REPLY_FAILED,
+    IntentCall,
+    PlannedCall,
+    PlanToolResult,
+)
 from agent_core.domain.media import MediaRef
 from agent_core.domain.peer_result import PeerResult, PeerStatus
 from agent_core.domain.peers import (
@@ -1110,30 +1116,31 @@ async def _publish_routed(turn_id: TurnId, request: TurnRequest, record: RouteRe
 # `_step_start` with the same request, exactly as a turn that never had an intent.
 
 
-def _require_run_intent() -> RunIntent:
-    run_intent = _require_dependencies().run_intent
-    if run_intent is None:
-        raise TurnWorkflowNotWiredError(
-            "an intent plan step ran with no RunIntent bound; composition.py binds it with the "
-            "turn router (D97)"
-        )
-    return run_intent
-
-
 @DBOS.step()
 async def _step_intent_prepare(
     turn_id: TurnId, request: TurnRequest, call: IntentCall
 ) -> PreparedPlan:
-    """The plan's calls with their arguments resolved (reads the clock for `today`: a step)."""
-    return await _require_run_intent().prepare(turn_id, request, call)
+    """The plan's calls with their arguments resolved (reads the clock for `today`: a step).
+
+    With no executor bound (routing turned off after the route step recorded an intent) the plan
+    falls back as `not_wired` instead of raising: the turn keeps the step shape its recorded route
+    implies, so a recovery across a config flip replays (slice 36)."""
+    run_intent = _require_dependencies().run_intent
+    if run_intent is None:
+        return PreparedPlan(fallback=PLAN_NOT_WIRED)
+    return await run_intent.prepare(turn_id, request, call)
 
 
 @DBOS.step()
 async def _step_intent_tool(
     turn_id: TurnId, request: TurnRequest, planned: PlannedCall
 ) -> PlanToolResult:
-    """ONE planned call, through the runner's own policy, audit and wrapping hooks."""
-    return await _require_run_intent().call(turn_id, request, planned)
+    """ONE planned call, through the runner's own policy, audit and wrapping hooks. A failed call
+    (`not_wired`) when no executor is bound any more (recovered mid-plan after a config flip)."""
+    run_intent = _require_dependencies().run_intent
+    if run_intent is None:
+        return PlanToolResult(planned.step_id, planned.tool, failure=PLAN_NOT_WIRED)
+    return await run_intent.call(turn_id, request, planned)
 
 
 @DBOS.step()
@@ -1142,7 +1149,10 @@ async def _step_intent_reply(
 ) -> TurnOutcome | None:
     """The reply (compose or template), persisted, and the `planned` event; None when it failed
     (nothing persisted)."""
-    outcome = await _require_run_intent().reply(turn_id, request, call, results)
+    run_intent = _require_dependencies().run_intent
+    if run_intent is None:
+        return None
+    outcome = await run_intent.reply(turn_id, request, call, results)
     if outcome is not None:
         await _publish_planned(turn_id, request, "plan")
     return outcome
@@ -1152,8 +1162,11 @@ async def _step_intent_reply(
 async def _step_intent_fallback(
     turn_id: TurnId, request: TurnRequest, call: IntentCall, reason: str, tool_count: int
 ) -> None:
-    """Audit the plan that gave up and publish `planned` with `fallback:<reason>`."""
-    await _require_run_intent().fall_back(turn_id, request, call, reason, tool_count)
+    """Audit the plan that gave up and publish `planned` with `fallback:<reason>` (only the event
+    when no executor is bound: there is no audit to write it to)."""
+    run_intent = _require_dependencies().run_intent
+    if run_intent is not None:
+        await run_intent.fall_back(turn_id, request, call, reason, tool_count)
     await _publish_planned(turn_id, request, f"fallback:{reason}")
 
 
@@ -1203,8 +1216,12 @@ async def _run_plan(turn_id: TurnId, request: TurnRequest, call: IntentCall) -> 
 
 async def _start(turn_id: TurnId, request: TurnRequest, intent: IntentCall | None) -> TurnOutcome:
     """The first outcome of a turn: its intent's plan when it has one that answers, else the
-    normal path. Without an intent (every peer turn, every unrouted turn) only `_step_start`."""
-    if intent is not None and _require_dependencies().run_intent is not None:
+    normal path. Without an intent (every peer turn, every unrouted turn) only `_step_start`.
+
+    The branch reads the RECORDED intent only, never the process's configuration: a turn recovered
+    after routing was turned off still runs the plan steps its route implies (they fall back as
+    `not_wired`), so the operation log replays (slice 36, DBOSUnexpectedStepError)."""
+    if intent is not None:
         planned = await _run_plan(turn_id, request, intent)
         if planned is not None:
             return planned

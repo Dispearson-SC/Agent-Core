@@ -37,6 +37,7 @@ __all__ = [
     "PLAN_NEEDS_APPROVAL",
     "PLAN_OVER_BUDGET",
     "PLAN_POLICY_DENIED",
+    "PLAN_NOT_WIRED",
     "PLAN_REPLY_FAILED",
     "PLAN_TIMEOUT",
     "PLAN_TOOL_ERROR",
@@ -76,6 +77,9 @@ PLAN_TOOL_ERROR: Final[str] = "tool_error"
 PLAN_TIMEOUT: Final[str] = "timeout"
 PLAN_OVER_BUDGET: Final[str] = "over_budget"
 PLAN_REPLY_FAILED: Final[str] = "reply_failed"
+# The turn's recorded route handed an intent on but this process has no executor bound (routing was
+# turned off between the run and its recovery): the plan falls back, keeping the step shape.
+PLAN_NOT_WIRED: Final[str] = "not_wired"
 
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _PROFILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
