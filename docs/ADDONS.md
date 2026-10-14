@@ -4,7 +4,7 @@ An addon is how a vertical adds to Agent-Core without patching it: tools, policy
 prompt text, profiles, channels, tool wrappers and database tables, all declared in one manifest.
 This is the authoring guide. The operator's side (variables, startup errors) is
 [OPERATIONS.md](OPERATIONS.md#addons-enabling-them-and-setting-them-phase-2-d70-d72); the design is
-[ARCHITECTURE.md](ARCHITECTURE.md#addons-phase-2); the decisions are D70-D82 in
+[ARCHITECTURE.md](ARCHITECTURE.md#addons-phase-2); the decisions are D70-D83 in
 [DECISIONS.md](DECISIONS.md). The shipped samples in `addons/sample_*` are the worked examples and
 are loaded by the contract tests, so they cannot drift from the rules below.
 
@@ -176,6 +176,71 @@ is not a number) and never echoed in an error. Precedence: manifest default < th
 `AGENT_CORE_ADDONS_CONFIG` < `AGENT_CORE_ADDON__<ADDON>__<KEY>` variables. A value for an inactive
 addon or an undeclared key is an error. The validated values reach `post_init` as
 `context.settings`.
+
+## The HTTP tool bridge (`http_tool_bridge`, D83)
+
+A shipped library addon: it provides no tool of its own and builds tools from a manifest YAML that a
+consumer addon carries. It names no vertical. The consumer lists it under `depends` (it is never
+enabled for you) and calls the builder from its toolset module:
+
+```yaml
+# addons/shop/addon.yaml
+depends: [http_tool_bridge]
+provides: {toolsets: [catalog], audit: {allow: {get_item: [item_id]}}}
+```
+
+```python
+# addons/shop/toolsets/catalog.py
+from pathlib import Path
+from agent_core.adapters.driven.tools.http_bridge import build_bridge_toolset
+
+def build_toolset():
+    return build_bridge_toolset(Path(__file__).resolve().parent.parent / "tools.yaml")
+```
+
+```yaml
+# addons/shop/tools.yaml
+api_prefix: /internal/v1               # optional
+defaults: {context: [session, agent, tenant]}   # headers every tool sends unless it says otherwise
+tools:
+  - name: get_item
+    description: One item by id.
+    method: GET                        # GET | POST | PUT | PATCH | DELETE
+    route: /items/{item_id}            # {x} = a `path` argument
+    kind: read                         # read -> replay `safe`; write -> `interrupted` (override: replay:)
+    arguments:                         # all the model may send; never a store, case or date
+      item_id: {type: string, in: path, required: true}
+      limit: {type: integer, in: query, default: 10, minimum: 1, maximum: 20}   # clamped
+      kind: {type: string, in: query, enum: [a, b]}                             # else an error value
+    context: [session, agent]          # session | agent | tenant | subject -> header names are settings
+    response:
+      pick: [id, name]                 # allowlist of keys (of an object, or of each row)
+      rows_key: items                  # rows live under this key (omit: the body is the list)
+      row_limit: 5                     # default: the `default_row_limit` setting
+      wrap_as: reviews                 # return {reviews: <data>}
+    warning: true                      # add the service's warning header (setting) as `warning`
+  - name: reserve_item
+    description: Reserve an item.
+    method: POST
+    route: /reservations
+    kind: write
+    idempotency: [item_id, slot]       # arguments keying the Idempotency-Key (session + parts)
+    arguments:
+      item_id: {type: string, in: body, required: true}
+      slot: {type: string, in: body, required: true}
+```
+
+Rules: the manifest is validated when the consumer's toolset is built (a bad one stops startup naming
+the file and field); an argument problem, an HTTP error, a timeout or a network failure is returned
+to the model as `{"error": ..., "status"?: ...}`, never raised (an `application/problem+json` error body also adds a structured `problem` {type, title, status, detail} and puts `title: detail` in the message); a reply with a warning and no
+`wrap_as` gets a `warning` key (a list becomes `{"data": [...], "warning": ...}`). Settings
+(`base_url`, timeouts, `default_row_limit`, the header names, `peer_session_prefix`, `service_name`) are
+the bridge addon's: `build_bridge_toolset(path)` reads them from the enabled `http_tool_bridge`
+(file defaults, `AGENT_CORE_ADDONS_CONFIG`, `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*`) because a
+toolset's `build_toolset()` receives none. The library lives in
+`agent_core.adapters.driven.tools.http_bridge` because addon code cannot import another addon (the
+boundary scan forbids the import routes); an example manifest is
+`Core/tests/fixtures/http_bridge/example_tools.yaml`.
 
 ## Migrations and `post_init`
 

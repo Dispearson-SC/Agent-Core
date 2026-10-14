@@ -98,6 +98,7 @@ Core/
         skills_fs/         # SkillRegistry over SKILL.md files
         profiles_fs/       # reads and parses profile YAML; the domain never does
         addons_fs/         # addon.yaml manifests, resolution, settings, install state (Phase 2, D70-D82)
+        tools/http_bridge/ # manifest-driven HTTP tools for consumer addons (Phase 3, D83)
         mcp/               # MCPToolset composed into ToolProvider
         human/             # HumanGateway: channel + evidence
         media_fs/          # MediaStore

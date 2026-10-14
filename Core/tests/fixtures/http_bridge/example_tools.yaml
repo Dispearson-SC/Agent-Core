@@ -1,0 +1,51 @@
+# A tiny, vertical-neutral manifest used by the bridge tests: a library service.
+api_prefix: /api/v1
+tools:
+  - name: list_books
+    description: List books, newest first. Optionally narrow by genre.
+    method: GET
+    route: /books
+    kind: read
+    arguments:
+      limit: {type: integer, in: query, default: 10, minimum: 1, maximum: 20, description: Rows wanted.}
+      genre: {type: string, in: query, enum: [fiction, science, history]}
+    response:
+      pick: [id, title, author]
+      rows_key: items
+      row_limit: 3
+  - name: get_book
+    description: One book by id.
+    method: GET
+    route: /books/{book_id}
+    kind: read
+    arguments:
+      book_id: {type: string, in: path, required: true}
+    response:
+      pick: [id, title, author, year]
+  - name: recall_reviews
+    description: Reviews of a book, with the service warning when degraded.
+    method: GET
+    route: /reviews
+    kind: read
+    warning: true
+    arguments:
+      query: {type: string, in: query, required: true}
+    response:
+      wrap_as: reviews
+  - name: reserve_book
+    description: Reserve a book for the caller.
+    method: POST
+    route: /reservations
+    kind: write
+    context: [session, agent, tenant]
+    idempotency: [book_id, slot]
+    arguments:
+      book_id: {type: string, in: body, required: true}
+      slot: {type: string, in: body, required: true}
+      note: {type: string, in: body, default: ""}
+  - name: ping
+    description: Health probe with no context headers.
+    method: GET
+    route: /ping
+    kind: read
+    context: []

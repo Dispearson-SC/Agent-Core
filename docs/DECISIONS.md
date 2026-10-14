@@ -2987,3 +2987,42 @@ decision 2026-10-13) and are described by `addon.yaml`.
   wrapped and the last loaded wrapper is outermost; the `{{slot:x}}` marker has no escape;
   migrations are a flat ordered directory, not checksummed, a failing file rolls back alone;
   one synchronous `post_init`; no uninstall; install and removal need a restart.
+
+## D83 - The HTTP tool bridge: a library addon over a Core adapter package (Phase 3, G1)
+
+- **Shape.** Addon `http_tool_bridge` (settings schema only, no `provides`) plus the library
+  `agent_core.adapters.driven.tools.http_bridge` (`manifest`, `client`, `builder`, `settings`).
+  Consumers (`glazed` tools, later others) ship a `tools.yaml` and call
+  `build_bridge_toolset(manifest_path, settings=None, *, transport=None) -> FunctionToolset`
+  from their toolset module. Why the library is not inside the addon directory: toolset modules are
+  loaded by path, so another addon cannot import them, and `importlib`/`sys.modules` are forbidden by
+  the boundary scan (D82). `agent_core.adapters.*` is the allowed surface; nothing here touches
+  `domain/`, `application/`, `ports/` beyond `domain.tool_replay`. Rejected: a bridge helper module
+  copied into every consumer; widening the allowed surface to other addons.
+- **Settings reach the builder from the environment.** `build_toolset()` takes no arguments and the
+  loader hands settings only to `post_init`, so `settings_from_environment()` re-reads the same
+  sources (addon defaults, `AGENT_CORE_ADDONS_CONFIG`, `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*`) and
+  fails at build time, naming the addon, when it is not enabled. A test keeps `BridgeSettings` and
+  `addon.yaml` in step. Open (reversible): let the loader pass settings to `build_toolset(settings)`.
+- **Manifest** (see ADDONS.md): per tool name, description, method, route template, `kind`
+  read/write, typed arguments with `in` path/query/body, `enum`, clamped `minimum`/`maximum`,
+  `context` headers (session, agent, tenant, subject; header NAMES are settings, an empty name turns
+  one off), write `idempotency` parts, `response` (`pick`, `rows_key`, `row_limit`, `wrap_as`),
+  `warning`, `replay`. Unknown keys are errors.
+- **Behavior carried over from the first vertical's client:** errors as values (timeout, network, any
+  exception, HTTP >= 400 with a 300-char body excerpt and the status, non-JSON), `None` query values
+  dropped, the idempotency key `sha256(session \x1f parts...)[:32]`, peer session ids resolved to the
+  asking session (now the `peer_session_prefix` / `_separator` settings, off by default), warning
+  header surfaced. Messages say "The <service_name> ..." instead of a product name.
+- **Deliberate differences (reversible):** reads are replay-`safe` and writes `interrupted` by
+  default (the old tools were all `interrupted`); a junk integer falls back to its default, an
+  out-of-range one is clamped, an enum miss or a missing required argument is an error value and
+  makes no call; the tool schema is built from the manifest, so the docstring prose of the old
+  functions moves into `description` (G2 must keep the text identical).
+- **One manifest model, many sources.** `BridgeManifest` is a plain typed (pydantic) model;
+  `parse_bridge_manifest(mapping, source=...)` validates and resolves defaults for ANY producer and
+  `load_bridge_manifest(path)` is just YAML parsing in front of it, so a later OpenAPI reader (G1b)
+  feeds the same model and builder. Default header names are neutral (`X-Agent-Session`,
+  `X-Agent-Id`, `X-Agent-Tenant`; the first vertical sets its own via settings). An
+  `application/problem+json` error body is kept as a structured `problem` in the error value.
+
