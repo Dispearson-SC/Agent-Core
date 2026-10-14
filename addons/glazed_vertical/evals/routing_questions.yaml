@@ -1,0 +1,181 @@
+# The glazed copilot's routing question set (Phase 5 P4): what a store manager asks, labelled with
+# the route each question SHOULD take. Format: Core/evals/routing.py (module docstring).
+#
+# SYNTHETIC. Nobody recorded these: they were written from what each glazed role and tool covers
+# (profiles/*.yaml, glazed_tools ROLES and overlay.yaml). Replace or extend them with real recorded
+# manager questions as soon as there are any; keep the labels honest (one route per question).
+#
+# ROUTES
+#   intent:<name>          S6 layer B: a frequent question answered by a fixed tool plan run by code
+#                          (proposed; executors are P3). The plan of each intent:
+#     day_summary          get_day_summary {date: the case date}             (glazed_present)
+#     active_issues        get_issues {category: operational, limit: 10}     (glazed_present)
+#     order_plan           get_order_plan {}                                 (glazed_supply)
+#     stockout_risk        project_inventory {horizon: 7, sku: if named}     (glazed_supply)
+#     expiring_items       get_expiring {days: 7}                            (glazed_supply)
+#     upcoming_deliveries  get_deliveries {days: 7}                          (glazed_supply)
+#     staffing             get_staffing {days: 7}                            (glazed_strategist)
+#     promo_list           get_promos {status: active|upcoming|past, days: 14} (glazed_strategist)
+#     data_integrity       get_integrity_issues {}                           (glazed_auditor)
+#     transfer_options     get_transfer_options {limit: 5, sku: if named}    (glazed_liaison)
+#   profile:<id>           S6 layer A: one specialist can answer, but not with one fixed plan
+#   pass                   the orchestrator: several specialists, a recommendation or proposal,
+#                          a manager note, a rejection to classify, small talk or out of scope
+#
+# keyword_router is the OFFLINE floor the benchmark runs without a classifier (first match wins,
+# case and accents ignored). It is not a production router: a real one must beat it.
+name: glazed_store_manager
+synthetic: true
+description: >-
+  Spanish questions a Glazed store manager would ask the copilot, written from the glazed roles and
+  tools (not recorded). Entry profile is the orchestrator; routes target its specialists.
+entry_profile: glazed_orchestrator
+
+keyword_router:
+  - route: "pass"
+    keywords: [recomiend, propon, anota, apunta, recuerda que, no quiero, hola, gracias, clima, debo, que hago]
+  - route: "intent:data_integrity"
+    keywords: [datos, sin darnos cuenta, integridad, cuadra]
+  - route: "intent:transfer_options"
+    keywords: [otra sucursal, otra tienda, traspaso, sobrante]
+  - route: "intent:expiring_items"
+    keywords: [caduc, vence, vencer]
+  - route: "intent:upcoming_deliveries"
+    keywords: [entrega, llega el proveedor, llega el pedido]
+  - route: "intent:order_plan"
+    keywords: [pedir, pedido de manana, plan de pedido, cuanto pido]
+  - route: "intent:stockout_risk"
+    keywords: [acabar, me quedo sin, alcanza el inventario, agot]
+  - route: "intent:staffing"
+    keywords: [personal, plantilla, turnos, empleados]
+  - route: "intent:promo_list"
+    keywords: [promociones activas, promos vigentes, que promos]
+  - route: "intent:active_issues"
+    keywords: [problemas, alertas, urgente]
+  - route: "intent:day_summary"
+    keywords: [hoy, ayer, resumen del dia]
+  - route: "profile:glazed_past"
+    keywords: [la ultima vez, como nos fue, el ano pasado, que decidimos]
+  - route: "profile:glazed_sentinel"
+    keywords: [se cumplio, se ejecut, aprobe, registra]
+  - route: "profile:glazed_strategist"
+    keywords: [descuento, cuanta gente, clientes]
+  - route: "profile:glazed_supply"
+    keywords: [proveedor, demanda, cobertura, lento]
+  - route: "profile:glazed_present"
+    keywords: [significa, que es, kpi, ventas]
+
+questions:
+  # --- intent:day_summary ---------------------------------------------------------------------
+  - {id: ds01, text: "¿Cómo vamos hoy?", expected: "intent:day_summary"}
+  - {id: ds02, text: "¿Cuánto vendimos ayer?", expected: "intent:day_summary"}
+  - {id: ds03, text: "Dame el resumen del día", expected: "intent:day_summary"}
+  - {id: ds04, text: "¿Cuánto se tiró hoy de merma?", expected: "intent:day_summary"}
+  - {id: ds05, text: "¿Cuánto dejamos de vender ayer por faltantes?", expected: "intent:day_summary"}
+
+  # --- intent:active_issues -------------------------------------------------------------------
+  - {id: ai01, text: "¿Qué problemas tenemos ahorita en la tienda?", expected: "intent:active_issues"}
+  - {id: ai02, text: "¿Hay algo urgente que deba atender?", expected: "intent:active_issues"}
+  - {id: ai03, text: "¿Qué alertas hay abiertas?", expected: "intent:active_issues"}
+  - {id: ai04, text: "Lista los pendientes operativos de la sucursal", expected: "intent:active_issues"}
+
+  # --- intent:order_plan ----------------------------------------------------------------------
+  - {id: op01, text: "¿Qué tengo que pedir?", expected: "intent:order_plan"}
+  - {id: op02, text: "¿Cuál es el pedido de mañana?", expected: "intent:order_plan"}
+  - {id: op03, text: "Muéstrame el plan de pedido", expected: "intent:order_plan"}
+  - {id: op04, text: "¿Cuánto pido de dona glaseada?", expected: "intent:order_plan"}
+  - {id: op05, text: "¿Para cuándo tengo que mandar la orden al proveedor?", expected: "intent:order_plan", note: "order_deadline is a field of the plan lines"}
+
+  # --- intent:stockout_risk -------------------------------------------------------------------
+  - {id: sr01, text: "¿Qué se me va a acabar esta semana?", expected: "intent:stockout_risk"}
+  - {id: sr02, text: "¿Cuándo me quedo sin leche?", expected: "intent:stockout_risk"}
+  - {id: sr03, text: "¿Me alcanza el inventario hasta el lunes?", expected: "intent:stockout_risk"}
+  - {id: sr04, text: "¿Hay riesgo de agotados en los próximos días?", expected: "intent:stockout_risk"}
+
+  # --- intent:expiring_items ------------------------------------------------------------------
+  - {id: ex01, text: "¿Qué está por caducar?", expected: "intent:expiring_items"}
+  - {id: ex02, text: "¿Qué se vence esta semana?", expected: "intent:expiring_items"}
+  - {id: ex03, text: "Dime los productos próximos a vencer", expected: "intent:expiring_items"}
+  - {id: ex04, text: "¿Tengo lácteos que vayan a caducar pronto?", expected: "intent:expiring_items"}
+
+  # --- intent:upcoming_deliveries -------------------------------------------------------------
+  - {id: ud01, text: "¿Qué entregas tengo esta semana?", expected: "intent:upcoming_deliveries"}
+  - {id: ud02, text: "¿Cuándo llega el proveedor de harina?", expected: "intent:upcoming_deliveries"}
+  - {id: ud03, text: "¿Llega el pedido mañana?", expected: "intent:upcoming_deliveries"}
+  - {id: ud04, text: "¿Qué me surten en los próximos días?", expected: "intent:upcoming_deliveries"}
+
+  # --- intent:staffing ------------------------------------------------------------------------
+  - {id: st01, text: "¿Cuánto personal tengo programado esta semana?", expected: "intent:staffing"}
+  - {id: st02, text: "¿Cómo está la plantilla para el fin de semana?", expected: "intent:staffing"}
+  - {id: st03, text: "¿Me alcanzan los empleados el sábado?", expected: "intent:staffing"}
+  - {id: st04, text: "Muéstrame los turnos de los próximos días", expected: "intent:staffing"}
+
+  # --- intent:promo_list ----------------------------------------------------------------------
+  - {id: pl01, text: "¿Qué promociones activas tenemos?", expected: "intent:promo_list"}
+  - {id: pl02, text: "¿Hay promos vigentes?", expected: "intent:promo_list"}
+  - {id: pl03, text: "¿Qué promos vienen para la próxima semana?", expected: "intent:promo_list"}
+  - {id: pl04, text: "¿Qué ofertas corrimos las últimas dos semanas?", expected: "intent:promo_list"}
+
+  # --- intent:data_integrity ------------------------------------------------------------------
+  - {id: di01, text: "¿Hay problemas en los datos?", expected: "intent:data_integrity"}
+  - {id: di02, text: "¿Perdemos dinero sin darnos cuenta?", expected: "intent:data_integrity"}
+  - {id: di03, text: "¿El sistema tiene SKUs que no cuadran?", expected: "intent:data_integrity"}
+  - {id: di04, text: "Revisa la integridad de la información de la tienda", expected: "intent:data_integrity"}
+
+  # --- intent:transfer_options ----------------------------------------------------------------
+  - {id: to01, text: "¿Puedo mandar el sobrante a otra sucursal?", expected: "intent:transfer_options"}
+  - {id: to02, text: "¿Qué traspasos me convienen?", expected: "intent:transfer_options"}
+  - {id: to03, text: "¿Otra tienda necesita del pan que me sobra?", expected: "intent:transfer_options"}
+  - {id: to04, text: "¿A dónde muevo el excedente de croissants?", expected: "intent:transfer_options"}
+
+  # --- profile:glazed_present -----------------------------------------------------------------
+  - {id: pr01, text: "¿Qué significa merma?", expected: "profile:glazed_present"}
+  - {id: pr02, text: "¿Qué es la venta perdida y cómo se calcula?", expected: "profile:glazed_present"}
+  - {id: pr03, text: "¿Cómo vamos en ventas este mes contra el anterior?", expected: "profile:glazed_present"}
+  - {id: pr04, text: "Dame los KPI de la semana pasada", expected: "profile:glazed_present"}
+  - {id: pr05, text: "¿Cómo se ve mañana para la tienda?", expected: "profile:glazed_present", note: "get_outlook; the orchestrator routes today/tomorrow to present"}
+
+  # --- profile:glazed_supply ------------------------------------------------------------------
+  - {id: su01, text: "¿Qué proveedor se retrasa más?", expected: "profile:glazed_supply"}
+  - {id: su02, text: "¿Cuánta demanda espero de dona de chocolate el viernes?", expected: "profile:glazed_supply"}
+  - {id: su03, text: "¿Qué productos tienen menos días de cobertura?", expected: "profile:glazed_supply"}
+  - {id: su04, text: "¿Qué productos se mueven más lento?", expected: "profile:glazed_supply"}
+  - {id: su05, text: "Explícame a fondo el problema de sobreinventario del chocolate", expected: "profile:glazed_supply", note: "get_issue_analysis"}
+
+  # --- profile:glazed_strategist --------------------------------------------------------------
+  - {id: sg01, text: "¿Conviene hacer 20% de descuento en panadería?", expected: "profile:glazed_strategist", note: "audit_promo before any promo"}
+  - {id: sg02, text: "¿Cuánta gente va a venir el sábado?", expected: "profile:glazed_strategist", note: "forecast_daily_flow"}
+  - {id: sg03, text: "¿Cuántos clientes espero el próximo domingo?", expected: "profile:glazed_strategist"}
+  - {id: sg04, text: "¿Me sobra o me falta gente según el flujo esperado del fin de semana?", expected: "profile:glazed_strategist"}
+
+  # --- profile:glazed_past --------------------------------------------------------------------
+  - {id: pa01, text: "¿Qué pasó la última vez que hicimos 2x1 en donas?", expected: "profile:glazed_past"}
+  - {id: pa02, text: "¿Cómo nos fue con la promo de San Valentín?", expected: "profile:glazed_past", note: "evaluate_promo"}
+  - {id: pa03, text: "¿Qué decidimos el mes pasado sobre el pedido de harina?", expected: "profile:glazed_past"}
+  - {id: pa04, text: "¿Ya habíamos tenido un cierre por lluvia antes?", expected: "profile:glazed_past", note: "recall_experiences, re-verified with get_history"}
+
+  # --- profile:glazed_sentinel ----------------------------------------------------------------
+  - {id: se01, text: "¿Se cumplió el pedido que aprobé ayer?", expected: "profile:glazed_sentinel"}
+  - {id: se02, text: "¿Se ejecutaron las decisiones aprobadas de esta semana?", expected: "profile:glazed_sentinel"}
+  - {id: se03, text: "¿Por qué no se hizo lo que acordamos con la leche?", expected: "profile:glazed_sentinel", note: "deviation with its recorded events"}
+  - {id: se04, text: "Registra que hubo bloqueo en la carretera del martes al miércoles", expected: "profile:glazed_sentinel", note: "record_event, an operational event"}
+
+  # --- profile:glazed_liaison -----------------------------------------------------------------
+  - {id: li01, text: "Pon sobre la mesa el traspaso de donas a la sucursal Centro", expected: "profile:glazed_liaison", note: "propose_transfer: a write, kept to the specialist"}
+
+  # --- profile:glazed_auditor -----------------------------------------------------------------
+  - {id: au01, text: "Explícame el hallazgo de integridad con más dinero en juego", expected: "profile:glazed_auditor"}
+
+  # --- pass (the orchestrator) ----------------------------------------------------------------
+  - {id: ps01, text: "¿Qué me recomiendas hacer con el pedido de mañana?", expected: pass, note: "a recommendation: supply plus a proposal"}
+  - {id: ps02, text: "No quiero pedir más leche, el proveedor siempre llega tarde", expected: pass, note: "a rejection: classify_text"}
+  - {id: ps03, text: "Anota que el 19 de julio cerramos por inventario", expected: pass, note: "save_manager_note"}
+  - {id: ps04, text: "Dame el panorama general de la tienda", expected: pass, note: "get_briefing"}
+  - {id: ps05, text: "Hola, buenos días", expected: pass}
+  - {id: ps06, text: "¿Debo hacer una promo o pedir menos para bajar la merma?", expected: pass, note: "two specialists"}
+  - {id: ps07, text: "Propón la mejor opción para el problema de sobrestock", expected: pass, note: "propose_action"}
+  - {id: ps08, text: "¿Por qué bajaron las ventas esta semana y qué hago?", expected: pass}
+  - {id: ps09, text: "Gracias, eso es todo", expected: pass}
+  - {id: ps10, text: "¿Cuándo es el próximo día festivo?", expected: pass, note: "the briefing calendar"}
+  - {id: ps11, text: "¿Cómo va a estar el clima mañana?", expected: pass, note: "out of scope"}
+  - {id: ps12, text: "Compara lo que vendimos con lo pronosticado y dime si pido más", expected: pass, note: "two specialists and a recommendation"}
