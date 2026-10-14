@@ -4,6 +4,7 @@ from __future__ import annotations
 
 __all__ = [
     "AddonError",
+    "AddonRegistrationError",
     "AddonResolutionError",
     "AddonSettingsError",
     "ManifestError",
@@ -43,3 +44,15 @@ class AddonSettingsError(AddonError):
     """A setting does not match the schema the addon declares, or names a key it does not have."""
 
     _kind = "setting"
+
+
+class AddonRegistrationError(AddonError):
+    """An addon contributes something it did not declare, or something that collides.
+
+    Raised while the enabled addons are registered into the composition root (A4): a toolset,
+    an audit entry, a policy rule, a fragment, a profile or a channel that the manifest's
+    `provides` does not declare, that is not what the addon's files say, or whose name another
+    addon or Core already owns.
+    """
+
+    _kind = "extension point"

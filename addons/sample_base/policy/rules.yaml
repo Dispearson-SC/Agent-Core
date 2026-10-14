@@ -1,0 +1,5 @@
+rules:
+  - rule_id: sample-base-allow-echo
+    tool_pattern: sample_echo
+    effect: allow
+    reason: The sample echo tool only returns what it was given.

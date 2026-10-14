@@ -199,8 +199,25 @@ def _package_policy(module_name: str, attribute: str) -> dict[str, frozenset[str
     return {tool: frozenset(fields) for tool, fields in declared.items()}
 
 
+class AuditPolicyConflictError(ValueError):
+    """A source tried to change an audit decision another source already made.
+
+    `sources` names who declared the field in conflict (a registered package or an addon), so a
+    caller that knows which sources are addons can say which addon to fix.
+    """
+
+    def __init__(self, message: str, *, sources: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.sources = sources
+
+
+AuditContribution = tuple[Mapping[str, frozenset[str]], Mapping[str, frozenset[str]]]
+
+
 def collect_audit_policy(
     packages: Mapping[str, Callable[..., object]],
+    *,
+    contributions: Mapping[str, AuditContribution] | None = None,
 ) -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]]]:
     """The audit argument policy: the shipped constants plus what each package contributes.
 
@@ -211,37 +228,55 @@ def collect_audit_policy(
     `composition.TOOL_PACKAGES` are read - there is no discovery, which is the security
     property of that registry.
 
+    `contributions` (Phase 2, A4) is the same decision made by a source that is not a Python
+    module: `source name -> (by_value, by_presence)`, which is what an enabled addon's manifest
+    declares. They go through EXACTLY the guards below, after the packages.
+
     A package may not change a tool another source already decided: a different set for the
-    same tool name raises `ValueError`, because silently widening what an existing tool
-    records would be a data-exposure path. The same holds across the two maps: a field a
-    package declares must not also be decided in the other map by a built-in or another
-    package. An identical repeat is accepted. Returns
-    `(by_value, by_presence)`.
+    same tool name raises `AuditPolicyConflictError` (a `ValueError`), because silently widening
+    what an existing tool records would be a data-exposure path. The same holds across the two
+    maps: a field a package declares must not also be decided in the other map by a built-in or
+    another package. An identical repeat is accepted. Returns `(by_value, by_presence)`.
     """
     allow = dict(ARGUMENT_ALLOWLIST)
     presence = dict(ARGUMENT_PRESENCE_ONLY)
+    declared: list[tuple[str, str, dict[str, frozenset[str]]]] = []
+    for package, builder in packages.items():
+        for attribute in ("AUDIT_ALLOW", "AUDIT_PRESENCE_ONLY"):
+            module = getattr(builder, "__module__", "")
+            declared.append((package, attribute, _package_policy(module, attribute)))
+    for source, (by_value, by_presence) in (contributions or {}).items():
+        declared.append((source, "AUDIT_ALLOW", {t: frozenset(f) for t, f in by_value.items()}))
+        declared.append(
+            (source, "AUDIT_PRESENCE_ONLY", {t: frozenset(f) for t, f in by_presence.items()})
+        )
     contributed_fields: dict[tuple[str, str], set[str]] = {}
+    # The two attributes are applied one after the other (all of AUDIT_ALLOW, then all of
+    # AUDIT_PRESENCE_ONLY), as they always were.
     for target, attribute in ((allow, "AUDIT_ALLOW"), (presence, "AUDIT_PRESENCE_ONLY")):
-        for package, builder in packages.items():
-            contributed = _package_policy(getattr(builder, "__module__", ""), attribute)
+        for package, declared_attribute, contributed in declared:
+            if declared_attribute != attribute:
+                continue
             for tool, fields in contributed.items():
                 if tool in target and target[tool] != fields:
-                    raise ValueError(
+                    raise AuditPolicyConflictError(
                         f"package {package!r} declares {attribute}[{tool!r}] but that tool "
-                        "already has a different audit decision"
+                        "already has a different audit decision",
+                        sources=(package,),
                     )
                 target[tool] = fields
                 for field in fields:
-                    contributed_fields.setdefault((tool, field), set()).add(attribute)
+                    contributed_fields.setdefault((tool, field), set()).add(package)
     # `_redact` reads by-value first, so a field a package puts in AUDIT_ALLOW overrides a
     # presence decision elsewhere (widening), and the reverse silently narrows a built-in.
     # Any field a package touched must therefore sit in exactly one map. (A built-in field
     # listed in both maps on purpose is not a package contribution and is left alone.)
-    for (tool, field), _attributes in sorted(contributed_fields.items()):
+    for (tool, field), sources in sorted(contributed_fields.items()):
         if field in allow.get(tool, frozenset()) and field in presence.get(tool, frozenset()):
-            raise ValueError(
+            raise AuditPolicyConflictError(
                 f"audit policy for {tool!r}.{field!r} is declared both by value and by "
-                "presence; a package may not change another source's decision across maps"
+                "presence; a package may not change another source's decision across maps",
+                sources=tuple(sorted(sources)),
             )
     return allow, presence
 

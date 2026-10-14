@@ -1,6 +1,9 @@
 name: sample_extra
 version: 1.0.0
 core: ">=0.0,<1"
+provides:
+  # A pull-mode channel id a backend can start turns on (no code).
+  channels: [sample_channel]
 settings:
   enabled_features:
     type: list

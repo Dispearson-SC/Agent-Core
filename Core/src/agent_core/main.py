@@ -146,6 +146,7 @@ from agent_core.application.ingest_media import IngestMedia
 from agent_core.composition import (
     Container,
     Settings,
+    addon_contributions,
     build_container,
     load_profiles,
     start_container,
@@ -537,7 +538,9 @@ def build_console(
         # The console never learns that a profile is a YAML file on a disk - `yaml` is
         # banned outside `adapters/`, and this callable is the whole of the seam.
         load_profiles=lambda: load_profiles(
-            container.settings.profiles_dir, container.profile_versions
+            container.settings.profiles_dir,
+            container.profile_versions,
+            addon_contributions(container.settings),
         ),
         # t-f11-33 / D25. The container's OWN `DecideApproval`, so the console answers a
         # pending request through the same use case `POST /decisions/{corr_id}` does - one

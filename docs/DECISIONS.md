@@ -2729,3 +2729,33 @@ decision 2026-10-13) and are described by `addon.yaml`.
   `Literal` cannot carry bounds, so a choice outside the declared bounds is a `ManifestError` on
   `settings.<key>.choices`. Rejected: a runtime validator on top of the `Literal` (it would accept
   a manifest whose declared choices can never all be valid).
+
+## D74 - Addon registration goes through one value and the existing seams (A4)
+
+- **Choice: `register_addons` returns one `AddonContributions` and the composition root hands it
+  to the seams it already had.** Toolsets are merged into `TOOL_PACKAGES` (a new mapping only when
+  an addon contributes one, so no-addon behaviour is the very same object), audit goes through
+  `collect_audit_policy(contributions=...)` so the no-redefinition and cross-map guards are not
+  re-implemented for addons, policy rules are appended to the set `start_container` reconciles and
+  `_refuse_topology_drift` checks, fragments and profile templates go to `load_profiles`, channels
+  to `build_channel_registry`. Rejected: letting each addon mutate the registries (order-dependent,
+  and nothing would prove it stayed inside what `provides` declared).
+- **Addon code runs here, and only here.** A toolset is `toolsets/<name>.py` inside the addon,
+  imported by file path under `agent_core_addons.<addon>.<name>` once the addon is enabled and
+  resolved. The module may not declare `AUDIT_ALLOW`/`AUDIT_PRESENCE_ONLY`: audit lives in the
+  manifest (one file to review), and a module attribute `collect_audit_policy` would read is
+  refused rather than ignored.
+- **Ownership is strict.** An addon audits only the tools of its own toolsets and may `allow` only
+  its own tools (a pattern that also reaches a foreign tool is refused); `deny` and
+  `needs_approval` may narrow anything, because `EFFECT_PRECEDENCE` makes them only restrictive.
+  Toolset, tool, fragment, profile id, channel and rule id are global names: a collision with Core
+  or another addon fails startup naming the addon (no namespacing: a profile must keep naming a
+  toolset by the same word everywhere).
+- **Policy needs file-managed policy.** Reconciling deletes undeclared rules, so an addon that
+  contributes rules in a deployment with no policy directory is refused instead of silently
+  disarming the rules kept in the database. Rejected: creating the directory implicitly.
+- **Fragments are the existing `include:` names**, looked up in the profile's fragments directory
+  first and then in the addons' (collisions are refused, so the order decides nothing). Inserting
+  at named slots of another profile is A5.
+- **Channels are pull-mode ids only** (no code), merged with `AGENT_CORE_PULL_CHANNELS`; an id the
+  operator already lists is a collision rather than a silent merge.

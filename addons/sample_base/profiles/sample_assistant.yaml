@@ -1,0 +1,10 @@
+id: sample_assistant
+description: "Sample assistant contributed by the sample_base addon."
+persona: |
+  You echo what you are given, using the sample_echo tool.
+include: [sample_note]
+model: minimax/MiniMax-M3
+toolsets:
+  - sample_echo
+max_iterations: 5
+max_cost_usd: "0.10"

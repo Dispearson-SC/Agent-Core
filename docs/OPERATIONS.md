@@ -497,6 +497,28 @@ opt-in, because against a real model it takes minutes and costs money.
 - A bridge (`auto_install: true`) needs no entry in the list: it activates when every addon it
   depends on is active. Do not set its variables unless that is the case, or startup stops.
 - A wrong value is never printed back (it may be a secret); the message names the variable instead.
-- This slice only resolves and validates; what an addon provides (toolsets, policy, fragments,
-  channels) is registered by A4, so enabling one has no runtime effect yet.
+
+### What an enabled addon registers (A4, D74)
+
+An addon contributes exactly what `provides` in its `addon.yaml` declares. No new variable: the
+list above is the only switch, and everything below happens at startup (build and `start_container`).
+
+| `provides.` | Where it lives in the addon | Registered as |
+|---|---|---|
+| `toolsets: [name]` | `toolsets/<name>.py` with a zero-argument `build_toolset()` returning a `FunctionToolset` | a toolset a profile lists in `toolsets:` |
+| `audit.allow` / `audit.presence_only` | `addon.yaml` only (`tool: [argument, ...]`); the toolset module may NOT declare `AUDIT_ALLOW` | audit argument policy, for the addon's own tools only |
+| `policy: path` | one rules file, same format as `Core/policy/*.yaml` | rules reconciled with Core's; `allow` rules may name only the addon's own tools |
+| `fragments: dir/` | `<name>.md` files | names a profile can put in `include:` |
+| `profiles: dir/` | `*.yaml` profile files | profiles served next to Core's |
+| `channels: [id]` | nothing (no code) | pull-mode channel ids, like `AGENT_CORE_PULL_CHANNELS` |
+
+- Startup stops, naming the addon and the `provides.*` key, when: a declared file is missing or
+  fails to import; a toolset, tool, fragment, profile id, channel or rule id is already used by Core
+  or by another addon (or, for a channel, listed in `AGENT_CORE_PULL_CHANNELS`); an audit entry names
+  a tool the addon does not export, or contradicts an existing decision; an `allow` rule reaches a
+  tool the addon does not own (`deny` and `needs_approval` rules may name any tool); or the addon
+  contributes rules but the deployment has no policy directory.
+- An addon's rules are part of the reviewed set: removing the addon from `AGENT_CORE_ADDONS` and
+  restarting revokes them, exactly like deleting a rule from `Core/policy/`.
+- `:reload` in the console and `preflight` see the addons' profiles and toolsets too.
 

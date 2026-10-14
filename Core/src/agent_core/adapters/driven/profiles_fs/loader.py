@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +50,12 @@ from agent_core.domain.profile import AgentProfile, ProfileValidationError
 __all__ = ["load_profile", "load_profile_sync", "parse_profile"]
 
 
-def parse_profile(text: str, *, fragments_dir: Path | None = None) -> AgentProfile:
+def parse_profile(
+    text: str,
+    *,
+    fragments_dir: Path | None = None,
+    addon_fragments: Mapping[str, Path] | None = None,
+) -> AgentProfile:
     """Parse one profile document. Raises `ProfileValidationError` on anything malformed.
 
     `safe_load`, never `load`: a profile file is configuration, and a loader that can
@@ -62,12 +68,18 @@ def parse_profile(text: str, *, fragments_dir: Path | None = None) -> AgentProfi
     moves the content hash and earns a new profile version (D20). A missing fragment, or no
     fragments directory, is a `ProfileValidationError` at load - never a silently shorter
     persona.
+
+    `addon_fragments` (Phase 2, A4) is `name -> file` for the fragments enabled addons provide.
+    A name is looked up in `fragments_dir` first; the addon registration has already refused a
+    name both provide, so the order never decides anything.
     """
     data: Any = yaml.safe_load(text)
     if isinstance(data, dict) and "include" in data:
         data = {**data}
         names = data.pop("include")
-        data["persona"] = _with_fragments(data.get("persona"), names, fragments_dir)
+        data["persona"] = _with_fragments(
+            data.get("persona"), names, fragments_dir, addon_fragments
+        )
     return AgentProfile.from_mapping(data)
 
 
@@ -76,7 +88,12 @@ def parse_profile(text: str, *, fragments_dir: Path | None = None) -> AgentProfi
 _FRAGMENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
-def _with_fragments(persona: object, names: object, fragments_dir: Path | None) -> object:
+def _with_fragments(
+    persona: object,
+    names: object,
+    fragments_dir: Path | None,
+    addon_fragments: Mapping[str, Path] | None = None,
+) -> object:
     if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
         raise ProfileValidationError("include must be a list of fragment names")
     if not isinstance(persona, str):
@@ -86,6 +103,8 @@ def _with_fragments(persona: object, names: object, fragments_dir: Path | None) 
         if not _FRAGMENT_NAME.fullmatch(name) or ".." in name:
             raise ProfileValidationError(f"invalid fragment name {name!r}")
         path = None if fragments_dir is None else fragments_dir / f"{name}.md"
+        if (path is None or not path.is_file()) and addon_fragments and name in addon_fragments:
+            path = addon_fragments[name]
         if path is None or not path.is_file():
             raise ProfileValidationError(
                 f"include: fragment {name!r} not found"
@@ -95,14 +114,22 @@ def _with_fragments(persona: object, names: object, fragments_dir: Path | None) 
     return "\n\n".join(parts)
 
 
-def load_profile_sync(path: str | Path, fragments_dir: Path | None = None) -> AgentProfile:
+def load_profile_sync(
+    path: str | Path,
+    fragments_dir: Path | None = None,
+    addon_fragments: Mapping[str, Path] | None = None,
+) -> AgentProfile:
     """Read and parse one profile file. The sync island - see the module docstring.
 
     Fragments default to the `fragments/` directory next to the profile file.
     """
     file = Path(path)
     directory = file.parent / "fragments" if fragments_dir is None else fragments_dir
-    return parse_profile(file.read_text(encoding="utf-8"), fragments_dir=directory)
+    return parse_profile(
+        file.read_text(encoding="utf-8"),
+        fragments_dir=directory,
+        addon_fragments=addon_fragments,
+    )
 
 
 async def load_profile(path: str | Path) -> AgentProfile:

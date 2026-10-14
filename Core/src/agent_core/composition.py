@@ -169,6 +169,16 @@ import psycopg
 from psycopg.conninfo import conninfo_to_dict
 from psycopg_pool import ConnectionPool
 
+from agent_core.adapters.driven.addons_fs.errors import AddonRegistrationError
+from agent_core.adapters.driven.addons_fs.loader import ResolvedAddon, load_addons_from_environment
+from agent_core.adapters.driven.addons_fs.registration import (
+    EMPTY as NO_ADDON_CONTRIBUTIONS,
+)
+from agent_core.adapters.driven.addons_fs.registration import (
+    AddonContributions,
+    collect_audit_for,
+    register_addons,
+)
 from agent_core.adapters.driven.agent_pydantic.runner import PydanticAgentRunner
 from agent_core.adapters.driven.context.engine import LadderContextEngine
 from agent_core.adapters.driven.context.summariser import ModelSummariser
@@ -191,7 +201,6 @@ from agent_core.adapters.driven.persistence_pg.audit_read_repository import (
 )
 from agent_core.adapters.driven.persistence_pg.audit_repository import (
     PgAuditSink,
-    collect_audit_policy,
 )
 from agent_core.adapters.driven.persistence_pg.conversation_repository import (
     PgConversationStore,
@@ -252,6 +261,7 @@ from agent_core.application.ingest_media import IngestMedia
 from agent_core.application.resume_turn import ResumeTurn
 from agent_core.application.start_turn import StartTurn
 from agent_core.domain.media import MediaRef
+from agent_core.domain.policy import PolicyRule
 from agent_core.domain.profile import AgentProfile, ProfileVersionRegistry
 from agent_core.domain.topology import validate_topology
 from agent_core.domain.turn import (
@@ -634,6 +644,10 @@ class Settings:
     # to fail in `_step_deliver`, after the model call. `http` and `cli` are always there.
     pull_channels: tuple[str, ...] = ()
 
+    # Phase 2 (A4, D74). The addons `AGENT_CORE_ADDONS` enables, resolved and with their settings
+    # validated, in activation order. Empty (the default) means nothing below is touched.
+    addons: tuple[ResolvedAddon, ...] = ()
+
     # t-f2-12. What the durable engine is told about itself. See `dbos_config`.
     #
     # `dbos_application_version` defaults to the SOURCE constant on purpose: a pin that
@@ -737,6 +751,7 @@ class Settings:
             channel_profile_id=env.get("AGENT_CORE_CHANNEL_PROFILE_ID"),
             human_gateway_channel_id=env.get("AGENT_CORE_HUMAN_GATEWAY_CHANNEL_ID"),
             pull_channels=_parse_channel_ids(env.get("AGENT_CORE_PULL_CHANNELS", "")),
+            addons=load_addons_from_environment(env),
             dbos_app_name=env.get("AGENT_CORE_DBOS_APP_NAME", _DBOS_APP_NAME),
             dbos_application_version=env.get(
                 "AGENT_CORE_DBOS_APPLICATION_VERSION", PINNED_DBOS_APPLICATION_VERSION
@@ -968,8 +983,48 @@ def _unopened_pool(conninfo: str) -> ConnectionPool[Any]:
     return ConnectionPool(conninfo, open=False)
 
 
+def addon_contributions(settings: Settings) -> AddonContributions:
+    """What the enabled addons add to this root (Phase 2, A4, D74); empty with none enabled.
+
+    Reads the addons' files and imports their toolset modules, nothing more: no I/O to a
+    database. Every seam an addon feeds takes this ONE value, so each is fed by the same
+    validated registration and an addon cannot reach a seam it did not declare.
+    """
+    if not settings.addons:
+        return NO_ADDON_CONTRIBUTIONS
+    return register_addons(
+        settings.addons,
+        builtin_toolsets=TOOL_PACKAGES,
+        builtin_fragments_dir=settings.profiles_dir / "fragments",
+        reserved_channels={
+            _HTTP_CHANNEL_ID,
+            _CLI_CHANNEL_ID,
+            TELEGRAM_CHANNEL_ID,
+            _WHATSAPP_CHANNEL_ID,
+            *settings.pull_channels,
+        },
+        builtin_rule_ids=_policy_file_rule_ids(settings.policy_dir),
+        manages_policy_files=settings.policy_dir.is_dir(),
+    )
+
+
+def _policy_file_rule_ids(policy_dir: Path) -> tuple[str, ...]:
+    if not policy_dir.is_dir():
+        return ()
+    return tuple(rule.rule_id for rule in load_policy_rules(policy_dir))
+
+
+def served_tool_packages(contributions: AddonContributions) -> Mapping[str, ToolsetBuilder]:
+    """`TOOL_PACKAGES` plus the addons' toolsets; the very same mapping when there are none."""
+    if not contributions.toolsets:
+        return TOOL_PACKAGES
+    return {**TOOL_PACKAGES, **contributions.toolsets}
+
+
 def load_profiles(
-    profiles_dir: Path, registry: ProfileVersionRegistry | None = None
+    profiles_dir: Path,
+    registry: ProfileVersionRegistry | None = None,
+    contributions: AddonContributions = NO_ADDON_CONTRIBUTIONS,
 ) -> dict[str, AgentProfile]:
     """Every `*.yaml` under `profiles_dir`, keyed by profile id and version-assigned.
 
@@ -989,11 +1044,31 @@ def load_profiles(
     profiles: dict[str, AgentProfile] = {}
 
     for path in sorted(profiles_dir.glob("*.yaml")):
-        profile = assign.assign(_grant_peer_mechanism(load_profile_sync(path)))
+        profile = assign.assign(
+            _grant_peer_mechanism(load_profile_sync(path, addon_fragments=contributions.fragments))
+        )
         if profile.id in profiles:
             raise ValueError(
                 f"Two profile files declare id {profile.id!r}; {path.name} is the second. "
                 "Refusing to pick one: the loser's permissions would vanish silently."
+            )
+        profiles[profile.id] = profile
+
+    # Phase 2 (A4). The profile templates enabled addons provide, after Core's own: an id that is
+    # taken (by Core or by an earlier addon) stops startup naming the addon.
+    for addon, path in contributions.profile_files:
+        try:
+            template = load_profile_sync(path, addon_fragments=contributions.fragments)
+        except ValueError as error:  # ProfileValidationError and a bad YAML document
+            raise AddonRegistrationError(
+                addon, "provides.profiles", f"{path.name}: {error}"
+            ) from error
+        profile = assign.assign(_grant_peer_mechanism(template))
+        if profile.id in profiles:
+            raise AddonRegistrationError(
+                addon,
+                "provides.profiles",
+                f"{path.name} declares profile id {profile.id!r}, which already exists",
             )
         profiles[profile.id] = profile
 
@@ -1050,7 +1125,11 @@ def _grant_peer_mechanism(profile: AgentProfile) -> AgentProfile:
     return replace(profile, toolsets=tuple(granted))
 
 
-def _refuse_topology_drift(profiles: Mapping[str, AgentProfile], policy_dir: Path) -> None:
+def _refuse_topology_drift(
+    profiles: Mapping[str, AgentProfile],
+    policy_dir: Path,
+    addon_rules: tuple[PolicyRule, ...] = (),
+) -> None:
     """Fail startup when the declared peer topology disagrees with the profiles, hop limits or
     policy rules (C17, D42). Nothing declared, nothing read.
 
@@ -1060,7 +1139,7 @@ def _refuse_topology_drift(profiles: Mapping[str, AgentProfile], policy_dir: Pat
     """
     if not any(profile.peers.topology for profile in profiles.values()):
         return
-    rules = load_policy_rules(policy_dir) if policy_dir.is_dir() else None
+    rules = (*load_policy_rules(policy_dir), *addon_rules) if policy_dir.is_dir() else None
     validate_topology(profiles, rules)
 
 
@@ -1410,7 +1489,9 @@ def _whatsapp_channel(settings: Settings) -> tuple[str, Channel] | None:
     )
 
 
-def build_channel_registry(settings: Settings) -> ChannelRegistry:
+def build_channel_registry(
+    settings: Settings, addon_channels: tuple[str, ...] = ()
+) -> ChannelRegistry:
     """t-f3-06: wire `t-f3-08`'s and `t-f3-09`'s concrete channels into `t-f3-13`'s
     registry - the shared lookup table `ChannelHumanGateway` and turn delivery both read.
 
@@ -1425,7 +1506,9 @@ def build_channel_registry(settings: Settings) -> ChannelRegistry:
 
     `settings.pull_channels` adds further pull-mode ids (a vertical's backend channel) with
     no code change; naming `http` or `cli` there is harmless, and naming a push channel's id
-    is a `DuplicateChannelError` at startup rather than a silent override.
+    is a `DuplicateChannelError` at startup rather than a silent override. `addon_channels`
+    (Phase 2, A4) are the pull ids enabled addons declared; the addon registration has already
+    refused one that collides with any of the above.
 
     `http` and `cli` are always here and the two push channels are conditional. That
     asymmetry is the difference between a channel that needs a credential to reach a
@@ -1436,7 +1519,7 @@ def build_channel_registry(settings: Settings) -> ChannelRegistry:
     taken = {channel_id for channel_id, _ in always_on}
     configured_pull = tuple(
         (channel_id, PullModeChannel())
-        for channel_id in settings.pull_channels
+        for channel_id in (*settings.pull_channels, *addon_channels)
         if channel_id not in taken
     )
     pairs = (
@@ -1889,14 +1972,17 @@ def build_container(
 
     domain_pool, audit_pool = build_pools(resolved, pool_factory)
 
+    # Phase 2 (A4, D74). What the enabled addons add, validated once; empty with none enabled.
+    addons = addon_contributions(resolved)
+    packages = served_tool_packages(addons)
     profile_versions = ProfileVersionRegistry()
-    profiles = load_profiles(resolved.profiles_dir, profile_versions)
+    profiles = load_profiles(resolved.profiles_dir, profile_versions, addons)
     # t-f11-05. Before anything else is wired: a profile that cannot resolve its toolsets
     # is refused HERE, naming the profile and the toolset, rather than on its first turn.
-    _refuse_unservable_profiles(profiles, TOOL_PACKAGES)
+    _refuse_unservable_profiles(profiles, packages)
     # C17 (D42). The peer topology, declared once, against the profiles, their hop limits and the
     # policy files: drift stops the process here, not as refused asks on a customer's turn.
-    _refuse_topology_drift(profiles, resolved.policy_dir)
+    _refuse_topology_drift(profiles, resolved.policy_dir, addons.policy_rules)
     _refuse_unusable_answer_schemas(profiles)
 
     model = LiteLLMGateway(resolved.proxy_base_url)
@@ -1905,7 +1991,7 @@ def build_container(
     # is the whole of non-negotiable #6 in practice.
     # The argument policy is the shipped built-ins plus what each REGISTERED tools package
     # declares (`AUDIT_ALLOW` / `AUDIT_PRESENCE_ONLY`), so a vertical never edits the sink.
-    audit_allow, audit_presence = collect_audit_policy(TOOL_PACKAGES)
+    audit_allow, audit_presence = collect_audit_for(TOOL_PACKAGES, addons)
     # C21 (D52). `tool_called` events ride on the audit trail: the decorator writes the audit row
     # first and then tells the feed, and a feed that fails never fails the audited call.
     # Two small pools of their own for the event adapters (C1p, D55; split in C1q): one for the
@@ -1945,7 +2031,7 @@ def build_container(
     # constructor also supplies the MCP half, so a profile declaring a server (today
     # `delivery_optimizer`) is served rather than refused. It CONNECTS TO NOTHING here -
     # transports are built, and reached on first use or on schema discovery.
-    tools = build_tool_provider(TOOL_PACKAGES)
+    tools = build_tool_provider(packages)
     # t-f5-10 filled this seat: `ModelSummariser` over the SAME `model` gateway every
     # other model call in this container uses, so a summarisation call never ends up on
     # a different day-1/day-2 route from the turn it is compacting. Before this line
@@ -1984,7 +2070,7 @@ def build_container(
         tool_journal=tool_journal_for(domain_pool),
     )
 
-    channels = build_channel_registry(resolved)
+    channels = build_channel_registry(resolved, addons.pull_channels)
 
     # t-f3-15. `human_gateway_channel_id` falls back to `_HTTP_CHANNEL_ID` - see that
     # field's docstring on `Settings` - never to a push channel that may be `None`.
@@ -2286,8 +2372,14 @@ async def start_container(
         raise _refused_to_start(resolved, error) from error
 
     if resolved.policy_dir.is_dir():
+        # Phase 2 (A4): the enabled addons' rules are part of the reviewed set, so the
+        # reconciliation keeps them and revokes them with the addon.
         await apply_policy_rules(
-            resolved.app_conninfo, load_policy_rules(resolved.policy_dir)
+            resolved.app_conninfo,
+            (
+                *load_policy_rules(resolved.policy_dir),
+                *addon_contributions(resolved).policy_rules,
+            ),
         )
 
     return build_container(resolved, pool_factory=pool_factory)

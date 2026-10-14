@@ -129,8 +129,18 @@ addons in dependency order with their validated settings:
 
 The loader never imports addon code and never touches the toolset registry, the policy or the
 database: it is an adapter (`adapters/driven/addons_fs/`) whose result the root consumes as data.
-Registering what an addon provides is the next step (A4). Authoring: see `docs/OPERATIONS.md`,
-"Addons", and the samples in `addons/sample_*`.
+
+Registration (A4, D74) is the next step and the only one that runs addon code.
+`composition.addon_contributions(settings)` validates what the active addons provide and returns
+ONE value, `AddonContributions`, that each existing seam takes: toolsets join `TOOL_PACKAGES`
+(`served_tool_packages`), audit declarations go through `collect_audit_policy(contributions=...)`
+with the same no-redefinition and cross-map guards as a built-in package, policy rules join the
+reviewed set `start_container` reconciles (and the topology check), fragments and profile templates
+go to `load_profiles`, channels to `build_channel_registry` as pull channels. An addon contributes
+only what its manifest `provides` declares; a name collision (between addons or with Core), an
+undeclared contribution, or a rule or audit entry about a tool the addon does not own stops startup
+with an error naming the addon. With no addon enabled each seam receives the value it always had.
+Authoring: see `docs/OPERATIONS.md`, "Addons", and the samples in `addons/sample_*`.
 
 ---
 

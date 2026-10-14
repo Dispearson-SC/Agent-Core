@@ -106,7 +106,13 @@ from agent_core.adapters.driven.tools.provider import (
     UnknownToolsetError,
     build_tool_provider,
 )
-from agent_core.composition import TOOL_PACKAGES, Settings, load_profiles
+from agent_core.composition import (
+    TOOL_PACKAGES,
+    Settings,
+    addon_contributions,
+    load_profiles,
+    served_tool_packages,
+)
 from agent_core.domain.profile import AgentProfile
 
 __all__ = [
@@ -796,8 +802,13 @@ async def preflight(
     checks.extend(_policy_checks(settings, facts))
 
     try:
+        # Phase 2 (A4): the enabled addons' profiles and toolsets are part of what this process
+        # serves, so they are checked like Core's own; a refused addon is one finding here.
+        contributions = await asyncio.to_thread(addon_contributions, settings)
+        if tool_packages is None:
+            packages = served_tool_packages(contributions)
         profiles: Mapping[str, AgentProfile] = await asyncio.to_thread(
-            load_profiles, settings.profiles_dir
+            load_profiles, settings.profiles_dir, None, contributions
         )
     except Exception as unloadable:  # noqa: BLE001 - any parse error is one finding here
         checks.append(

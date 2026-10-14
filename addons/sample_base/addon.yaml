@@ -1,10 +1,22 @@
 # A minimal addon: the smallest thing that follows docs/ARCHITECTURE.md "Addons". It exists so the
-# loader, the resolver and the settings have a real directory to read in tests.
+# loader, the resolver, the settings and the registration have a real directory to read in tests,
+# and it declares ONE of each extension point so a reader sees every shape (A4).
 name: sample_base
 version: 1.0.0
 core: ">=0.0,<1"
 provides:
+  # toolsets/sample_echo.py: a zero-argument build_toolset() returning a FunctionToolset.
+  toolsets: [sample_echo]
+  # Audit is declared here, never in the toolset module: tool -> argument names.
+  audit:
+    allow:
+      sample_echo: [text]
+  # One rules file. `allow` rules may name only this addon's own tools.
+  policy: policy/rules.yaml
+  # <name>.md files a profile names in `include:`.
   fragments: fragments/
+  # *.yaml profile templates.
+  profiles: profiles/
 settings:
   greeting:
     type: str
