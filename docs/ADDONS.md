@@ -62,9 +62,9 @@ version that is not a version, or a `core` range that is not a range, fails at m
 | `toolsets: [name]` | a toolset a profile can list in `toolsets:` | `toolsets/<name>.py` with `build_toolset()` or `build_toolset(settings)` (the addon's own validated settings, D84) returning a `FunctionToolset` | tool and toolset names are global: a clash with Core or another addon stops startup. One addon may offer the same tool in several of its own toolsets (per-role sets, D87); a toolset or wrapper file may import helper modules beside it with a relative import |
 | `audit.allow` / `audit.presence_only` | which arguments of YOUR tools the audit trail keeps (`tool: [argument]`) | `addon.yaml` only; a toolset module declaring `AUDIT_ALLOW` is refused | only your own tools; a tool with no decision records no arguments (and logs a warning) |
 | `policy: path` | rules for your tools | one YAML file, the format of `Core/policy/*.yaml` | an `allow` may reach only YOUR tools (wildcards included); `deny` and `needs_approval` may narrow any tool. Needs a deployment that manages policy from files |
-| `fragments: dir/` | prompt text a profile names in `include:` | `<name>.md` files | names are global |
+| `fragments: dir/` | prompt text a profile names in `include:` | `<name>.md` files; may read the addon's own settings, see "Fragments that read settings" | names are global |
 | `profiles: dir/` | profile templates served beside Core's | `*.yaml` files | ids are global; a profile may `inherit` |
-| `inserts: [{profile, slot, fragment}]` | where your fragment goes in someone else's profile | nothing (uses one of your `fragments`) | your own fragments only; the slot must exist |
+| `inserts: [{profile, slot, fragment}]` | where your fragment goes in someone else's profile | nothing (uses one of your `fragments`) | your own fragments only; the slot must exist. `profile: "*"` means every profile that declares the slot (D89) |
 | `wrappers: [{tool, wrapper}]` | a wrapper around an existing tool | `wrappers/<wrapper>.py` with `wrap(original, arguments, ctx)` | a tool of Core or of an addon you depend on (directly or not); never your own |
 | `channels: [id]` | pull-mode channel ids a backend can start turns on | nothing (no code) | not an id Core or `AGENT_CORE_PULL_CHANNELS` owns |
 
@@ -139,6 +139,37 @@ Another addon fills it with `provides.inserts`; the text lands after the slot's 
 activation order. A child that sets its own `persona` must keep the marker line of every inherited
 slot that has content. The merged profile is validated like any profile, so inheritance grants no
 authority. Details: OPERATIONS.md, "Profile inheritance and slots".
+
+### Insert into every profile with a slot, and fragments that read settings (D89)
+
+A generic addon cannot know which profiles will use it. `profile: "*"` in `provides.inserts` puts the
+fragment into every profile that DECLARES the slot (a child inherits it through its parent, once). A
+slot that no profile declares stops startup naming the addon, so a typo in the slot name is an error, not
+a fragment that quietly applies to nothing. The profile opts in by declaring the slot and marking it.
+
+```yaml
+# addons/style/addon.yaml
+provides:
+  fragments: fragments/
+  inserts: [{profile: "*", slot: house_style, fragment: style}]
+settings:
+  audience: {type: str, default: a shop manager}
+  spoken: {type: bool, default: true}
+```
+
+```markdown
+<!-- addons/style/fragments/style.md -->
+Write for {{setting:audience}}.
+{{if:spoken}}
+When an answer is read aloud, use short sentences and no lists.
+{{endif}}
+```
+
+A fragment of an addon may use the addon's own validated settings through two forms and nothing else:
+`{{setting:name}}` (inline, replaced by the value) and a block whose `{{if:name}}` and `{{endif}}` markers
+each sit alone on a line (kept when the setting is true: a non-empty string, a non-zero number, `true`).
+An undeclared name, an unclosed or nested block and a stray `{{endif}}` stop startup naming the addon and
+the file. Core's own fragments are never rendered.
 
 ## Wrappers (the `super()` analogue)
 

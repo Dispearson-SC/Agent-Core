@@ -79,6 +79,13 @@ def _relative(value: str) -> str:
 Name = Annotated[str, _matches(_NAME, "lower case words joined by single underscores")]
 Slug = Annotated[str, _matches(_SLUG, "lower case letters, digits, '_' or '-', from a letter")]
 Ident = Annotated[str, _matches(_IDENT, "a plain identifier")]
+# `*` as the profile of an insert means every profile that declares the slot (D89).
+InsertTarget = Annotated[
+    str,
+    _matches(
+        re.compile(r"^(\*|[A-Za-z_][A-Za-z0-9_]*)$"), "a profile id, or '*' for every profile"
+    ),
+]
 FragmentName = Annotated[
     str, _matches(re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"), "a fragment file stem")
 ]
@@ -102,7 +109,7 @@ class AuditProvides(_Strict):
 class ProfileInsertion(_Strict):
     """`provides.inserts` entry: put one of the addon's fragments at a named slot of a profile."""
 
-    profile: Ident
+    profile: InsertTarget
     slot: Ident
     fragment: FragmentName
 

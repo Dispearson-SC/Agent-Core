@@ -45,6 +45,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]  # no stub package installed; see pyproject.toml
 
+from agent_core.adapters.driven.profiles_fs.fragments import FragmentFile
 from agent_core.domain.profile import AgentProfile, ProfileValidationError
 
 __all__ = [
@@ -67,7 +68,7 @@ def parse_profile(
     text: str,
     *,
     fragments_dir: Path | None = None,
-    addon_fragments: Mapping[str, Path] | None = None,
+    addon_fragments: Mapping[str, FragmentFile] | None = None,
 ) -> AgentProfile:
     """Parse one profile document. Raises `ProfileValidationError` on anything malformed.
 
@@ -100,7 +101,7 @@ FragmentReader = Callable[[str], str]
 
 
 def fragment_reader(
-    fragments_dir: Path | None, addon_fragments: Mapping[str, Path] | None = None
+    fragments_dir: Path | None, addon_fragments: Mapping[str, FragmentFile] | None = None
 ) -> FragmentReader:
     """`name -> the fragment's text`, looked up in `fragments_dir` first, then in the addons'.
 
@@ -111,7 +112,7 @@ def fragment_reader(
     def read(name: str) -> str:
         if not _FRAGMENT_NAME.fullmatch(name) or ".." in name:
             raise ProfileValidationError(f"invalid fragment name {name!r}")
-        path = None if fragments_dir is None else fragments_dir / f"{name}.md"
+        path: FragmentFile | None = None if fragments_dir is None else fragments_dir / f"{name}.md"
         if (path is None or not path.is_file()) and addon_fragments and name in addon_fragments:
             path = addon_fragments[name]
         if path is None or not path.is_file():
@@ -144,7 +145,7 @@ def _with_fragments(persona: object, names: object, read: FragmentReader) -> obj
 def load_profile_sync(
     path: str | Path,
     fragments_dir: Path | None = None,
-    addon_fragments: Mapping[str, Path] | None = None,
+    addon_fragments: Mapping[str, FragmentFile] | None = None,
 ) -> AgentProfile:
     """Read and parse one profile file. The sync island - see the module docstring.
 

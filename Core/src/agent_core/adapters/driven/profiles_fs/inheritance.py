@@ -70,6 +70,7 @@ from typing import Any, Final
 
 import yaml  # type: ignore[import-untyped]  # no stub package installed; see pyproject.toml
 
+from agent_core.adapters.driven.profiles_fs.fragments import FragmentFile
 from agent_core.adapters.driven.profiles_fs.loader import (
     FragmentReader,
     fragment_reader,
@@ -135,7 +136,7 @@ def parse_profile_document(
     name: str,
     owner: str | None = None,
     fragments_dir: Path | None = None,
-    addon_fragments: Mapping[str, Path] | None = None,
+    addon_fragments: Mapping[str, FragmentFile] | None = None,
 ) -> ProfileDocument:
     data: Any = yaml.safe_load(text)
     return ProfileDocument(name, data, fragment_reader(fragments_dir, addon_fragments), owner)
@@ -146,7 +147,7 @@ def read_profile_document(
     *,
     owner: str | None = None,
     fragments_dir: Path | None = None,
-    addon_fragments: Mapping[str, Path] | None = None,
+    addon_fragments: Mapping[str, FragmentFile] | None = None,
 ) -> ProfileDocument:
     """Read one profile file. Fragments default to the `fragments/` directory next to it."""
     file = Path(path)
@@ -427,6 +428,24 @@ def _owned[T](document: ProfileDocument, step: Callable[[ProfileDocument], T]) -
         ) from error
 
 
+ALL_PROFILES = "*"
+
+
+def _declaring(
+    slot: str, layers: Sequence[_Layer], chains: Mapping[int, list[_Layer]]
+) -> list[_Layer]:
+    """The documents that DECLARE `slot` first: no parent in their chain declared it before.
+
+    An insert aimed at "every profile with this slot" goes into those, once; a child inherits it
+    (and the content already put there) through its parent instead of receiving a second copy.
+    """
+    return [
+        layer
+        for layer in layers
+        if slot in layer.declared and not any(slot in p.declared for p in chains[id(layer)][1:])
+    ]
+
+
 def resolve_documents(
     documents: Sequence[ProfileDocument], inserts: Sequence[SlotInsert] = ()
 ) -> list[Any]:
@@ -450,22 +469,33 @@ def resolve_documents(
     chains = {id(layer): _chain(layer, by_id) for layer in layers}
 
     for insert in inserts:
-        target = by_id.get(insert.profile)
-        if target is None:
-            raise ProfileInheritanceError(
-                f"insert into profile {insert.profile!r}, which does not exist",
-                addon=insert.addon,
-                field="provides.inserts",
-            )
-        if not any(insert.slot in link.slots for link in chains[id(target)]):
-            raise ProfileInheritanceError(
-                f"insert into slot {insert.slot!r}, which profile {insert.profile!r} "
-                "does not declare",
-                addon=insert.addon,
-                field="provides.inserts",
-            )
-        target.slots.setdefault(insert.slot, []).append(insert.text)
-        target.inserted.setdefault(insert.slot, []).append(insert.addon)
+        if insert.profile == ALL_PROFILES:
+            targets = _declaring(insert.slot, layers, chains)
+            if not targets:
+                raise ProfileInheritanceError(
+                    f"insert into slot {insert.slot!r}, which no profile declares",
+                    addon=insert.addon,
+                    field="provides.inserts",
+                )
+        else:
+            target = by_id.get(insert.profile)
+            if target is None:
+                raise ProfileInheritanceError(
+                    f"insert into profile {insert.profile!r}, which does not exist",
+                    addon=insert.addon,
+                    field="provides.inserts",
+                )
+            if not any(insert.slot in link.slots for link in chains[id(target)]):
+                raise ProfileInheritanceError(
+                    f"insert into slot {insert.slot!r}, which profile {insert.profile!r} "
+                    "does not declare",
+                    addon=insert.addon,
+                    field="provides.inserts",
+                )
+            targets = [target]
+        for target in targets:
+            target.slots.setdefault(insert.slot, []).append(insert.text)
+            target.inserted.setdefault(insert.slot, []).append(insert.addon)
 
     resolved: dict[int, _Resolved] = {}
 
@@ -476,7 +506,13 @@ def resolve_documents(
             resolved[id(layer)] = _apply(layer, parent)
         return resolved[id(layer)]
 
-    aimed_at = {insert.profile for insert in inserts}
+    aimed_at = {insert.profile for insert in inserts} | {
+        layer.profile_id
+        for insert in inserts
+        if insert.profile == ALL_PROFILES
+        for layer in _declaring(insert.slot, layers, chains)
+        if layer.profile_id
+    }
     out: list[Any] = []
     for layer in layers:
         if not isinstance(layer.document.data, dict):

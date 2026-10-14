@@ -162,3 +162,27 @@ def test_a_directory_without_a_manifest_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ManifestError, match="no addon.yaml") as caught:
         load_manifest(tmp_path / "tiny")
     assert caught.value.addon == "tiny"
+
+
+# --- an insert aimed at every profile that declares the slot (G4, D89) ---------------------------
+
+
+def test_an_insert_may_name_every_profile_with_a_star() -> None:
+    manifest = parse_manifest(
+        MINIMAL
+        + "provides:\n  fragments: fragments/\n"
+        + "  inserts: [{profile: '*', slot: plain_style, fragment: style}]\n"
+    )
+
+    (insert,) = manifest.provides.inserts
+    assert (insert.profile, insert.slot, insert.fragment) == ("*", "plain_style", "style")
+
+
+@pytest.mark.parametrize("profile", ["'a*'", "'**'", "'*x'", "''"])
+def test_a_pattern_other_than_a_lone_star_is_not_a_profile(profile: str) -> None:
+    _refused(
+        MINIMAL
+        + "provides:\n  fragments: fragments/\n"
+        + f"  inserts: [{{profile: {profile}, slot: s, fragment: style}}]\n",
+        "provides.inserts.0.profile",
+    )

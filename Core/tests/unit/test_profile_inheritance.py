@@ -630,3 +630,48 @@ def test_preflight_reports_a_broken_inheritance_as_a_profile_finding(tmp_path: P
 
     findings = [c for c in report.checks if c.severity == "fail" and "profiles" in c.name]
     assert findings and "ghost" in findings[0].detail
+
+
+# --- an insert aimed at every profile that declares the slot (`profile: "*"`, G4, D89) ---------
+
+OTHER_SLOTTED = SLOTTED.replace("id: slotted", "id: other")
+
+
+def test_a_wildcard_insert_reaches_every_profile_that_declares_the_slot() -> None:
+    plain = "id: plain\npersona: No slot here.\nmodel: m\nmax_iterations: 5\nmax_cost_usd: '0.10'\n"
+    documents = [
+        _doc(SLOTTED.replace("[first]", "[]"), name="a.yaml"),
+        _doc(OTHER_SLOTTED.replace("[first]", "[]"), name="b.yaml"),
+        _doc(plain, name="c.yaml"),
+    ]
+    inserts = (SlotInsert("alpha", "*", "before_tools", "FROM ALPHA."),)
+
+    resolved = resolve_documents(documents, inserts)
+
+    assert resolved[0]["persona"] == "Intro.\n\nFROM ALPHA.\n\nOutro."
+    assert resolved[1]["persona"] == "Intro.\n\nFROM ALPHA.\n\nOutro."
+    assert resolved[2]["persona"] == "No slot here."
+
+
+def test_a_wildcard_insert_reaches_a_child_once_through_its_parent() -> None:
+    redeclaring = "id: child\ninherit: slotted\nslots: {before_tools: []}\n"
+    documents = [
+        _doc(SLOTTED.replace("[first]", "[]"), name="a.yaml"),
+        _doc(redeclaring, name="b.yaml"),
+    ]
+    inserts = (SlotInsert("alpha", "*", "before_tools", "ONCE."),)
+
+    resolved = resolve_documents(documents, inserts)
+
+    assert resolved[0]["persona"].count("ONCE.") == 1
+    assert resolved[1]["persona"].count("ONCE.") == 1
+
+
+def test_a_wildcard_insert_into_a_slot_nobody_declares_is_an_error_naming_the_addon() -> None:
+    inserts = (SlotInsert("alpha", "*", "nowhere", "x"),)
+
+    with pytest.raises(ProfileInheritanceError) as caught:
+        resolve_documents([_doc(SLOTTED.replace("[first]", "[]"))], inserts)
+
+    assert caught.value.addon == "alpha" and "nowhere" in str(caught.value)
+    assert "no profile" in str(caught.value)

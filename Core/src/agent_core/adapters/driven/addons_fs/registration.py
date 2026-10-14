@@ -60,6 +60,7 @@ from agent_core.adapters.driven.persistence_pg.audit_repository import (
     collect_audit_policy,
 )
 from agent_core.adapters.driven.policy_fs.loader import parse_policy_rules
+from agent_core.adapters.driven.profiles_fs.fragments import AddonFragment, FragmentFile
 from agent_core.adapters.driven.tools.provider import ToolsetBuilder
 from agent_core.adapters.driven.tools.wrapping import ToolWrapper
 from agent_core.domain.policy import Effect, PolicyRule
@@ -82,12 +83,12 @@ class AddonContributions:
     toolsets: Mapping[str, ToolsetBuilder] = field(default_factory=dict)
     audit: Mapping[str, AuditContribution] = field(default_factory=dict)
     policy_rules: tuple[PolicyRule, ...] = ()
-    fragments: Mapping[str, Path] = field(default_factory=dict)
+    fragments: Mapping[str, FragmentFile] = field(default_factory=dict)
     # (addon, profile file), in activation order then file name.
     profile_files: tuple[tuple[str, Path], ...] = ()
     pull_channels: tuple[str, ...] = ()
     # (addon, profile id, slot, fragment path), in activation order: where the addons insert.
-    inserts: tuple[tuple[str, str, str, Path], ...] = ()
+    inserts: tuple[tuple[str, str, str, FragmentFile], ...] = ()
     # addon -> names of the tools its toolsets export (what `audit` and `policy` are checked on).
     tools: Mapping[str, frozenset[str]] = field(default_factory=dict)
     # The tool wrappers, in activation order (A6, D78).
@@ -350,12 +351,12 @@ def _declared_files(
 
 def _fragments_of(
     addon: ResolvedAddon, builtin_dir: Path | None, taken: dict[str, str]
-) -> dict[str, Path]:
+) -> dict[str, FragmentFile]:
     relative = addon.manifest.provides.fragments
     if relative is None:
         return {}
     owner = addon.manifest.name
-    found: dict[str, Path] = {}
+    found: dict[str, FragmentFile] = {}
     for path in _declared_files(addon, "provides.fragments", relative, "*.md"):
         if path.stem in taken:
             raise _refuse(
@@ -368,7 +369,12 @@ def _fragments_of(
                 owner, "provides.fragments", f"{path.stem!r} is already a built-in fragment"
             )
         taken[path.stem] = f"addon {owner!r}"
-        found[path.stem] = path
+        fragment = AddonFragment(path, addon.settings)
+        try:
+            fragment.read_text(encoding="utf-8")  # a template the settings cannot fill stops here
+        except (ValueError, OSError) as error:
+            raise _refuse(owner, "provides.fragments", f"{path.name}: {error}") from error
+        found[path.stem] = fragment
     return found
 
 
@@ -480,10 +486,10 @@ def register_addons(
 
     audit: dict[str, AuditContribution] = {}
     rules: list[PolicyRule] = []
-    fragments: dict[str, Path] = {}
+    fragments: dict[str, FragmentFile] = {}
     profile_files: list[tuple[str, Path]] = []
     channels: list[str] = []
-    inserts: list[tuple[str, str, str, Path]] = []
+    inserts: list[tuple[str, str, str, FragmentFile]] = []
     wrappers: list[ToolWrapper] = []
     depends = {a.manifest.name: a.manifest.depends for a in addons}
     core_tools = frozenset(tool for tool, who in tool_owner.items() if who == "Core")

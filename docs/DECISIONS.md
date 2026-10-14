@@ -3215,3 +3215,24 @@ decision 2026-10-13) and are described by `addon.yaml`.
   deployment rule are reduced by the real `PgToolPolicy.decide` for every glazed tool, six foreign tools
   and nine identities (effect, rule id and reason equal), plus a hand-written table of rule id -> outcome.
   An addon with policy still needs a policy directory (D74); a test pins the refusal where there is none.
+
+## D89 - An insert may aim at every profile with a slot; fragments read their addon's settings (Phase 3, G4)
+
+- **Why.** `plain_language` is generic (no vertical named in it) yet must put its text into the
+  orchestrator of whatever vertical enables it, with the audience, language and spoken style that vertical
+  chose. Two things were missing from the Phase 2 machinery: an insert had to name one profile id, and a
+  fragment was a static file.
+- **`provides.inserts[].profile: "*"`.** Every profile that DECLARES the slot receives the fragment
+  (a child that merely inherits the slot gets it through its parent once; a child that re-declares the
+  slot does not get a second copy). Opt-in is the slot: a profile that does not declare it is untouched.
+  A slot no profile declares is an error naming the addon (fail loud, no silent no-op). Rejected: a
+  `profiles:` setting listing the targets (every vertical would repeat its profile ids in settings) and
+  inserting into every profile (text would reach agents that never asked).
+- **Fragment templates.** `{{setting:name}}` and a `{{if:name}}` ... `{{endif}}` block, rendered when the
+  addon registers (so a template the settings cannot fill stops startup) with the addon's validated
+  settings. `AddonFragment` is a `Path`-shaped object (`is_file`, `read_text`, `name`, `stem`), so
+  `include:` and the slot inserts read it unchanged; Core's own fragments are plain files, never
+  rendered. Rejected: Jinja or any expression language (a persona is reviewed text; two forms are what a
+  reviewer can hold), and rendering at read time with the environment (the settings are already
+  validated at startup). Consequence: a literal `{{setting:...}}` or `{{if:...}}` in an addon fragment
+  cannot be written; no escape is added (reversible: add one if an author needs it).
