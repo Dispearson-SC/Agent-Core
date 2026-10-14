@@ -67,10 +67,12 @@ __all__ = ["OpenApiContractError", "OpenApiSource", "clear_openapi_cache", "load
 OpenApiSource = Path | str | Mapping[str, Any]
 Transport = httpx.BaseTransport | httpx.AsyncBaseTransport
 
-# URL -> the document the backend answered, once per process (G1c): a consumer with several
-# toolsets builds the same bridge several times and the backend is asked once. A failed fetch is
-# never stored. Tests call `clear_openapi_cache()`.
-_FETCHED: dict[str, dict[str, Any]] = {}
+# (URL, transport) -> the document the backend answered, once per process (G1c): a consumer with
+# several toolsets builds the same bridge several times and the backend is asked once. The
+# transport is part of the key (G2b): a document fetched through one transport (a test double, a
+# second backend's own route) is never served to a build that uses another. A failed fetch is never
+# stored. Tests call `clear_openapi_cache()`.
+_FETCHED: dict[tuple[str, Transport | None], dict[str, Any]] = {}
 _FETCH_LOCK = threading.Lock()
 
 _METHODS = ("get", "post", "put", "patch", "delete")
@@ -143,14 +145,15 @@ def _load_document(
 
 
 def _fetched(url: str, timeout: float, transport: Transport | None) -> dict[str, Any]:
-    """The document at `url`, asked for once per process (G1c)."""
+    """The document at `url` through `transport`, asked for once per process (G1c)."""
+    key = (url, transport)
     with _FETCH_LOCK:
-        cached = _FETCHED.get(url)
+        cached = _FETCHED.get(key)
     if cached is not None:
         return cached
     document = _fetch(url, timeout, transport)
     with _FETCH_LOCK:
-        return _FETCHED.setdefault(url, document)
+        return _FETCHED.setdefault(key, document)
 
 
 def _fetch(url: str, timeout: float, transport: Transport | None) -> dict[str, Any]:

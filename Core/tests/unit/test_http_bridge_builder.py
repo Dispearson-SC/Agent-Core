@@ -452,3 +452,30 @@ def test_the_model_cannot_override_a_fixed_argument_or_send_a_hidden_one(tmp_pat
     _run(toolset, "list_things", days=3, limit=500, store_id="S9")
 
     assert dict(backend.requests[0].url.params) == {"days": "3", "limit": "10"}
+
+
+def test_a_fixed_path_argument_is_sent_percent_encoded_and_hidden_from_the_model(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "fixed_path.yaml"
+    path.write_text(
+        """\
+tools:
+  - name: store_kpis
+    description: KPIs.
+    method: GET
+    route: /stores/{store}/kpis
+    kind: read
+    arguments:
+      store: {type: string, in: path, fixed: "a/b c"}
+""",
+        encoding="utf-8",
+    )
+    backend = Backend([])
+    toolset = build_bridge_toolset(SETTINGS, manifest=path, transport=httpx.MockTransport(backend))
+
+    _run(toolset, "store_kpis", store="../other")
+
+    assert backend.requests[0].url.raw_path.decode().split("?")[0] == "/stores/a%2Fb%20c/kpis"
+    schema = toolset.tools["store_kpis"].function_schema.json_schema
+    assert schema["properties"] == {} and "required" not in schema

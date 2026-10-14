@@ -109,6 +109,8 @@ class ArgumentSpec(_Strict):
             raise ValueError(f"fixed value is not a {self.type}")
         if self.enum is not None and self.fixed not in self.enum:
             raise ValueError("fixed value is not in the enum")
+        if self.where == "path" and str(self.fixed).strip() in ("", ".", ".."):
+            raise ValueError("fixed value is not a valid path segment")
         if self.type in ("integer", "number"):
             value = float(cast(float, self.fixed))
             if self.minimum is not None and value < self.minimum:

@@ -124,3 +124,26 @@ def test_a_fixed_argument_is_part_of_the_manifest() -> None:
 def test_a_fixed_argument_that_contradicts_its_own_spec_is_refused(spec: dict[str, Any]) -> None:
     with pytest.raises(BridgeManifestError, match="fixed"):
         parse_bridge_manifest({"tools": [_tool(arguments={"x": spec})]})
+
+
+# --- a fixed value in the route (G2b): it is still one safe path segment ---
+
+
+def _fixed_path_tool(value: Any) -> dict[str, Any]:
+    return _tool(
+        route="/stores/{store}/kpis",
+        arguments={"store": {"type": "string", "in": "path", "fixed": value}},
+    )
+
+
+def test_a_fixed_path_argument_needs_no_required_flag_and_fills_the_route() -> None:
+    manifest = parse_bridge_manifest({"tools": [_fixed_path_tool("S030")]})
+
+    spec = manifest.tools[0].arguments["store"]
+    assert spec.fixed == "S030" and spec.where == "path"
+
+
+@pytest.mark.parametrize("value", ["..", ".", "", "   "])
+def test_a_fixed_path_value_that_could_leave_the_route_is_refused(value: str) -> None:
+    with pytest.raises(BridgeManifestError, match="fixed"):
+        parse_bridge_manifest({"tools": [_fixed_path_tool(value)]})

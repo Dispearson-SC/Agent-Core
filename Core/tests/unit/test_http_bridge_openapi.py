@@ -706,13 +706,27 @@ def test_the_same_url_is_fetched_once_per_process_across_builds() -> None:
         fetched.append(str(request.url))
         return httpx.Response(200, json=_spec())
 
+    transport = httpx.MockTransport(handler)
     for _ in range(3):
-        build_bridge_toolset(SETTINGS, openapi=URL, transport=httpx.MockTransport(handler))
-    build_bridge_toolset(
-        SETTINGS, openapi="http://other.test:9/openapi.json", transport=httpx.MockTransport(handler)
-    )
+        build_bridge_toolset(SETTINGS, openapi=URL, transport=transport)
+    build_bridge_toolset(SETTINGS, openapi="http://other.test:9/openapi.json", transport=transport)
 
     assert fetched == [URL, "http://other.test:9/openapi.json"]
+
+
+def test_a_document_fetched_through_one_transport_is_not_served_to_another() -> None:
+    """The cache key includes the transport: a test double (or a second backend reached through its
+    own transport) must not be answered with a document another transport fetched."""
+
+    def serving(tool: str) -> httpx.MockTransport:
+        document = _one({"operationId": tool, "x-agent-name": tool})
+        return httpx.MockTransport(lambda request: httpx.Response(200, json=document))
+
+    first = _tools(load_openapi_manifest(URL, transport=serving("first_op")))
+    second = _tools(load_openapi_manifest(URL, transport=serving("second_op")))
+
+    assert set(first) == {"first_op"}
+    assert set(second) == {"second_op"}
 
 
 def test_a_cached_document_is_not_shared_mutably_between_builds() -> None:
