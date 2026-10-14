@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -228,3 +229,182 @@ def test_building_without_settings_and_without_the_addon_fails_at_build_time(
 
     with pytest.raises(ValueError, match="http_tool_bridge"):
         build_bridge_toolset(EXAMPLE)
+
+
+# --- slice 26 advisories (G1a, D84) ------------------------------------------------------------
+
+
+def _yaml_toolset(tmp_path: Path, tools: str, backend: Backend, **kwargs: Any) -> Any:
+    path = tmp_path / "tools.yaml"
+    path.write_text("tools:\n" + tools, encoding="utf-8")
+    return build_bridge_toolset(path, SETTINGS, transport=httpx.MockTransport(backend), **kwargs)
+
+
+@pytest.mark.parametrize("value", ["..", ".", ""])
+def test_a_dot_segment_or_empty_path_argument_is_an_error_value_and_no_call_is_made(
+    value: str,
+) -> None:
+    backend = Backend({"id": 1})
+
+    result = _run(_toolset(backend), "get_book", book_id=value)
+
+    assert "book_id" in result["error"]
+    assert backend.requests == []
+
+
+@pytest.mark.parametrize(
+    ("value", "raw_segment"),
+    [
+        ("a/b", b"a%2Fb"),
+        ("../admin", b"..%2Fadmin"),
+        ("..\\x", b"..%5Cx"),
+        ("%2e%2e", b"%252e%252e"),
+        ("%2e%2e/x", b"%252e%252e%2Fx"),
+        ("a?x=1#f", b"a%3Fx%3D1%23f"),
+        (" ..", b"%20.."),
+    ],
+)
+def test_a_path_argument_stays_one_percent_encoded_segment_of_the_route(
+    value: str, raw_segment: bytes
+) -> None:
+    backend = Backend({"id": 1})
+
+    _run(_toolset(backend), "get_book", book_id=value)
+
+    (request,) = backend.requests
+    assert request.url.raw_path == b"/api/v1/books/" + raw_segment
+
+
+def test_pick_with_a_reply_that_is_not_an_object_returns_an_error_never_the_reply() -> None:
+    for body in ("secret", 42):
+        result = _run(_toolset(Backend(body)), "get_book", book_id="b1")
+
+        assert "secret" not in str(result) and "42" not in str(result)
+        assert "expected shape" in result["error"]
+
+
+def test_pick_on_a_bare_list_of_non_objects_returns_no_rows() -> None:
+    assert _run(_toolset(Backend(["secret", 1])), "get_book", book_id="b1") == []
+
+
+def test_pick_drops_rows_that_are_not_objects_and_keeps_only_picked_keys() -> None:
+    rows = [{"id": 1, "title": "t", "isbn": "x"}, "secret", {"isbn": "only"}, ["secret"], None]
+    result = _run(_toolset(Backend({"items": rows, "total": 5})), "list_books")
+
+    assert result == {"items": [{"id": 1, "title": "t"}, {}], "total": 5}
+
+
+def test_pick_is_top_level_only_a_picked_key_carries_its_whole_value_others_nothing() -> None:
+    nested = {"id": 1, "title": {"en": "T", "internal": "i"}, "secret": {"x": 1}}
+
+    result = _run(_toolset(Backend(nested)), "get_book", book_id="b1")
+
+    assert result == {"id": 1, "title": {"en": "T", "internal": "i"}}
+
+
+@pytest.mark.parametrize("body", [{"total": 1}, {"items": {"id": 1}}, {"items": "secret"}, [1]])
+def test_a_rows_key_reply_without_the_rows_is_an_error_not_the_whole_body(body: Any) -> None:
+    result = _run(_toolset(Backend(body)), "list_books")
+
+    assert "expected shape" in result["error"] and "total" not in result
+
+
+def test_a_tool_without_pick_still_returns_the_reply_untouched() -> None:
+    assert _run(_toolset(Backend("plain")), "ping") == "plain"
+
+
+FRACTIONAL = """\
+  - name: pager
+    description: Paged.
+    method: GET
+    route: /p
+    kind: read
+    arguments:
+      limit: {type: integer, in: query, minimum: 1.5, maximum: 9.5}
+      ratio: {type: number, in: query, minimum: 0.25, maximum: 0.75}
+"""
+
+
+def test_fractional_bounds_of_an_integer_round_inward_and_a_number_keeps_them(
+    tmp_path: Path,
+) -> None:
+    backend = Backend([])
+    toolset = _yaml_toolset(tmp_path, FRACTIONAL, backend)
+
+    _run(toolset, "pager", limit=1, ratio=0.1)
+    _run(toolset, "pager", limit=99, ratio=3)
+    _run(toolset, "pager", limit=4, ratio=0.5)
+
+    seen = [dict(r.url.params) for r in backend.requests]
+    assert seen == [
+        {"limit": "2", "ratio": "0.25"},
+        {"limit": "9", "ratio": "0.75"},
+        {"limit": "4", "ratio": "0.5"},
+    ]
+    schema = toolset.tools["pager"].function_schema.json_schema["properties"]["limit"]
+    assert (schema["minimum"], schema["maximum"]) == (2, 9)
+
+
+def test_an_integer_range_without_any_integer_is_refused_at_build_time(tmp_path: Path) -> None:
+    tools = FRACTIONAL.replace("minimum: 1.5, maximum: 9.5", "minimum: 1.2, maximum: 1.8")
+
+    with pytest.raises(ValueError, match="no integer"):
+        _yaml_toolset(tmp_path, tools, Backend())
+
+
+TYPED = """\
+  - name: typed
+    description: One of each argument type.
+    method: POST
+    route: /t
+    kind: write
+    arguments:
+      ratio: {type: number, in: body, minimum: 0, maximum: 1}
+      flag: {type: boolean, in: body}
+      tags: {type: array, in: body}
+      level: {type: integer, in: body, enum: [1, 2, 3]}
+      mode: {type: string, in: body, enum: [fast, slow]}
+      count: {type: integer, in: body, default: 7}
+"""
+
+
+def test_each_argument_type_is_passed_typed_and_a_wrong_one_is_an_error_value(
+    tmp_path: Path,
+) -> None:
+    backend = Backend({})
+    toolset = _yaml_toolset(tmp_path, TYPED, backend)
+
+    ok = _run(toolset, "typed", ratio="0.5", flag=True, tags=["a", "b"], level=2, mode="fast")
+    clamped = _run(toolset, "typed", ratio=7.5)
+
+    assert ok == {}
+    assert json.loads(backend.requests[0].read()) == {
+        "ratio": 0.5,
+        "flag": True,
+        "tags": ["a", "b"],
+        "level": 2,
+        "mode": "fast",
+        "count": 7,
+    }
+    assert clamped == {} and json.loads(backend.requests[1].read())["ratio"] == 1.0
+    for bad, message in [
+        ({"flag": "yes"}, "flag must be true or false"),
+        ({"tags": "a"}, "tags must be a list"),
+        ({"level": 4}, "level must be one of 1, 2, 3"),
+        ({"mode": "warp"}, "mode must be one of fast, slow"),
+        ({"ratio": "x"}, "ratio must be a number"),
+        ({"ratio": float("nan")}, "ratio must be a number"),
+    ]:
+        before = len(backend.requests)
+        assert _run(toolset, "typed", **bad) == {"error": message}
+        assert len(backend.requests) == before
+
+
+def test_the_schema_the_model_sees_carries_each_type_its_enum_and_bounds(tmp_path: Path) -> None:
+    schema = _yaml_toolset(tmp_path, TYPED, Backend()).tools["typed"].function_schema.json_schema
+
+    props = schema["properties"]
+    assert props["ratio"] == {"type": "number", "minimum": 0, "maximum": 1}
+    assert props["flag"] == {"type": "boolean"} and props["tags"] == {"type": "array"}
+    assert props["level"]["enum"] == [1, 2, 3] and props["mode"]["enum"] == ["fast", "slow"]
+    assert props["count"] == {"type": "integer", "default": 7}

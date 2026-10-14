@@ -48,6 +48,19 @@ from agent_core.domain.tool_replay import safe_tool_metadata
 __all__ = ["build_bridge_toolset"]
 
 
+def _bounds(spec: ArgumentSpec) -> tuple[Any, Any]:
+    """The clamp bounds as the argument's type holds them (D84).
+
+    An integer argument rounds a fractional bound INWARD (`minimum: 1.5` -> 2, `maximum: 9.5` -> 9),
+    so a clamped value is never outside what the manifest wrote; a number keeps the bound as is.
+    """
+    low, high = spec.minimum, spec.maximum
+    if spec.type == "integer":
+        low = None if low is None else math.ceil(low)
+        high = None if high is None else math.floor(high)
+    return low, high
+
+
 def _coerce(name: str, spec: ArgumentSpec, value: Any) -> Any:
     """The value as the manifest types it, clamped; a junk number falls back to the default.
 
@@ -64,10 +77,11 @@ def _coerce(name: str, spec: ArgumentSpec, value: Any) -> Any:
             if spec.default is not None:
                 return spec.default
             raise ValueError(f"{name} must be a number") from None
-        if spec.minimum is not None:
-            number = max(number, type(number)(spec.minimum))
-        if spec.maximum is not None:
-            number = min(number, type(number)(spec.maximum))
+        low, high = _bounds(spec)
+        if low is not None:
+            number = max(number, low)
+        if high is not None:
+            number = min(number, high)
         return number
     if kind == "boolean":
         if not isinstance(value, bool):
@@ -82,6 +96,17 @@ def _coerce(name: str, spec: ArgumentSpec, value: Any) -> Any:
     return value
 
 
+def _check_segment(name: str, value: Any) -> None:
+    """A path argument is ONE segment of the route: empty and dot-segments could leave it (D84).
+
+    Slashes and every other reserved character are percent-encoded where the path is built; `.`
+    and `..` survive encoding and a server or proxy may resolve them, so they are refused.
+    """
+    text = str(value)
+    if text.strip() == "" or text in (".", ".."):
+        raise ValueError(f"{name} is not a valid identifier")
+
+
 def _prepare(tool: ToolSpec, raw: dict[str, Any]) -> dict[str, Any]:
     """The arguments to send, defaults applied. Raises `ValueError` with a message for the model."""
     values: dict[str, Any] = {}
@@ -94,6 +119,8 @@ def _prepare(tool: ToolSpec, raw: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"{name} is required")
             continue
         value = _coerce(name, spec, value)
+        if spec.where == "path":
+            _check_segment(name, value)
         if spec.enum is not None and value not in spec.enum:
             raise ValueError(f"{name} must be one of {', '.join(str(e) for e in spec.enum)}")
         values[name] = value
@@ -108,10 +135,11 @@ def _schema(tool: ToolSpec) -> dict[str, Any]:
             entry["description"] = spec.description
         if spec.enum is not None:
             entry["enum"] = list(spec.enum)
-        if spec.minimum is not None:
-            entry["minimum"] = spec.minimum
-        if spec.maximum is not None:
-            entry["maximum"] = spec.maximum
+        low, high = _bounds(spec)
+        if low is not None:
+            entry["minimum"] = low
+        if high is not None:
+            entry["maximum"] = high
         if spec.default is not None:
             entry["default"] = spec.default
         properties[name] = entry
@@ -126,22 +154,44 @@ def _schema(tool: ToolSpec) -> dict[str, Any]:
     return schema
 
 
-def _pick(item: Any, keys: tuple[str, ...] | None) -> Any:
-    if keys is None or not isinstance(item, dict):
-        return item
+class _Shape(Exception):
+    """The reply does not have the shape the manifest describes."""
+
+
+def _pick(item: Any, keys: tuple[str, ...]) -> dict[str, Any]:
     return {k: item[k] for k in keys if k in item}
 
 
+def _rows(rows: Any, pick: tuple[str, ...] | None, limit: int) -> list[Any]:
+    """The first `limit` rows; with a `pick`, only the picked keys of the object rows (D84).
+
+    Fail closed: a projection that cannot apply to a row (not an object) drops that row, so only
+    picked fields ever reach the model.
+    """
+    taken = rows[:limit]
+    if pick is None:
+        return taken
+    return [_pick(r, pick) for r in taken if isinstance(r, dict)]
+
+
 def _project(data: Any, response: ResponseSpec, default_limit: int) -> Any:
+    """The reply as the model may see it. Raises `_Shape` when the reply is not what was declared.
+
+    `rows_key` replies keep their envelope (`total`, cursors) and project only the rows.
+    """
     limit = response.row_limit or default_limit
     if response.rows_key is not None:
         if isinstance(data, dict) and isinstance(data.get(response.rows_key), list):
-            rows = [_pick(r, response.pick) for r in data[response.rows_key][:limit]]
+            rows = _rows(data[response.rows_key], response.pick, limit)
             return {**data, response.rows_key: rows}
-        return data
+        raise _Shape
     if isinstance(data, list):
-        return [_pick(r, response.pick) for r in data[:limit]]
-    return _pick(data, response.pick)
+        return _rows(data, response.pick, limit)
+    if response.pick is None:
+        return data
+    if isinstance(data, dict):
+        return _pick(data, response.pick)
+    raise _Shape
 
 
 def _surface(data: Any, response: ResponseSpec, warning: str | None) -> Any:
@@ -186,7 +236,13 @@ def _make_tool(
         )
         if reply.error is not None:
             return reply.error
-        projected = _project(reply.data, tool.response, settings.default_row_limit)
+        try:
+            projected = _project(reply.data, tool.response, settings.default_row_limit)
+        except _Shape:
+            return {
+                "error": f"The {settings.service_name} reply did not have the expected shape, "
+                "so nothing was returned."
+            }
         return _surface(projected, tool.response, reply.warning)
 
     run.__name__ = tool.name

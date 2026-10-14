@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import pytest
 
 from agent_core.adapters.driven.tools.context import TurnContext
 from agent_core.adapters.driven.tools.http_bridge import (
@@ -224,3 +225,17 @@ def test_a_plain_error_body_has_no_problem_key() -> None:
     reply = _call(Backend(status=500, body={"title": "not a problem document"}))
 
     assert reply.error is not None and "problem" not in reply.error
+
+
+def test_an_empty_peer_separator_is_refused_when_a_prefix_is_set_and_harmless_otherwise() -> None:
+    with pytest.raises(ValueError, match="peer_session_separator"):
+        BridgeSettings(peer_session_prefix="peer~", peer_session_separator="")
+    with pytest.raises(ValueError, match="peer_session_separator"):
+        BridgeSettings.from_mapping({"peer_session_prefix": "peer~", "peer_session_separator": ""})
+
+    assert BridgeSettings(peer_session_separator="").peer_session_prefix == ""
+
+
+def test_case_id_for_never_raises_on_an_empty_separator() -> None:
+    assert case_id_for("peer~case-1", "peer~", "") == "case-1"
+    assert case_id_for("case-1", "peer~", "") == "case-1"

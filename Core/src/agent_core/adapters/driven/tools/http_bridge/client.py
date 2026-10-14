@@ -44,7 +44,9 @@ def case_id_for(session_id: str, prefix: str = "", separator: str = "~") -> str:
     """The session a call belongs to: itself, or the asker's id inside a peer session id."""
     sid = str(session_id)
     while prefix and sid.startswith(prefix):
-        sid = sid[len(prefix) :].rsplit(separator, 1)[0]
+        sid = sid[len(prefix) :]
+        if separator:
+            sid = sid.rsplit(separator, 1)[0]
     return sid
 
 

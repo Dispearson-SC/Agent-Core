@@ -26,6 +26,7 @@ Everything is validated at load: a bad manifest stops the consumer addon at star
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -78,6 +79,9 @@ class ArgumentSpec(_Strict):
             "number",
         ):
             raise ValueError("minimum/maximum apply to integer and number only")
+        if self.type == "integer" and self.minimum is not None and self.maximum is not None:
+            if math.ceil(self.minimum) > math.floor(self.maximum):
+                raise ValueError("no integer lies between minimum and maximum")
         return self
 
 

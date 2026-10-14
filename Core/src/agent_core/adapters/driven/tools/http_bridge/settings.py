@@ -43,6 +43,10 @@ class BridgeSettings:
     # How error messages call the service ("The <name> timed out...").
     service_name: str = "backend"
 
+    def __post_init__(self) -> None:
+        if self.peer_session_prefix and not self.peer_session_separator:
+            raise ValueError("peer_session_separator must not be empty when a prefix is set")
+
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> BridgeSettings:
         known = {f.name for f in fields(cls)}
