@@ -191,7 +191,7 @@ def _forecast(arguments: Arguments, data: Any, subject: dict[str, Any]) -> Any:
 
 
 def _demand(arguments: Arguments, reply: Any) -> Any:
-    subject = {"sku": arguments["sku"], "target_date": arguments["target_date"]}
+    subject = {"sku": arguments.get("sku"), "target_date": arguments["target_date"]}
     data = _forecast(arguments, reply, subject)
     if "error" in data or data.get("forecast_available") is False:
         return data
@@ -322,6 +322,27 @@ def _pick_all(rows: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
     return [_pick(r, keys) for r in rows] if isinstance(rows, list) else []
 
 
+class _Unexpected(Exception):
+    """A reply that is not the shape its view describes: said as unavailable, never guessed at."""
+
+
+def _calendar(data: dict[str, Any]) -> dict[str, Any]:
+    days = data.get("days")
+    if days is not None and not isinstance(days, list):
+        raise _Unexpected
+    return {
+        "window_days": data.get("window_days"),
+        "days": [
+            {
+                "date": day.get("date"),
+                "deliveries": _pick_all(day.get("deliveries"), _DELIVERY_KEYS),
+            }
+            for day in (days or [])
+            if isinstance(day, dict)
+        ],
+    }
+
+
 def _view_unavailable(reason: str) -> dict[str, Any]:
     return {
         "available": False,
@@ -340,7 +361,11 @@ def _view(what: str, shape: Callable[[dict[str, Any]], dict[str, Any]]) -> After
             return data
         if not isinstance(data, dict):
             return _view_unavailable(f"The backend returned an unexpected {what}.")
-        return {"available": True, **_pick(data, _ENVELOPE_KEYS), **shape(data)}
+        try:
+            shaped = shape(data)
+        except _Unexpected:
+            return _view_unavailable(f"The backend returned an unexpected {what}.")
+        return {"available": True, **_pick(data, _ENVELOPE_KEYS), **shaped}
 
     return outcome
 
@@ -359,6 +384,23 @@ def _enums_are_respected(tool: Tool[Any]) -> Before:
             value = arguments.get(name)
             if value is not None and value not in allowed:
                 raise _Refused({"error": f"{name} must be one of {', '.join(allowed)}."})
+        return arguments
+
+    return check
+
+
+def _required_are_present(tool: Tool[Any]) -> Before:
+    """Say a missing required argument BEFORE the call, in the bridge's words.
+
+    The bridge answers it as an error value without an HTTP status, which the forecast and view
+    outcomes read as "the backend is down"; the model must hear that IT left something out.
+    """
+    required = tool.function_schema.json_schema.get("required", [])
+
+    def check(arguments: Arguments) -> Arguments:
+        for name in required:
+            if arguments.get(name) is None:
+                raise _Refused({"error": f"{name} is required"})
         return arguments
 
     return check
@@ -395,20 +437,7 @@ _SHAPES: dict[str, After] = {
             "items": _pick_all(d.get("items"), _EXPIRING_ITEM_KEYS),
         },
     ),
-    "get_deliveries": _view(
-        "delivery calendar",
-        lambda d: {
-            "window_days": d.get("window_days"),
-            "days": [
-                {
-                    "date": day.get("date"),
-                    "deliveries": _pick_all(day.get("deliveries"), _DELIVERY_KEYS),
-                }
-                for day in (d.get("days") or [])
-                if isinstance(day, dict)
-            ],
-        },
-    ),
+    "get_deliveries": _view("delivery calendar", _calendar),
     "get_staffing": _view(
         "staffing recommendation",
         lambda d: {
@@ -434,12 +463,23 @@ _SHAPES: dict[str, After] = {
 
 def _before(name: str, tool: Tool[Any]) -> Before | None:
     if name in ("forecast_demand", "forecast_daily_flow"):
-        return _target
+        return _chain(_required_are_present(tool), _target)
     if name in ("get_inventory_status", "get_promos"):
         return _enums_are_respected(tool)
+    if name == "get_issue_analysis":
+        return _required_are_present(tool)
     if name == "audit_promo":
         return _discount_is_a_percentage
     return None
+
+
+def _chain(*guards: Before) -> Before:
+    def run(arguments: Arguments) -> Arguments:
+        for guard in guards:
+            arguments = guard(arguments)
+        return arguments
+
+    return run
 
 
 def _shaped(name: str, tool: Tool[Any]) -> Tool[Any]:

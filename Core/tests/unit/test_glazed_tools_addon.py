@@ -1206,3 +1206,45 @@ def test_view_descriptions_tell_the_model_what_comes_back(gt: Glazed) -> None:
         doc = gt.tool(tool).description or ""
         for term in terms:
             assert term in doc, f"{tool} description lacks {term}"
+
+
+# --- G2b: error values instead of exceptions or masked refusals ---------------------------------
+
+
+def test_a_forecast_called_without_its_sku_is_an_error_value_and_no_request(
+    gt: Glazed, backend: Backend
+) -> None:
+    """NEW: `arguments["sku"]` raised KeyError into the turn when the model left the sku out."""
+    out = _run(gt.forecast_demand(_ctx(), target_date=_TARGET))
+
+    assert out == {"error": "sku is required"}
+    assert backend.requests == []
+
+
+def test_a_view_called_without_a_required_argument_says_so_instead_of_unavailable(
+    gt: Glazed, backend: Backend
+) -> None:
+    """The bridge's refusal has no HTTP status, which the view outcome read as "backend down"."""
+    out = _run(gt.get_issue_analysis(_ctx()))
+
+    assert out == {"error": "issue_id is required"}
+    assert backend.requests == []
+
+
+@pytest.mark.parametrize("days", [5, "soon", {"a": 1}, True])
+def test_a_delivery_calendar_whose_days_is_not_a_list_is_unavailable_not_a_crash(
+    gt: Glazed, backend: Backend, days: Any
+) -> None:
+    backend.body = {"window_days": 7, "days": days}
+
+    out = _run(gt.get_deliveries(_ctx(), days=7))
+
+    assert out["available"] is False and "unexpected" in out["reason"]
+
+
+def test_a_delivery_calendar_without_days_is_an_empty_calendar(
+    gt: Glazed, backend: Backend
+) -> None:
+    backend.body = {"window_days": 7}
+
+    assert _run(gt.get_deliveries(_ctx(), days=7))["days"] == []

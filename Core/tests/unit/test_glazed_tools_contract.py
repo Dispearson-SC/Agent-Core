@@ -143,6 +143,60 @@ def test_every_clamp_and_enum_of_the_old_tools_is_in_the_schema_the_model_sees(
         assert tools[name].function_schema.json_schema["properties"][arg]["enum"] == allowed
 
 
+def _normalised(spec: dict[str, Any]) -> dict[str, Any]:
+    """An argument schema without titles, an optional X (`anyOf [X, null]`) flattened to X."""
+    flat = {k: v for k, v in spec.items() if k != "title"}
+    if "anyOf" in flat:
+        real = next(o for o in flat.pop("anyOf") if o["type"] != "null")
+        flat.update(real)
+    return flat
+
+
+# The only places the generated schema may differ from the oracle (G2b); all else must be equal.
+#   * an optional argument whose old default was None: the bridge states no default
+#   * the clamps and enums the old tools applied in code, now in the schema the model sees
+#     (BOUNDS / ENUMS above pin their values)
+#   * `format: date`: the bridge's argument model has no `format`; the date is validated and
+#     answered by the forecast guard instead (`_target`), with the old wording
+def test_the_generated_argument_schemas_differ_from_the_oracle_only_where_documented(
+    registered: tuple[AddonContributions, ModuleType],
+) -> None:
+    tools = _all_tools(registered[0])
+    unexplained: list[str] = []
+    for name, old in OLD["tools"].items():
+        generated = tools[name].function_schema.json_schema["properties"]
+        for arg, spec in old["parameters"]["properties"].items():
+            expected = _normalised(spec)
+            if expected.get("default", 0) is None:
+                del expected["default"]
+            if (name, arg) in BOUNDS:
+                default, low, high = BOUNDS[(name, arg)]
+                expected.update(minimum=low, maximum=high)
+            if (name, arg) in ENUMS:
+                expected["enum"] = ENUMS[(name, arg)]
+            expected.pop("format", None)
+            if _normalised(generated[arg]) != expected:
+                unexplained.append(f"{name}.{arg}: {_normalised(generated[arg])} != {expected}")
+    assert unexplained == []
+
+
+def test_the_oracle_has_one_tool_more_than_the_backend_marks_the_second_tool_over_issues() -> None:
+    """`get_integrity_issues` is not an OpenAPI operation of its own: the overlay defines it as a
+    second tool over `GET /internal/v1/issues` (fixed filter), pinned to that operation. The
+    snapshot marks the other 29; the oracle's description of it is the addon's (tested above)."""
+    document = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+    marked = {
+        op.get("x-agent-name") or op["operationId"]
+        for methods in document["paths"].values()
+        for op in methods.values()
+        if isinstance(op, dict) and op.get("x-agent-tool") is True
+    }
+
+    assert set(OLD["tools"]) - marked == {"get_integrity_issues"}
+    assert marked - set(OLD["tools"]) == set()
+    assert OLD["roles"]["auditor"] == ["get_integrity_issues"]
+
+
 def test_reads_are_replay_safe_and_the_rest_keep_the_old_interrupted(
     registered: tuple[AddonContributions, ModuleType],
 ) -> None:
