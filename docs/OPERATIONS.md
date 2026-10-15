@@ -326,6 +326,13 @@ differs from the previous one, discard what it held for that turn (the step was 
 model answered again after a tool call) and start over from `reply_text` of the next snapshot. The
 recorded answer (`GET /turns/{id}`) is the truth; the chunks are a copy.
 
+A routed turn (turn routing, D95/D98: a route to a specialist or an intent plan, run on behalf of
+the person) is the person's turn and streams like one, the plan's compose included; an agent's
+peer turn never streams. When a plan's compose is cut at `AGENT_CORE_COMPOSE_MAX_TOKENS` or fails
+while it streams, the turn falls back to the normal path and the compose takes its text back with
+ONE empty chunk (`text` = `""`) of the next response of its run: by the rule above a client
+discards what it held, and the snapshot's `reply_text` is empty until the fallback's reply streams.
+
 Cost: about one `turn_events` row per sentence of a reply (a chunk is at most 240 characters).
 They are trimmed with the other events (see "Progress events: looking and cleaning"); a feed that
 reconnects after trimming gets a snapshot with whatever remains. A turn that suspends for a person

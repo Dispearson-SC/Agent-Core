@@ -1808,24 +1808,32 @@ class PydanticAgentRunner:
 
         Bounded by the deployment's `ComposeSettings` (L18): an answer cut at `max_tokens` or with
         no text raises `ComposeIncompleteError`, so `RunIntent.reply` falls back to the normal path
-        before anything of the turn is persisted.
+        before anything of the turn is persisted. Whatever it streamed by then is taken back
+        (`ReplyStreamHandler.withdraw`, P11), also when the call itself fails: a cut draft must not
+        stay on the person's feed contradicting the fallback reply.
         """
         agent = self._composer_for(profile)
         instructions = [*(_turn_instructions(profile, request.caller) or []), COMPOSE_INSTRUCTIONS]
-        result = await agent.run(
-            compose_prompt(request.input.text, results),
-            instructions=instructions,
-            model_settings=cast(ModelSettings, self._compose_settings.model_settings()),
-            usage_limits=UsageLimits(request_limit=1, cost_limit=profile.max_cost_usd),
-            event_stream_handler=self._reply_stream(turn_id, request),
-        )
-        if result.response.finish_reason == "length":
-            raise ComposeIncompleteError(
-                f"the compose of turn {turn_id} was cut at {self._compose_settings.max_tokens} "
-                "output tokens"
+        stream = self._reply_stream(turn_id, request)
+        try:
+            result = await agent.run(
+                compose_prompt(request.input.text, results),
+                instructions=instructions,
+                model_settings=cast(ModelSettings, self._compose_settings.model_settings()),
+                usage_limits=UsageLimits(request_limit=1, cost_limit=profile.max_cost_usd),
+                event_stream_handler=stream,
             )
-        if not str(result.output).strip():
-            raise ComposeIncompleteError(f"the compose of turn {turn_id} returned no text")
+            if result.response.finish_reason == "length":
+                raise ComposeIncompleteError(
+                    f"the compose of turn {turn_id} was cut at "
+                    f"{self._compose_settings.max_tokens} output tokens"
+                )
+            if not str(result.output).strip():
+                raise ComposeIncompleteError(f"the compose of turn {turn_id} returned no text")
+        except Exception:
+            if stream is not None:
+                await stream.withdraw()
+            raise
         return TurnOutcome(
             turn_id=turn_id,
             messages=_messages_the_turn_added(result.new_messages()),

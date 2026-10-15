@@ -29,7 +29,15 @@ chunks of a response. The event id derives from all three, so publishing the sam
 retry inside one run) writes one row.
 
 ONLY A PERSON'S TURN. The runner attaches this for a turn nobody else owns. A peer's text is another
-agent's input; it is never put on the feed.
+agent's input; it is never put on the feed. A ROUTED turn (S8: it runs under the delegated identity,
+on behalf of the person) is the person's turn and streams like one.
+
+TAKING TEXT BACK (P11). A run whose text turns out not to be the reply (an intent plan's compose
+cut at its token bound, or failing while it streams, before the turn falls back to the normal path)
+calls `withdraw`: ONE empty chunk of the next response of the same run. By the feed's rule a chunk
+of a later response starts the text over, so the turn's `reply_text` becomes empty and a client
+that discards on a new (run, response) drops what it held, instead of showing a cut draft that
+contradicts the fallback reply until that reply's first chunk arrives.
 """
 
 from __future__ import annotations
@@ -110,6 +118,7 @@ class ReplyStreamHandler:
         self._pending: deque[_Chunk] = deque()
         self._worker: asyncio.Task[None] | None = None
         self._overflow_logged = False
+        self._streamed = False  # some text of this run was queued for the feed
 
     @property
     def pending(self) -> int:
@@ -146,12 +155,24 @@ class ReplyStreamHandler:
                 continue
             index = self._index
             self._index += 1
+            self._streamed = True
             if len(self._pending) >= self._max_pending:
                 self._coalesce(text)
                 continue
             self._pending.append(_Chunk(self._response, index, text))
             if self._worker is None or self._worker.done():
                 self._worker = asyncio.get_running_loop().create_task(self._drain())
+
+    async def withdraw(self) -> None:
+        """Take back the text this run streamed: stop streaming and publish one empty chunk of the
+        next response (see TAKING TEXT BACK). Nothing is published when no text was streamed. A
+        failure is logged once, like any publish, and never raised: the turn goes on."""
+        self._disabled = True
+        await self._reap()
+        if not self._streamed:
+            return
+        self._streamed = False
+        await self._publish(self._response + 1, 0, "")
 
     def _coalesce(self, text: str) -> None:
         newest = self._pending[-1]

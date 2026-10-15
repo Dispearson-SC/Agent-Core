@@ -848,7 +848,9 @@ events (sentence-sized chunks, `turn_events.text`) through the same publisher an
 progress events: `GET /turns/{id}/events` carries `event: delta` frames and every snapshot carries
 `reply_text`, the reply so far. A side channel: the turn's recorded answer is unchanged and stays
 the source of truth; no workflow step changed, so no application-version bump. Peer turns and
-resumed turns are not streamed.
+resumed turns are not streamed. A routed turn (D98) is the person's turn and streams, its intent
+plan's compose included; a compose that is cut or fails takes its streamed text back with one empty
+chunk of a new response before the turn falls back (P11, `ReplyStreamHandler.withdraw`).
 
 **The task graph (C23, D54).** `GET /turns/{id}/graph` returns the ownership tree of a turn built from
 the mailbox rows under that root: root -> the asks it made -> what each callee asked in turn, to any
