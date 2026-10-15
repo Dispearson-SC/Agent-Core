@@ -24,7 +24,8 @@ THE ADDON SIDE OF THE CONTRACT IS PLAIN DATA
     empty when there is none), and the answer may hold
 
          "assessment": {"intents": {<intent>: p in [0, 1]}, "action": p, "follow_up": p | null,
-                        "complexity": score in [0, 1], "requests": int >= 1 | null}
+                        "complexity": score in [0, 1], "requests": int >= 1 | null,
+                        "request_levels": [p of 1 request, p of 2, ...] | null}
 
     (`domain/fast_path.py::Assessment`). With the fast path off neither key is sent, so a router
     sees exactly the request it always saw. This adapter is the one place that turns that mapping
@@ -80,7 +81,9 @@ _KEYS: Final = _DIAGNOSTICS | {
     "decision", "profile_id", "intent", "arguments", "label", "confidence", "calibrated", "model",
     "assessment",
 }  # fmt: skip
-_ASSESSMENT_KEYS: Final = frozenset({"intents", "action", "follow_up", "complexity", "requests"})
+_ASSESSMENT_KEYS: Final = frozenset(
+    {"intents", "action", "follow_up", "complexity", "requests", "request_levels"}
+)
 _MAX_TEXT: Final = 200
 DEFAULT_MAX_SYNC_CALLS: Final = 4
 DEFAULT_SLOT_WAIT_SECONDS: Final = 0.25
@@ -313,10 +316,16 @@ def _assessment(raw: object) -> Assessment | None:
         for name in ("action", "follow_up", "complexity")
     }
     requests = raw.get("requests")  # P13; Assessment refuses a count that is not an int >= 1
+    levels = raw.get("request_levels")  # P14; Assessment checks the count and the range
+    if levels is not None and not isinstance(levels, (list, tuple)):
+        raise ValueError("router answer 'assessment.request_levels' must be a list of numbers")
     return Assessment(
         tuple((name, _probability(v, f"intent {name!r}")) for name, v in intents.items()),
         **optional,
         requests=requests,
+        request_levels=None
+        if levels is None
+        else tuple(_probability(v, "assessment.request_levels") for v in levels),
     )
 
 

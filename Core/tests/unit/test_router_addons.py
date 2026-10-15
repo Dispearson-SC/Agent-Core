@@ -497,6 +497,10 @@ def test_an_answer_may_carry_the_fast_path_assessment() -> None:
         {"intents": {}, "requests": 1.5},
         {"intents": {}, "requests": True},
         {"intents": {}, "requests": "2"},
+        {"intents": {}, "request_levels": [0.5, 1.5]},
+        {"intents": {}, "request_levels": []},
+        {"intents": {}, "request_levels": "0.5,0.5"},
+        {"intents": {}, "request_levels": [True, 0.0]},
     ],
 )
 def test_a_malformed_assessment_is_a_malformed_answer(assessment: Any) -> None:
@@ -516,3 +520,24 @@ def test_an_assessment_may_count_the_requests_of_the_message() -> None:
         {"decision": "pass", "assessment": {"intents": {}, "action": 0.1, "complexity": 0.0}}
     )
     assert plain.assessment is not None and plain.assessment.requests is None
+
+
+def test_an_assessment_may_carry_the_distribution_of_the_request_count() -> None:
+    decision = decision_from_mapping(
+        {
+            "decision": "pass",
+            "assessment": {
+                "intents": {"a": 0.9},
+                "action": 0.1,
+                "complexity": 0.0,
+                "requests": 2,
+                "request_levels": [0.13, 0.87, 0, 0],
+            },
+        }
+    )
+    assert decision.assessment is not None
+    assert decision.assessment.request_levels == (0.13, 0.87, 0.0, 0.0)
+    unknown = decision_from_mapping(
+        {"decision": "pass", "assessment": {"intents": {}, "request_levels": None}}
+    )
+    assert unknown.assessment is not None and unknown.assessment.request_levels is None

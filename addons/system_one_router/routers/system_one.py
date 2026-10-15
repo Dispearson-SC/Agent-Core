@@ -43,11 +43,14 @@ THE FAST PATH (S10, Core's AGENT_CORE_FAST_PATH)
         three, four or more unless the routes file names its own). Core's coverage guard passes a
         message that asks for more things than the intents it detected.
     The answer then carries `assessment: {intents: {<intent name>: p}, action, follow_up,
-    complexity, requests}` (the complexity normalised to [0, 1]; `requests` the count, 1 for the
-    first level: Typesafe's score is the expected level, rounded); the route choice is decided
-    exactly as without it. A missing or malformed fast path answer drops the assessment only (reason
-    `bad_assessment`): Core then never takes the fast path for that turn. Without the flag the
-    request is exactly the one choice question.
+    complexity, requests, request_levels}` (the complexity normalised to [0, 1]; `requests` the
+    count, 1 for the first level: Typesafe's score is the expected level, rounded; `request_levels`
+    the score's probability of each level, P14, only when it gave one for every level); the route
+    choice is decided exactly as without it. A missing or malformed fast path answer drops the
+    assessment only (reason `bad_assessment`): Core then never takes the fast path for that turn.
+    The request count is the exception (P14): it only feeds Core's coverage guard, so a missing or
+    malformed one is an unknown count (`requests` None), never a dropped assessment. Without the
+    flag the request is exactly the one choice question.
 
 RETRIES
     429 and 529 are retried once after `retry_backoff_ms`, and only when that retry still fits
@@ -411,21 +414,32 @@ def read_assessment(
         "action": noul("action"),
         "follow_up": noul("follow_up") if has_history else None,
         "complexity": round(float(score) / top, 4),
-        "requests": _requests(answers.get("requests"), len(table.fast.requests_levels)),
+        **_requests(answers.get("requests"), len(table.fast.requests_levels)),
     }
 
 
-def _requests(answer: object, levels: int) -> int:
-    """P13. The request count: the score's expected level, rounded, plus one (level 0 is one)."""
-    score = answer.get("score") if isinstance(answer, Mapping) else None
+def _requests(answer: object, levels: int) -> dict[str, Any]:
+    """P13. The request count: the score's expected level, rounded, plus one (level 0 is one);
+    None when the answer is missing or off its levels (P14: an unknown count). With it, P14, the
+    probability of each level (`request_levels`) when the answer gives one for every level."""
+    if not isinstance(answer, Mapping):
+        return {"requests": None}
+    score = answer.get("score")
     if (
         isinstance(score, bool)
         or not isinstance(score, (int, float))
         or not math.isfinite(score)
         or not 0 <= score <= levels - 1
     ):
-        raise _BadResponse("the requests answer is not a score on its levels")
-    return int(math.floor(score + 0.5)) + 1
+        return {"requests": None}
+    counted: dict[str, Any] = {"requests": int(math.floor(score + 0.5)) + 1}
+    probabilities = answer.get("probabilities")
+    if isinstance(probabilities, Mapping):
+        try:
+            counted["request_levels"] = [_unit(probabilities[str(i)]) for i in range(levels)]
+        except (KeyError, _BadResponse):
+            pass  # the count stands; the guard reads it as P13 did
+    return counted
 
 
 # --- the answer ----------------------------------------------------------------------------------

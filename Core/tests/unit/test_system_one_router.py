@@ -826,15 +826,55 @@ def test_the_requests_score_is_a_count_from_one(tmp_path: Path, score: float, co
 
 
 @pytest.mark.parametrize("requests", [None, 4.5, -1.0])
-def test_a_missing_or_impossible_requests_answer_drops_the_assessment(
+def test_a_missing_or_impossible_requests_answer_is_an_unknown_count(
     tmp_path: Path, requests: float | None
 ) -> None:
+    # P14: the count only feeds the coverage guard; without it the guard stays quiet, and every
+    # other answer still stands (P13 dropped the whole assessment).
     answer = _fast_route(
         _replying(httpx.Response(200, json=_fast_answer(intents=BOTH_LOW, requests=requests))),
         _fast_settings(tmp_path),
         _fast_request("x"),
     )
-    assert "assessment" not in answer and answer["reason"] == "bad_assessment"
+    assert answer["assessment"]["requests"] is None
+    assert "request_levels" not in answer["assessment"]
+    assert answer.get("reason") != "bad_assessment"
+    decision = decision_from_mapping(answer)
+    assert decision.assessment is not None and decision.assessment.requests is None
+
+
+def test_the_requests_probabilities_come_back_as_request_levels(tmp_path: Path) -> None:
+    # The router's answer to "Are the shifts enough for the next days? Do the shifts cover it?"
+    body = _fast_answer(intents=BOTH_LOW, requests=0.88)
+    body["answers"]["requests"]["probabilities"] = {"0": 0.13, "1": 0.87, "2": 0.0, "3": 0.0}
+
+    answer = _fast_route(
+        _replying(httpx.Response(200, json=body)), _fast_settings(tmp_path), _fast_request("x")
+    )
+
+    assert answer["assessment"]["requests"] == 2
+    assert answer["assessment"]["request_levels"] == [0.13, 0.87, 0.0, 0.0]
+    decision = decision_from_mapping(answer)
+    assert decision.assessment is not None
+    assert decision.assessment.more_requests_than(1) == pytest.approx(0.87)
+
+
+@pytest.mark.parametrize(
+    "probabilities",
+    [{"0": 0.5}, {"0": 0.5, "1": 0.5, "2": 0, "3": "x"}, {"0": 1.5, "1": 0, "2": 0, "3": 0}, [1]],
+)
+def test_malformed_requests_probabilities_keep_the_count_only(
+    tmp_path: Path, probabilities: object
+) -> None:
+    body = _fast_answer(intents=BOTH_LOW, requests=1.0)
+    body["answers"]["requests"]["probabilities"] = probabilities
+
+    answer = _fast_route(
+        _replying(httpx.Response(200, json=body)), _fast_settings(tmp_path), _fast_request("x")
+    )
+
+    assert answer["assessment"]["requests"] == 2
+    assert "request_levels" not in answer["assessment"]
 
 
 def test_an_intent_route_may_give_its_yes_no_question_criteria(tmp_path: Path) -> None:

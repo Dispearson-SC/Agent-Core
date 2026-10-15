@@ -268,12 +268,13 @@ a follow-up IS sent to the router then). A router that supports it answers, besi
                 "action": 0.02,        # P(it asks to DO something rather than to be told)
                 "follow_up": 0.10,     # P(it depends on the conversation); null without history
                 "complexity": 0.15,    # the router's complexity score, normalised to [0, 1]
-                "requests": 1}}        # P13, optional: how many separate things it asks for
+                "requests": 1,         # P13, optional: how many separate things it asks for
+                "request_levels": [0.9, 0.1]}}  # P14, optional: P(1 thing), P(2), ... (last: or more)
 ```
 
 Every value must be a number in [0, 1] (`follow_up` may be null; `requests`, when sent, an integer
-of at least 1: Core passes a message asking for more things than the intents it detected) and the intent names at most 64
-characters; anything else is a malformed answer (the turn runs as asked). Core decides with them
+of at least 1; `request_levels`, when sent, a list of 1-255 probabilities) and the intent names at
+most 64 characters; anything else is a malformed answer (the turn runs as asked). Core decides with them
 (the rules are in docs/OPERATIONS.md); a router that ignores the flag and sends no `assessment` is
 simply never on the fast path. With the fast path off neither key is in the request, so a router
 sees exactly what it always saw.
@@ -378,9 +379,10 @@ conversation (the state is then `{message, recent_conversation}`), a `complexity
 three levels and a `requests` score (P13: how many separate things the message asks for, levels
 one, two, three, four or more). The answer adds `assessment` (intent NAMES, the complexity
 normalised to [0, 1], `requests` the count: the score is Typesafe's expected level, rounded, plus
-one); the
+one; `request_levels` the score's probability of each level, P14, when it gives one per level); the
 route choice is decided exactly as without it. A missing or malformed fast path answer drops the
-assessment only (reason `bad_assessment`). A routes file may word the questions:
+assessment only (reason `bad_assessment`), except the request count: a missing or malformed one is
+an unknown count (`requests` null, P14), and Core's coverage guard then stays quiet. A routes file may word the questions:
 
 ```yaml
 fast_path:                       # optional; every key optional
