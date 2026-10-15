@@ -425,3 +425,76 @@ def test_an_answer_may_carry_its_reason_elapsed_time_and_usage_which_are_logged_
 def test_malformed_diagnostics_are_a_malformed_answer(answer: dict[str, Any]) -> None:
     with pytest.raises((TypeError, ValueError)):
         decision_from_mapping(answer)
+
+
+# --- S10: the fast path's extra questions --------------------------------------------------------
+
+
+def test_a_fast_path_request_carries_the_flag_and_the_conversation_and_off_carries_neither(
+    tmp_path: Path,
+) -> None:
+    _addon(
+        tmp_path,
+        "listening",
+        "listen",
+        """
+        SEEN = []
+
+        def route(request):
+            SEEN.append(request)
+            return {"decision": "pass"}
+        """,
+    )
+    router = AddonTurnRouter(_register(tmp_path, ["listening"]).routers)
+    fast = RouteRequest(
+        text="and what do I order?",
+        profile_id="front_desk",
+        channel="http",
+        tenant_id="t",
+        fast_path=True,
+        history=("person: sales?", "agent: 1,200"),
+    )
+
+    asyncio.run(router.route("listen", _request()))
+    asyncio.run(router.route("listen", fast))
+
+    module = __import__("sys").modules["agent_core_addons.listening.routers.listen"]
+    assert "fast_path" not in module.SEEN[0] and "history" not in module.SEEN[0]
+    assert module.SEEN[1]["fast_path"] is True
+    assert module.SEEN[1]["history"] == ["person: sales?", "agent: 1,200"]
+
+
+def test_an_answer_may_carry_the_fast_path_assessment() -> None:
+    decision = decision_from_mapping(
+        {
+            "decision": "pass",
+            "assessment": {
+                "intents": {"order_plan": 0.81, "day_summary": 0.93},
+                "action": 0.02,
+                "follow_up": None,
+                "complexity": 0.25,
+            },
+        }
+    )
+    assert decision.assessment is not None
+    assert decision.assessment.intents == (("day_summary", 0.93), ("order_plan", 0.81))
+    assert (decision.assessment.action, decision.assessment.follow_up) == (0.02, None)
+    assert decision.assessment.complexity == 0.25
+    assert decision_from_mapping({"decision": "pass"}).assessment is None
+
+
+@pytest.mark.parametrize(
+    "assessment",
+    [
+        "yes",
+        {"intents": {"a": 1.5}},
+        {"intents": {"a": "high"}},
+        {"intents": ["a"]},
+        {"intents": {}, "action": True},
+        {"intents": {}, "mood": 0.1},
+        {"intents": {"x" * 65: 0.1}},
+    ],
+)
+def test_a_malformed_assessment_is_a_malformed_answer(assessment: Any) -> None:
+    with pytest.raises((ValueError, TypeError)):
+        decision_from_mapping({"decision": "pass", "assessment": assessment})

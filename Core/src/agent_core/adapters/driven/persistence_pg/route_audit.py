@@ -1,5 +1,6 @@
 """Driven adapter: `RouteAudit` on Postgres (`audit_turn_routes`, migrations 0045-0046, D95, and
-`audit_turn_intents`, migration 0047, D97; both identities of a delegated turn, 0048, S8).
+`audit_turn_intents`, migration 0047, D97; both identities of a delegated turn, 0048, S8; the fast
+path's verdict and answers, 0049, S10).
 
 Phase:   Phase 5 (fast communication), P1
 Tests:   Core/tests/integration/test_route_audit.py
@@ -23,8 +24,10 @@ __all__ = ["PgRouteAudit"]
 _INSERT = (
     "INSERT INTO audit_turn_routes (turn_id, tenant_id, router, requested_profile, profile_id, "
     "decision, label, confidence, calibrated, model, intent, elapsed_ms, fallback_reason, "
-    "reason, input_tokens, output_tokens, actor, on_behalf_of) "
-    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "reason, input_tokens, output_tokens, actor, on_behalf_of, fast_path_mode, fast_path, "
+    "fast_path_intents, assessment) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+    "%s, %s)"
 )
 
 _INSERT_INTENT = (
@@ -58,6 +61,10 @@ class PgRouteAudit:
             record.output_tokens,
             record.actor,
             record.on_behalf_of,
+            record.fast_path_mode,
+            record.fast_path,
+            record.fast_path_intents,
+            record.assessment,
         )
         await asyncio.to_thread(self._insert, _INSERT, params)
 

@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
 
+from agent_core.domain.fast_path import COMPOSITE, Assessment, FastPathMode
 from agent_core.domain.turn import restore_state
 
 __all__ = [
@@ -110,6 +111,10 @@ class RouteRequest:
     channel: str
     tenant_id: str
     modality: str | None = None
+    # S10. Set only when the fast path is shadow or on: ask the extra questions (`Assessment`), and
+    # the recent conversation (oldest first, short lines) when the session has one.
+    fast_path: bool = False
+    history: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +133,9 @@ class RouteDecision:
     # L12. Why the router answered what it did (a fixed code, never text) and what it spent.
     reason: str | None = None
     usage: Mapping[str, int] = field(default_factory=dict)
+    # S10. The router's answers to the fast path's questions; None when it was not asked or did
+    # not answer them.
+    assessment: Assessment | None = None
 
     def __post_init__(self) -> None:
         if self.kind is RouteKind.ROUTE and not (self.profile_id or "").strip():
@@ -182,6 +190,13 @@ class RouteRecord:
     # and the person it acts for. None when the route was not applied (the turn runs as the person).
     actor: str | None = None
     on_behalf_of: str | None = None
+    # S10. The fast path: its mode (None when off), its verdict (`domain/fast_path.py` codes; in
+    # shadow what it WOULD have done), the intents it detected (comma separated) and every answer
+    # with its value (`Assessment.summary`).
+    fast_path_mode: str | None = None
+    fast_path: str | None = None
+    fast_path_intents: str | None = None
+    assessment: str | None = None
 
     def __setstate__(self, state: list[object]) -> None:
         """A record pickled by an older build reads back with the newer fields at their default."""
@@ -192,10 +207,18 @@ class RouteRecord:
         return self.profile_id != self.requested_profile
 
     @property
+    def composite(self) -> bool:
+        """Whether the turn answers a composite plan (the fast path on and its verdict applied)."""
+        return self.fast_path_mode == FastPathMode.ON.value and self.fast_path == COMPOSITE
+
+    @property
     def outcome(self) -> str:
-        """`routed`, `passed`, or `fallback:<reason>`: the short label the event feed shows."""
+        """`routed`, `passed`, `composite` or `fallback:<reason>`: the short label the event feed
+        shows."""
         if self.fallback_reason is not None:
             return f"fallback:{self.fallback_reason}"
+        if self.composite:
+            return COMPOSITE
         return "routed" if self.routed else "passed"
 
 

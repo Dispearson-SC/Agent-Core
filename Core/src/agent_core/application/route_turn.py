@@ -38,6 +38,21 @@ WHAT IT GUARANTEES
     * The audit row is bounded: the label, model, intent, reason and fallback reason a router
       produced are cut to `MAX_AUDIT_TEXT` characters, whichever adapter answered. Its token usage
       is recorded as input and output tokens (L12).
+
+THE FAST PATH (S10, `domain/fast_path.py`)
+    `fast_path` is the deployment's switch. OFF (the default) is everything above, unchanged: the
+    router gets the request it always got. SHADOW and ON ask the router the extra questions
+    (`RouteRequest.fast_path`), with the recent conversation when the session has one
+    (`recent_history`), so a follow-up IS sent to the router then; its verdict, the detected
+    intents and every answer are audited on the route row. SHADOW then does exactly what OFF would
+    have done (a follow-up is still not routed). ON applies the verdict: a `pass:*` runs the entry
+    profile as the person, a `composite` runs the plans of every detected intent and one compose
+    (`RunIntent.run_composite`), and a `defer:*` runs the logic above. A composite is built only
+    when the entry profile opted into intents and EVERY detected intent has a declared plan whose
+    owner is an allowed, startable target the entry profile may ask (the S8 guard, per owner);
+    otherwise it is `defer:<intent>:<reason>`. The composite turn stays the person's turn on the
+    entry profile; each member records the hop its calls run delegated at. Like a route, it is
+    applied only once its audit row is written.
 """
 
 from __future__ import annotations
@@ -48,6 +63,15 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 
+from agent_core.domain.fast_path import (
+    Assessment,
+    CompositeCall,
+    CompositeMember,
+    FastPathMode,
+    FastPathThresholds,
+    FastPathVerdict,
+    decide_fast_path,
+)
 from agent_core.domain.intents import IntentCall, IntentPlan
 from agent_core.domain.policy import Effect
 from agent_core.domain.profile import AgentProfile
@@ -56,16 +80,25 @@ from agent_core.domain.routing import (
     FALLBACK_AUDIT_UNAVAILABLE,
     FALLBACK_DELEGATION_UNAVAILABLE,
     FALLBACK_FOLLOW_UP,
+    FALLBACK_INTENT_NOT_SUPPORTED,
+    FALLBACK_INTENT_UNKNOWN,
     FALLBACK_PEER_REFUSED,
     FALLBACK_TIMEOUT,
     RouteDecision,
     RouteKind,
     RouteRecord,
     RouteRequest,
+    RoutingPolicy,
     error_reason,
     resolve_route,
 )
-from agent_core.domain.turn import SessionRef, TurnId, TurnRequest, delegated_identity
+from agent_core.domain.turn import (
+    SessionRef,
+    TurnId,
+    TurnRequest,
+    delegated_identity,
+    restore_state,
+)
 from agent_core.ports.route_audit import RouteAudit
 from agent_core.ports.tool_policy import ToolPolicy
 from agent_core.ports.turn_router import TurnRouter
@@ -75,6 +108,7 @@ __all__ = [
     "MAX_AUDIT_TEXT",
     "HasHistory",
     "PeerGate",
+    "RecentHistory",
     "RouteTurn",
     "RoutedTurn",
 ]
@@ -91,11 +125,17 @@ HasHistory = Callable[[SessionRef, TurnId], Awaitable[bool]]
 """Does the session already hold a turn other than this one? Composition binds it to the store's
 own table, like `RunIntent`'s `RequestPersisted`: one read, not a port member."""
 
+RecentHistory = Callable[[SessionRef, TurnId], Awaitable[tuple[str, ...]]]
+"""S10. The session's recent conversation before this turn, oldest first, as short lines (empty:
+none). What the fast path's follow-up question reads; composition binds it to the store."""
+
 _LOG = logging.getLogger(__name__)
 
 DEFAULT_ROUTER_TIMEOUT_MS = 1500
 # The longest text field of a route's audit row (label, model, intent, fallback reason).
 MAX_AUDIT_TEXT = 200
+# S10. The longest fast path summary (every answer with its value) and intent list on that row.
+MAX_ASSESSMENT_TEXT = 2000
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +147,12 @@ class RoutedTurn:
     request: TurnRequest
     record: RouteRecord | None = None
     intent: IntentCall | None = None
+    # S10. The composite the turn answers (the fast path on); None otherwise.
+    composite: CompositeCall | None = None
+
+    def __setstate__(self, state: list[object]) -> None:
+        """A record pickled by an older build reads back with the newer fields at their default."""
+        restore_state(self, state)
 
 
 class RouteTurn:
@@ -122,6 +168,9 @@ class RouteTurn:
         peer_gate: PeerGate | None = None,
         policy: ToolPolicy | None = None,
         has_history: HasHistory | None = None,
+        fast_path: FastPathMode = FastPathMode.OFF,
+        thresholds: FastPathThresholds | None = None,
+        recent_history: RecentHistory | None = None,
     ) -> None:
         if timeout_ms < 1:
             raise ValueError(f"the router timeout must be at least 1 ms, got {timeout_ms}")
@@ -140,6 +189,11 @@ class RouteTurn:
         self._policy = policy
         # L18. None routes every turn (follow-ups included), as before.
         self._has_history = has_history
+        # S10. The fast path switch, its thresholds and the conversation its follow-up question
+        # reads (None: no excerpt; the follow-up check then uses `has_history`).
+        self._fast_path = fast_path
+        self._thresholds = thresholds or FastPathThresholds()
+        self._recent_history = recent_history
 
     def applies(self, request: TurnRequest) -> bool:
         """Whether `request` consults a router: a channel start of a profile declaring routing."""
@@ -154,21 +208,29 @@ class RouteTurn:
         profile = self._profiles[request.profile_id]
         policy = profile.routing
         assert policy is not None  # `applies` checked it
+        fast = self._fast_path is not FastPathMode.OFF
 
         started = self._clock()
         decision: RouteDecision | None = None
         failure: str | None = None
+        history: tuple[str, ...] = ()
 
-        async def consult() -> tuple[str | None, RouteDecision | None]:
-            follow_up = await self._follow_up(turn_id, request)
-            if follow_up is not None:
-                return follow_up, None
-            return None, await self._routers.route(policy.router, _route_request(request))
+        async def consult() -> tuple[str | None, RouteDecision | None, tuple[str, ...]]:
+            if not fast:
+                follow_up = await self._follow_up(turn_id, request)
+                if follow_up is not None:
+                    return follow_up, None, ()
+                return None, await self._routers.route(policy.router, _route_request(request)), ()
+            # S10. The router is asked even about a follow-up: its answers say whether the message
+            # depends on the conversation, which only it can tell.
+            excerpt, follow_up = await self._conversation(turn_id, request)
+            asked = _route_request(request, fast_path=True, history=excerpt)
+            return follow_up, await self._routers.route(policy.router, asked), excerpt
 
         try:
             # ONE deadline for the follow-up check and the router (slice 39): a stuck history read
             # must not hold the turn any longer than a slow router may.
-            failure, decision = await asyncio.wait_for(consult(), self._timeout)
+            failure, decision, history = await asyncio.wait_for(consult(), self._timeout)
         except TimeoutError:
             failure = FALLBACK_TIMEOUT
         except Exception as error:
@@ -181,8 +243,28 @@ class RouteTurn:
             )
         elapsed_ms = max(0, round((self._clock() - started) * 1000))
 
+        verdict: FastPathVerdict | None = None
+        members: tuple[CompositeMember, ...] = ()
+        if fast and decision is not None:
+            continued = bool(history) or failure == FALLBACK_FOLLOW_UP
+            verdict, members = await self._verdict(decision, policy, request, continued)
+        # ON applies the verdict; a history read that failed (an error, not `follow_up`) is today's
+        # path whatever the verdict, since nobody knows whether the message continues one.
+        applied = (
+            verdict
+            if verdict is not None
+            and self._fast_path is FastPathMode.ON
+            and failure in (None, FALLBACK_FOLLOW_UP)
+            else None
+        )
+
         target, reason = request.profile_id, failure
-        if decision is not None:
+        next_hop: int | None = None
+        if applied is not None and applied.composite:
+            reason = None
+        elif applied is not None and applied.passes:
+            pass  # the entry profile, as the person; `follow_up` stays recorded when it applied
+        elif decision is not None and failure is None:
             target, reason = resolve_route(
                 decision,
                 policy,
@@ -190,12 +272,16 @@ class RouteTurn:
                 entry_points=self._entry_points(),
                 plans=self._owners,
             )
-        next_hop: int | None = None
         if reason is None and target != request.profile_id:
             next_hop, reason = await self._delegation(request, target)
             if reason is not None:
                 target = request.profile_id
-        delegated = next_hop is not None
+        composite = (
+            CompositeCall(members) if applied is not None and applied.composite else None
+        )
+        delegated = next_hop is not None or (
+            composite is not None and any(m.hop is not None for m in members)
+        )
         record = RouteRecord(
             router=policy.router,
             requested_profile=request.profile_id,
@@ -213,6 +299,7 @@ class RouteTurn:
             output_tokens=None if decision is None else _tokens(decision.usage, _OUTPUT_KEYS),
             actor=delegated_identity(request.caller).subject_id if delegated else None,
             on_behalf_of=request.caller.subject_id if delegated else None,
+            **_fast_path_fields(self._fast_path, verdict, decision),
         )
         try:
             await self._audit.record_route(turn_id, str(request.session.tenant_id), record)
@@ -230,8 +317,15 @@ class RouteTurn:
                 on_behalf_of=None,
             )
             return RoutedTurn(request, unapplied)
+        if composite is not None:
+            return RoutedTurn(request, record, None, composite)
         intent = None
-        if decision is not None and decision.kind is RouteKind.INTENT and reason is None:
+        if (
+            applied is None
+            and decision is not None
+            and decision.kind is RouteKind.INTENT
+            and reason is None
+        ):
             intent = IntentCall(decision.intent or "", decision.arguments)
         if not record.routed or next_hop is None:
             return RoutedTurn(request, record, intent)
@@ -242,6 +336,66 @@ class RouteTurn:
             hop=next_hop,
         )
         return RoutedTurn(delegated_request, record, intent)
+
+    async def _conversation(
+        self, turn_id: TurnId, request: TurnRequest
+    ) -> tuple[tuple[str, ...], str | None]:
+        """S10. The recent conversation and the follow-up fallback a turn takes without the fast
+        path (`follow_up`, an error reason, or None). Without `recent_history` it is `has_history`
+        alone, and no excerpt."""
+        if self._recent_history is None:
+            return (), await self._follow_up(turn_id, request)
+        try:
+            excerpt = tuple(await self._recent_history(request.session, turn_id))
+        except Exception as error:
+            _LOG.warning("could not read the recent conversation of turn %s", turn_id)
+            return (), _bounded(error_reason(error))
+        if not excerpt:
+            return (), None
+        # A deployment that routes follow-ups (`has_history` unset) keeps doing so.
+        return excerpt, None if self._has_history is None else FALLBACK_FOLLOW_UP
+
+    async def _verdict(
+        self,
+        decision: RouteDecision,
+        policy: RoutingPolicy,
+        request: TurnRequest,
+        continued: bool,
+    ) -> tuple[FastPathVerdict, tuple[CompositeMember, ...]]:
+        """The fast path's verdict on `decision.assessment` and, for a composite, its members; a
+        composite that cannot be built in full is `defer:<intent>:<reason>`."""
+        assessment: Assessment | None = decision.assessment
+        if assessment is None:
+            return FastPathVerdict("defer:unassessed"), ()
+        verdict = decide_fast_path(assessment, self._thresholds, has_history=continued)
+        if not verdict.composite:
+            return verdict, ()
+        if not policy.intents or self._owners is None:
+            return FastPathVerdict(f"defer:{FALLBACK_INTENT_NOT_SUPPORTED}", verdict.intents), ()
+        members: list[CompositeMember] = []
+        for intent in verdict.intents:
+            owner = self._owners.get(intent)
+            if owner is None:
+                return FastPathVerdict(
+                    _bounded(f"defer:{intent}:{FALLBACK_INTENT_UNKNOWN}") or "", verdict.intents
+                ), ()
+            if owner == request.profile_id:
+                members.append(CompositeMember(intent, owner))
+                continue
+            landed, refusal = resolve_route(
+                RouteDecision(kind=RouteKind.ROUTE, profile_id=owner),
+                policy,
+                requested=request.profile_id,
+                entry_points=self._entry_points(),
+            )
+            hop: int | None = None
+            if refusal is None and landed == owner:
+                hop, refusal = await self._delegation(request, owner)
+            if refusal is not None or hop is None:
+                code = f"defer:{intent}:{refusal or 'refused'}"
+                return FastPathVerdict(_bounded(code) or "", verdict.intents), ()
+            members.append(CompositeMember(intent, owner, hop))
+        return verdict, tuple(members)
 
     async def _follow_up(self, turn_id: TurnId, request: TurnRequest) -> str | None:
         """`follow_up` when the session already holds another turn, an error reason when that
@@ -301,11 +455,32 @@ def _bounded(text: str | None) -> str | None:
     return None if text is None else text[:MAX_AUDIT_TEXT]
 
 
-def _route_request(request: TurnRequest) -> RouteRequest:
+def _fast_path_fields(
+    mode: FastPathMode, verdict: FastPathVerdict | None, decision: RouteDecision | None
+) -> dict[str, str | None]:
+    """The route row's fast path columns: nothing when it is off, else the mode, the verdict
+    (None when the router gave no answer), the detected intents and every answer (bounded)."""
+    if mode is FastPathMode.OFF:
+        return {}
+    assessment = None if decision is None else decision.assessment
+    intents = None if verdict is None or not verdict.intents else ",".join(verdict.intents)
+    return {
+        "fast_path_mode": mode.value,
+        "fast_path": None if verdict is None else _bounded(verdict.code),
+        "fast_path_intents": None if intents is None else intents[:MAX_ASSESSMENT_TEXT],
+        "assessment": None if assessment is None else assessment.summary()[:MAX_ASSESSMENT_TEXT],
+    }
+
+
+def _route_request(
+    request: TurnRequest, *, fast_path: bool = False, history: tuple[str, ...] = ()
+) -> RouteRequest:
     return RouteRequest(
         text=request.input.text,
         profile_id=request.profile_id,
         channel=request.caller.channel,
         tenant_id=str(request.caller.tenant_id),
         modality=request.caller.modality,
+        fast_path=fast_path,
+        history=history,
     )

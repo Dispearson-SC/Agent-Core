@@ -3502,3 +3502,32 @@ decision 2026-10-13) and are described by `addon.yaml`.
 - **Replay.** No workflow step changes: the pinned version stays `agent-core-turns.12`, no drain.
   A recovered step re-runs its model call with the profile it loads, as before.
 
+---
+
+## D100 - The fast path: System One decides, code executes, the model only writes (Phase 5, S10)
+
+**Decision.** One deployment switch, `AGENT_CORE_FAST_PATH` = `off | shadow | on` (a Core flag:
+the follow-up handling and the decision rules are Core's, so the switch cannot live in one router
+addon). With `shadow`/`on` the route step asks the router extra questions in the SAME call (the
+Typesafe fan-out pattern: one `noul` per configured intent, action request, depends on the
+conversation, complexity `score`, plus the existing route `choice`) and applies generic rules in
+`domain/fast_path.py`. `shadow` audits the verdict and runs today's path; `on` applies it.
+
+**Why a Core flag and not a router setting.** `off` must be today's behaviour exactly, and today a
+follow-up never reaches the router. Only Core knows whether a session has history, and the fast
+path needs the router to see a follow-up (with a short excerpt of the conversation) to tell a
+standalone question from one that depends on what came before. The thresholds are Core settings
+for the same reason: the router reports raw values, Core decides, and the audit row keeps both.
+
+**Why a composite, not N routes.** "¿Cómo voy hoy y qué tengo que pedir?" asks two owners. One
+composite runs every detected intent's plan (each call through its owner's pipeline, delegated per
+owner as an ask_peer to it would be, D98) and ONE compose on the entry profile, instead of the
+orchestrator reasoning, asking two specialists and writing. A composite that cannot be built in
+full defers to the existing logic: a partial answer would silently drop half the question.
+
+**Replay.** No new pinned version. The decision is part of `_step_route`'s recorded result
+(`RoutedTurn.composite`, read back with `restore_state`), and the composite's own steps run only
+when that recorded result names a composite, so a turn without one keeps its operation log. `off`
+adds nothing to the request a router receives and nothing to the route row (migration 0049 columns
+stay NULL).
+

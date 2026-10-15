@@ -259,6 +259,52 @@ additive).
 declares plans), `intent_unknown` (no plan for that intent) or `audit_unavailable` (a route is
 applied only after its audit row is written).
 
+### The fast path (S10, D100)
+
+"System One decides, code executes, the model only writes", behind ONE switch,
+`AGENT_CORE_FAST_PATH` (read only with `AGENT_CORE_TURN_ROUTING=true`):
+
+| Mode | What happens |
+|---|---|
+| `off` (default) | today's behaviour exactly: the router is asked what it always was |
+| `shadow` | the router also answers the fast path's questions (one call); the verdict, the detected intents and every answer are audited, and the turn runs exactly what `off` runs |
+| `on` | the verdict is applied |
+
+Switching is an env change and a recreate of the Core containers (the HTTP one and the peer
+worker); no drain: the decision lives inside the recorded route step, and the composite's steps run
+only for a turn whose recorded route says composite.
+
+The verdict, in order: an action request (`action >= AGENT_CORE_FAST_PATH_ACTION_THRESHOLD`, 0.5)
+is `pass:action_request`; a message in a conversation that depends on it, or might
+(`follow_up >= AGENT_CORE_FAST_PATH_FOLLOW_UP_THRESHOLD`, 0.3, or no answer), is
+`pass:depends_on_history`; a complex one (`complexity >= AGENT_CORE_FAST_PATH_COMPLEXITY_THRESHOLD`,
+0.6) is `pass:complex`; more detected intents than `AGENT_CORE_FAST_PATH_MAX_INTENTS` (3) is
+`pass:too_many_intents`; one or more intents at or above `AGENT_CORE_FAST_PATH_INTENT_THRESHOLD`
+(0.5) is `composite`; nothing detected is `defer:no_intent`. A router answer without the action or
+complexity value is `defer:unassessed`. A composite needs the entry profile's `routing.intents`
+(else `defer:intent_not_supported`) and, for EVERY detected intent, a declared plan
+(`defer:<intent>:intent_unknown`) whose owner is a listed, startable target
+(`defer:<intent>:target_not_allowed` / `target_not_startable`) that the entry profile may ask (the
+D98 peer gate and the person's `ask_peer` policy: `defer:<intent>:peer_refused:<why>` /
+`ask_peer_not_allowed:<effect>`). With `on`: `pass:*` runs the entry profile's model as the person
+(even when the route choice named a specialist), `composite` runs the composite plan, `defer:*`
+runs the route logic above (a follow-up is still not routed). A history read that fails runs
+today's path whatever the verdict.
+
+The route row says what it did or would have done (migration `0049`, additive; NULL with `off`):
+
+```postgresql
+SELECT turn_id, fast_path_mode, fast_path, fast_path_intents, assessment, decision, label,
+       confidence, profile_id, fallback_reason, elapsed_ms
+FROM audit_turn_routes WHERE fast_path_mode IS NOT NULL ORDER BY id DESC LIMIT 50;
+-- how shadow would have answered
+SELECT fast_path, count(*) FROM audit_turn_routes
+WHERE fast_path_mode = 'shadow' GROUP BY 1 ORDER BY 2 DESC;
+```
+
+`assessment` is every answer with its value, e.g.
+`intents=day_summary:0.93,order_plan:0.81;action=0.02;follow_up=-;complexity=0.10`.
+
 ### Intent plans (D97)
 
 An addon's `provides.intents` plans run when routing is on and the entry profile says

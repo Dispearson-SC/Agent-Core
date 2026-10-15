@@ -19,7 +19,15 @@ THE ADDON SIDE OF THE CONTRACT IS PLAIN DATA
          # diagnostics: logged with the router's name, never part of the decision
          "reason": str, "elapsed_ms": number >= 0, "usage": {str: int}}
 
-    Every key but `decision` is optional. This adapter is the one place that turns that mapping
+    Every key but `decision` is optional. With the fast path shadow or on (S10) the request also
+    holds `"fast_path": true` and `"history": [str, ...]` (the recent conversation, oldest first;
+    empty when there is none), and the answer may hold
+
+         "assessment": {"intents": {<intent>: p in [0, 1]}, "action": p, "follow_up": p | null,
+                        "complexity": score in [0, 1]}
+
+    (`domain/fast_path.py::Assessment`). With the fast path off neither key is sent, so a router
+    sees exactly the request it always saw. This adapter is the one place that turns that mapping
     into a `RouteDecision`, strictly: an unknown key, a wrong type or an impossible value raises,
     and `RouteTurn` falls back to the normal path with the error class recorded.
 
@@ -51,6 +59,7 @@ import threading
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
+from agent_core.domain.fast_path import Assessment
 from agent_core.domain.routing import RouteDecision, RouteKind, RouteRequest
 
 __all__ = [
@@ -69,7 +78,9 @@ awaitable of one)."""
 _DIAGNOSTICS: Final = frozenset({"reason", "elapsed_ms", "usage"})
 _KEYS: Final = _DIAGNOSTICS | {
     "decision", "profile_id", "intent", "arguments", "label", "confidence", "calibrated", "model",
+    "assessment",
 }  # fmt: skip
+_ASSESSMENT_KEYS: Final = frozenset({"intents", "action", "follow_up", "complexity"})
 _MAX_TEXT: Final = 200
 DEFAULT_MAX_SYNC_CALLS: Final = 4
 DEFAULT_SLOT_WAIT_SECONDS: Final = 0.25
@@ -112,13 +123,16 @@ class AddonTurnRouter:
 
     async def route(self, router: str, request: RouteRequest) -> RouteDecision:
         function = self._routers[router]
-        plain = {
+        plain: dict[str, Any] = {
             "text": request.text,
             "profile_id": request.profile_id,
             "channel": request.channel,
             "tenant_id": request.tenant_id,
             "modality": request.modality,
         }
+        if request.fast_path:  # S10: only then, so `off` hands a router what it always got
+            plain["fast_path"] = True
+            plain["history"] = list(request.history)
         if inspect.iscoroutinefunction(function):
             answer = await function(plain)
         else:
@@ -271,6 +285,36 @@ def decision_from_mapping(answer: object) -> RouteDecision:
         model=_optional_text(answer, "model"),
         reason=_optional_text(answer, "reason"),
         usage={str(key): int(value) for key, value in usage.items()},
+        assessment=_assessment(answer.get("assessment")),
+    )
+
+
+def _probability(raw: object, where: str) -> float:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"router answer {where} must be a number")
+    return float(raw)  # the range is `Assessment`'s to check
+
+
+def _assessment(raw: object) -> Assessment | None:
+    """S10. The fast path's answers, strictly; None when the router sent none."""
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("router answer 'assessment' must be a mapping")
+    unknown = set(raw) - _ASSESSMENT_KEYS
+    if unknown:
+        names = sorted(map(str, unknown))
+        raise ValueError(f"router answer 'assessment' has unknown keys: {names}")
+    intents = raw.get("intents") or {}
+    if not isinstance(intents, Mapping) or not all(isinstance(k, str) for k in intents):
+        raise ValueError("router answer 'assessment.intents' must map intent names to numbers")
+    optional = {
+        name: None if raw.get(name) is None else _probability(raw[name], f"assessment.{name}")
+        for name in ("action", "follow_up", "complexity")
+    }
+    return Assessment(
+        tuple((name, _probability(v, f"intent {name!r}")) for name, v in intents.items()),
+        **optional,
     )
 
 

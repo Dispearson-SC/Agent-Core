@@ -158,7 +158,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -275,9 +275,15 @@ from agent_core.application.decide_approval import DecideApproval, PendingCheck,
 from agent_core.application.event_feed import EventFeed
 from agent_core.application.ingest_media import IngestMedia
 from agent_core.application.resume_turn import ResumeTurn
-from agent_core.application.route_turn import DEFAULT_ROUTER_TIMEOUT_MS, HasHistory, RouteTurn
+from agent_core.application.route_turn import (
+    DEFAULT_ROUTER_TIMEOUT_MS,
+    HasHistory,
+    RecentHistory,
+    RouteTurn,
+)
 from agent_core.application.run_intent import RequestPersisted, RunIntent
 from agent_core.application.start_turn import StartTurn
+from agent_core.domain.fast_path import FastPathMode, FastPathThresholds
 from agent_core.domain.intents import IntentPlan
 from agent_core.domain.media import MediaRef
 from agent_core.domain.peers import AgentId
@@ -321,6 +327,8 @@ __all__ = [
     "build_channel_registry",
     "build_container",
     "compose_settings_for",
+    "fast_path_thresholds_for",
+    "recent_history_lines",
     "dbos_config",
     "load_profiles",
     "refuse_unplannable_intents",
@@ -591,6 +599,9 @@ _DBOS_APP_NAME = "agent-core"
 DbosConfig = dict[str, str]
 
 
+# S10. The fast path thresholds a deployment that sets none of them gets.
+_FAST_PATH_DEFAULTS: Final = FastPathThresholds()
+
 @dataclass(frozen=True)
 class Settings:
     """Everything the wiring needs from outside the process.
@@ -738,6 +749,16 @@ class Settings:
     turn_routing_follow_ups: bool = False
     compose_max_tokens: int = DEFAULT_COMPOSE_MAX_TOKENS
     compose_reasoning_effort: str | None = DEFAULT_COMPOSE_REASONING_EFFORT
+    # S10. The fast path switch (`AGENT_CORE_FAST_PATH`: off, shadow or on; default off) and its
+    # thresholds (`AGENT_CORE_FAST_PATH_{INTENT,ACTION,FOLLOW_UP,COMPLEXITY}_THRESHOLD` in [0, 1],
+    # `AGENT_CORE_FAST_PATH_MAX_INTENTS` >= 1). Only read with routing on: off, no extra question is
+    # asked; shadow audits the verdict; on applies it (docs/OPERATIONS.md, "The fast path").
+    fast_path: FastPathMode = FastPathMode.OFF
+    fast_path_intent_threshold: float = _FAST_PATH_DEFAULTS.intent
+    fast_path_action_threshold: float = _FAST_PATH_DEFAULTS.action
+    fast_path_follow_up_threshold: float = _FAST_PATH_DEFAULTS.follow_up
+    fast_path_complexity_threshold: float = _FAST_PATH_DEFAULTS.complexity
+    fast_path_max_intents: int = _FAST_PATH_DEFAULTS.max_intents
 
     @property
     def resolved_audit_conninfo(self) -> str:
@@ -832,6 +853,32 @@ class Settings:
             compose_reasoning_effort=_parse_compose_effort(
                 env.get("AGENT_CORE_COMPOSE_REASONING_EFFORT")
             ),
+            fast_path=_parse_fast_path(env.get("AGENT_CORE_FAST_PATH")),
+            fast_path_intent_threshold=_parse_unit(
+                "AGENT_CORE_FAST_PATH_INTENT_THRESHOLD",
+                env.get("AGENT_CORE_FAST_PATH_INTENT_THRESHOLD"),
+                _FAST_PATH_DEFAULTS.intent,
+            ),
+            fast_path_action_threshold=_parse_unit(
+                "AGENT_CORE_FAST_PATH_ACTION_THRESHOLD",
+                env.get("AGENT_CORE_FAST_PATH_ACTION_THRESHOLD"),
+                _FAST_PATH_DEFAULTS.action,
+            ),
+            fast_path_follow_up_threshold=_parse_unit(
+                "AGENT_CORE_FAST_PATH_FOLLOW_UP_THRESHOLD",
+                env.get("AGENT_CORE_FAST_PATH_FOLLOW_UP_THRESHOLD"),
+                _FAST_PATH_DEFAULTS.follow_up,
+            ),
+            fast_path_complexity_threshold=_parse_unit(
+                "AGENT_CORE_FAST_PATH_COMPLEXITY_THRESHOLD",
+                env.get("AGENT_CORE_FAST_PATH_COMPLEXITY_THRESHOLD"),
+                _FAST_PATH_DEFAULTS.complexity,
+            ),
+            fast_path_max_intents=_parse_positive(
+                "AGENT_CORE_FAST_PATH_MAX_INTENTS",
+                env.get("AGENT_CORE_FAST_PATH_MAX_INTENTS"),
+                _FAST_PATH_DEFAULTS.max_intents,
+            ),
         )
 
 
@@ -906,6 +953,55 @@ def _parse_compose_effort(raw: str | None) -> str | None:
             f"empty, got {raw!r}"
         )
     return value
+
+
+def _parse_fast_path(raw: str | None) -> FastPathMode:
+    """`AGENT_CORE_FAST_PATH`: unset is off; anything but off/shadow/on stops startup."""
+    if raw is None or not raw.strip():
+        return FastPathMode.OFF
+    try:
+        return FastPathMode(raw.strip().lower())
+    except ValueError:
+        raise ValueError(
+            f"AGENT_CORE_FAST_PATH must be off, shadow or on, got {raw!r}"
+        ) from None
+
+
+def _parse_unit(name: str, raw: str | None, default: float) -> float:
+    """A threshold in [0, 1]; unset means the default."""
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} must be a number between 0 and 1, got {raw!r}")
+    return value
+
+
+def _parse_positive(name: str, raw: str | None, default: int) -> int:
+    """A whole number of at least 1; unset means the default."""
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise ValueError(f"{name} must be a whole number of at least 1, got {raw!r}")
+    return value
+
+
+def fast_path_thresholds_for(settings: Settings) -> FastPathThresholds:
+    """The route step's fast path thresholds from the resolved settings (S10)."""
+    return FastPathThresholds(
+        intent=settings.fast_path_intent_threshold,
+        action=settings.fast_path_action_threshold,
+        follow_up=settings.fast_path_follow_up_threshold,
+        complexity=settings.fast_path_complexity_threshold,
+        max_intents=settings.fast_path_max_intents,
+    )
 
 
 def compose_settings_for(settings: Settings) -> ComposeSettings:
@@ -1820,6 +1916,74 @@ def _session_has_history_sync(conninfo: str, session: SessionRef, turn_id: TurnI
     return row is not None
 
 
+# S10. The session's latest messages, newest first, only when the session is the tenant's and holds
+# another turn (`messages` carries no tenant; `turns` does).
+_RECENT_MESSAGES_SQL = """
+    SELECT m.content FROM messages m
+    WHERE m.session_id = %s
+      AND EXISTS (
+          SELECT 1 FROM turns t
+          WHERE t.session_id = m.session_id AND t.tenant_id = %s AND t.turn_id::text <> %s
+      )
+    ORDER BY m.seq DESC
+    LIMIT 24
+"""
+RECENT_HISTORY_LINES = 4
+RECENT_HISTORY_CHARS = 300
+
+
+def recent_history_lines(
+    rows: Sequence[object],
+    *,
+    limit: int = RECENT_HISTORY_LINES,
+    max_chars: int = RECENT_HISTORY_CHARS,
+) -> tuple[str, ...]:
+    """The last `limit` texts of a conversation, oldest first, as `person: ...` / `agent: ...`
+    lines of at most `max_chars` characters. `rows` are stored messages, newest first; tool calls
+    and their returns are skipped (they are data, not the conversation)."""
+    lines: list[str] = []
+    for row in rows:
+        if len(lines) >= limit:
+            break
+        if not isinstance(row, Mapping) or not isinstance(row.get("parts"), list):
+            continue
+        speaker = "person" if row.get("kind") == "request" else "agent"
+        wanted = "user-prompt" if speaker == "person" else "text"
+        texts = [
+            part["content"]
+            for part in row["parts"]
+            if isinstance(part, Mapping)
+            and part.get("part_kind") == wanted
+            and isinstance(part.get("content"), str)
+        ]
+        text = " ".join(" ".join(texts).split())
+        if not text:
+            continue
+        line = f"{speaker}: {text}"
+        if len(line) > max_chars:
+            line = line[: max_chars - 3] + "..."
+        lines.append(line)
+    return tuple(reversed(lines))
+
+
+def _recent_history_sync(conninfo: str, session: SessionRef, turn_id: TurnId) -> tuple[str, ...]:
+    with psycopg.connect(conninfo) as conn:
+        rows = conn.execute(
+            _RECENT_MESSAGES_SQL,
+            (str(session.session_id), str(session.tenant_id), str(turn_id)),
+        ).fetchall()
+    return recent_history_lines([row[0] for row in rows])
+
+
+def _pg_recent_history(conninfo: str) -> RecentHistory:
+    """Bind `RouteTurn`'s `recent_history` seat to the app database (S10)."""
+
+    async def recent(session: SessionRef, turn_id: TurnId) -> tuple[str, ...]:
+        return await asyncio.to_thread(_recent_history_sync, conninfo, session, turn_id)
+
+    return recent
+
+
 def _pg_session_has_history(conninfo: str) -> HasHistory:
     """Bind `RouteTurn`'s `has_history` seat to the app database's `turns` table (L18)."""
 
@@ -2464,6 +2628,14 @@ def build_container(
                 None
                 if resolved.turn_routing_follow_ups
                 else _pg_session_has_history(resolved.app_conninfo)
+            ),
+            # S10. The fast path switch; off asks the router what it always asked.
+            fast_path=resolved.fast_path,
+            thresholds=fast_path_thresholds_for(resolved),
+            recent_history=(
+                None
+                if resolved.fast_path is FastPathMode.OFF
+                else _pg_recent_history(resolved.app_conninfo)
             ),
         )
         if resolved.turn_routing

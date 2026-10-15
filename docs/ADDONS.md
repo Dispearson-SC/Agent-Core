@@ -255,6 +255,27 @@ INFO with the router's name, label, confidence and model (never the person's tex
 change the decision. A sync `route` runs on a capped daemon thread in a copy of the caller's
 context; a call over the cap waits up to 0.25 s for a slot, then runs the turn as asked.
 
+### The fast path's extra questions (S10, D100)
+
+With `AGENT_CORE_FAST_PATH` set to `shadow` or `on` (docs/OPERATIONS.md, "The fast path"), the
+request a router reads also holds `"fast_path": true` and `"history"`: the session's recent
+conversation as short `person: ...` / `agent: ...` lines, oldest first (empty for a first message;
+a follow-up IS sent to the router then). A router that supports it answers, beside its decision:
+
+```python
+{"decision": "route", "profile_id": "billing", ...,
+ "assessment": {"intents": {"refund": 0.91, "opening_hours": 0.04},  # P(the message asks it)
+                "action": 0.02,        # P(it asks to DO something rather than to be told)
+                "follow_up": 0.10,     # P(it depends on the conversation); null without history
+                "complexity": 0.15}}   # the router's complexity score, normalised to [0, 1]
+```
+
+Every value must be a number in [0, 1] (`follow_up` may be null) and the intent names at most 64
+characters; anything else is a malformed answer (the turn runs as asked). Core decides with them
+(the rules are in docs/OPERATIONS.md); a router that ignores the flag and sends no `assessment` is
+simply never on the fast path. With the fast path off neither key is in the request, so a router
+sees exactly what it always saw.
+
 ### Intent plans (`provides.intents`, layer B, D97)
 
 An intent plan answers a typed intent with code instead of the model's tool loop: a fixed list of

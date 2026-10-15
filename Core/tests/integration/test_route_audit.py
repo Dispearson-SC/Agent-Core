@@ -92,6 +92,46 @@ def test_a_consultation_is_one_audit_row_with_its_evidence() -> None:
     ]
 
 
+def test_a_fast_path_consultation_records_its_mode_verdict_intents_and_every_answer() -> None:
+    """S10 (migration 0049): the fast path's columns, NULL on a row written with it off."""
+
+    async def scenario() -> None:
+        await w.fresh_databases(_DATABASE)
+        audit = PgRouteAudit(_connect)
+        await audit.record_route(
+            TurnId("turn-1"),
+            "t",
+            RouteRecord(
+                router="jev", requested_profile="front", profile_id="front",
+                decision=RouteKind.ROUTE, elapsed_ms=90, fast_path_mode="shadow",
+                fast_path="composite", fast_path_intents="day_summary,order_plan",
+                assessment="intents=day_summary:0.93,order_plan:0.81;action=0.02;"
+                "follow_up=-;complexity=0.10",
+            ),
+        )
+        await audit.record_route(
+            TurnId("turn-2"),
+            "t",
+            RouteRecord(
+                router="jev", requested_profile="front", profile_id="front",
+                decision=RouteKind.PASS, elapsed_ms=80,
+            ),
+        )
+
+    asyncio.run(scenario())
+
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT turn_id, fast_path_mode, fast_path, fast_path_intents, assessment "
+            "FROM audit_turn_routes ORDER BY id"
+        ).fetchall()
+    assert rows == [
+        ("turn-1", "shadow", "composite", "day_summary,order_plan",
+         "intents=day_summary:0.93,order_plan:0.81;action=0.02;follow_up=-;complexity=0.10"),
+        ("turn-2", None, None, None, None),
+    ]
+
+
 def test_an_intent_plan_is_one_audit_row_with_its_outcome() -> None:
     """D97: `audit_turn_intents` (migration 0047) holds whether the plan answered, its tool count,
     reply mode and fallback reason; never an argument or a result."""
