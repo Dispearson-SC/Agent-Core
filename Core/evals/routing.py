@@ -73,7 +73,7 @@ from typing import Any, Final, Protocol
 
 import yaml
 
-from agent_core.domain.fast_path import FastPathThresholds, decide_fast_path
+from agent_core.domain.fast_path import Assessment, FastPathThresholds, decide_fast_path
 from agent_core.domain.routing import RouteDecision, RouteKind, RouteRequest
 from agent_core.ports.turn_router import TurnRouter
 
@@ -368,6 +368,8 @@ class Verdict:
     expected_intents: tuple[str, ...] = ()
     intents: tuple[str, ...] | None = None
     fast_path: str | None = None
+    # S10. Every raw answer of the assessment (None: none), so thresholds tune from one run.
+    assessment: Assessment | None = None
 
     @property
     def correct(self) -> bool:
@@ -520,6 +522,7 @@ async def _verdict(
     got, outcome, router_ms = PASS, "off", None
     detected: tuple[str, ...] | None = None
     verdict: str | None = None
+    assessment: Assessment | None = None
     if router is not None:
         request = RouteRequest(
             text=question.text,
@@ -539,7 +542,8 @@ async def _verdict(
             got = route_of(decision)
             outcome = "abstained" if got == PASS else "answered"
             if fast_path is not None and decision.assessment is not None:
-                decided = decide_fast_path(decision.assessment, fast_path, has_history=False)
+                assessment = decision.assessment
+                decided = decide_fast_path(assessment, fast_path, has_history=False)
                 detected, verdict = decided.intents, decided.code
         router_ms = (clock() - started) * 1000
     turn_ms, turn_error, plan = None, None, None
@@ -562,6 +566,7 @@ async def _verdict(
         question.expected_intents,
         detected,
         verdict,
+        assessment,
     )
 
 
@@ -642,9 +647,21 @@ def _run_json(run: RoutingRun) -> dict[str, Any]:
                 "expected_intents": list(v.expected_intents),
                 "intents": None if v.intents is None else list(v.intents),
                 "fast_path": v.fast_path,
+                "assessment": _assessment_json(v.assessment),
             }
             for v in run.verdicts
         ],
+    }
+
+
+def _assessment_json(assessment: Assessment | None) -> dict[str, Any] | None:
+    if assessment is None:
+        return None
+    return {
+        "intents": dict(assessment.intents),
+        "action": assessment.action,
+        "follow_up": assessment.follow_up,
+        "complexity": assessment.complexity,
     }
 
 

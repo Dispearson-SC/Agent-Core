@@ -595,6 +595,10 @@ def test_the_report_carries_the_intent_set_metrics(tmp_path: Path) -> None:
     assert report["router"]["intent_set_accuracy"] == pytest.approx(0.5)
     assert report["router"]["fast_path_verdicts"] == {"composite": 3, "defer:no_intent": 1}
     assert report["router"]["verdicts"][0]["intents"] == ["a", "b"]
+    assert report["router"]["verdicts"][0]["assessment"] == {
+        "intents": {"a": 0.9, "b": 0.8, "c": 0.1}, "action": 0.01, "follow_up": None,
+        "complexity": 0.1,
+    }, "every raw value, so thresholds can be tuned from one run"  # fmt: skip
     markdown = markdown_path.read_text(encoding="utf-8")
     assert "| intent set exact match | - | 50% |" in markdown
     assert "| intent precision / recall | - | 80% / 80% |" in markdown
