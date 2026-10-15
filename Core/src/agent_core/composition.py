@@ -283,6 +283,7 @@ from agent_core.application.route_turn import (
 )
 from agent_core.application.run_intent import RequestPersisted, RunIntent
 from agent_core.application.start_turn import StartTurn
+from agent_core.domain.answer_cache import MAX_TTL_SECONDS
 from agent_core.domain.fast_path import FastPathMode, FastPathThresholds
 from agent_core.domain.intents import IntentPlan
 from agent_core.domain.media import MediaRef
@@ -763,6 +764,11 @@ class Settings:
     # S10. The profile that writes a composite's one reply (`AGENT_CORE_FAST_PATH_COMPOSER`); unset
     # or empty is the turn's entry profile. Startup stops when it names no loaded profile.
     fast_path_composer: str | None = None
+    # S10 (roadmap 5.8). Remember a composite's reply for this many seconds
+    # (`AGENT_CORE_FAST_PATH_CACHE_SECONDS`, 0-86400, default 0 = off), in the answer cache table
+    # (`peer_answer_cache`, D57), keyed by tenant, intents, case, person, `X-Data-Version`, the
+    # normalised question and the composer's hash.
+    fast_path_cache_seconds: int = 0
 
     @property
     def resolved_audit_conninfo(self) -> str:
@@ -879,6 +885,9 @@ class Settings:
                 _FAST_PATH_DEFAULTS.complexity,
             ),
             fast_path_composer=(env.get("AGENT_CORE_FAST_PATH_COMPOSER") or "").strip() or None,
+            fast_path_cache_seconds=_parse_cache_seconds(
+                env.get("AGENT_CORE_FAST_PATH_CACHE_SECONDS")
+            ),
             fast_path_max_intents=_parse_positive(
                 "AGENT_CORE_FAST_PATH_MAX_INTENTS",
                 env.get("AGENT_CORE_FAST_PATH_MAX_INTENTS"),
@@ -995,6 +1004,22 @@ def _parse_positive(name: str, raw: str | None, default: int) -> int:
         value = 0
     if value < 1:
         raise ValueError(f"{name} must be a whole number of at least 1, got {raw!r}")
+    return value
+
+
+def _parse_cache_seconds(raw: str | None) -> int:
+    """`AGENT_CORE_FAST_PATH_CACHE_SECONDS`: 0 (off, the default) to a day."""
+    if raw is None or not raw.strip():
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if not 0 <= value <= MAX_TTL_SECONDS:
+        raise ValueError(
+            f"AGENT_CORE_FAST_PATH_CACHE_SECONDS must be a whole number of seconds from 0 to "
+            f"{MAX_TTL_SECONDS}, got {raw!r}"
+        )
     return value
 
 
@@ -2671,6 +2696,13 @@ def build_container(
             request_persisted=_pg_request_persisted(resolved.app_conninfo),
             # S10. The profile that writes a composite's reply (None: the entry profile).
             composer=resolved.fast_path_composer,
+            # S10 (5.8). The composite answer cache, on the domain pool like the peer cache.
+            cache=(
+                PgAnswerCache(PoolConnections(domain_pool))
+                if resolved.fast_path_cache_seconds > 0
+                else None
+            ),
+            cache_ttl_seconds=resolved.fast_path_cache_seconds,
         )
     )
     container = Container(

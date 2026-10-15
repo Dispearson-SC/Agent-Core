@@ -262,6 +262,24 @@ def coalescing_turn_starter(
     return start
 
 
+# S10. The longest `X-Data-Version` a caller may send (an as_of date, a load id).
+MAX_DATA_VERSION_CHARS = 128
+
+
+def _data_version(raw: str | None) -> str | None:
+    """`X-Data-Version` trimmed; None when absent or blank; 422 when too long or with control
+    characters (it becomes part of a cache key)."""
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip()
+    if len(value) > MAX_DATA_VERSION_CHARS or not value.isprintable():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"X-Data-Version must be at most {MAX_DATA_VERSION_CHARS} printable characters",
+        )
+    return value
+
+
 class StartTurnBody(BaseModel):
     """What the caller may say about the turn - deliberately not much.
 
@@ -481,6 +499,7 @@ def create_app(
         x_channel: Annotated[str | None, Header()] = None,
         x_roles: Annotated[str | None, Header()] = None,
         x_modality: Annotated[str | None, Header()] = None,
+        x_data_version: Annotated[str | None, Header()] = None,
     ) -> dict[str, str]:
         """202 and a turn_id. Never a result, never a wait.
 
@@ -511,6 +530,8 @@ def create_app(
             caller=caller,
             profile_id=body.profile_id,
             input=UserInput(text=body.text),
+            # S10. Part of the fast path's answer cache key, nothing else (never policy).
+            data_version=_data_version(x_data_version),
         )
 
         # The whole route in one line: start it, then let go. Awaiting anything of the

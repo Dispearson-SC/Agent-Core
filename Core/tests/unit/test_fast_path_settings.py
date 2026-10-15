@@ -109,3 +109,17 @@ def test_a_composer_that_is_not_a_loaded_profile_stops_startup() -> None:
     refuse_unknown_composer(profiles, None)
     with pytest.raises(ValueError, match="AGENT_CORE_FAST_PATH_COMPOSER.*ghost"):
         refuse_unknown_composer(profiles, "ghost")
+
+
+# --- the answer cache ----------------------------------------------------------------------------
+
+
+def test_the_composite_answer_cache_is_off_unless_a_ttl_is_set() -> None:
+    assert _settings().fast_path_cache_seconds == 0
+    assert _settings(AGENT_CORE_FAST_PATH_CACHE_SECONDS="300").fast_path_cache_seconds == 300
+
+
+@pytest.mark.parametrize("raw", ["-1", "86401", "soon"])
+def test_a_bad_cache_ttl_stops_startup(raw: str) -> None:
+    with pytest.raises(ValueError, match="AGENT_CORE_FAST_PATH_CACHE_SECONDS"):
+        _settings(AGENT_CORE_FAST_PATH_CACHE_SECONDS=raw)

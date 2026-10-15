@@ -391,6 +391,16 @@ class TurnRequest:
     # turn a person or a channel started. Set where the claimed row is in hand
     # (`peer_turn_request`), never by a model.
     owner: PeerOwner | None = None
+    # S10. The version of the data the caller's question is about (an `as_of` date, a load id),
+    # as the caller's channel says it (`X-Data-Version` on `POST /turns`). Read only by the fast
+    # path's answer cache, as part of its key: a newer version never reads an older reply. Not an
+    # input to policy. None when the caller says nothing.
+    data_version: str | None = None
+
+    def __setstate__(self, state: list[object]) -> None:
+        """Restore a pickled request, filling the fields an OLDER build did not have: every
+        in-flight turn holds its request pickled in the operation log."""
+        restore_state(self, state)
 
 
 @dataclass(frozen=True, slots=True)

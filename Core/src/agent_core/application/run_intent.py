@@ -50,6 +50,14 @@ A COMPOSITE (S10, `domain/fast_path.py`)
     from all the results grouped by intent, then persists the PERSON's turn exactly as `reply` does
     and audits every member (`reply_mode` `composite`). Any failure falls back: the turn runs the
     entry profile's normal path, from scratch.
+
+    THE ANSWER CACHE (roadmap 5.8, off unless `cache` and `cache_ttl_seconds` are given): a
+    composite's reply is remembered under `domain/fast_path_cache.py::composite_cache_key` (the
+    tenant, the intents, the case and person, the caller's data version, the normalised question,
+    the composer's content hash) for the TTL. A hit answers with no call and no compose: the
+    remembered text is the reply (`reply_mode` `cache`, `planned` = `cache`). Only a composed
+    composite reply is ever stored. A cache that raises is a miss, or a reply not stored: never a
+    failed turn.
 """
 
 from __future__ import annotations
@@ -61,12 +69,14 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 
+from agent_core.domain.answer_cache import MAX_CACHED_CHARS, MAX_TTL_SECONDS, CachedAnswer
 from agent_core.domain.fast_path import (
     MAX_COMPOSITE_CALLS,
     CompositeCall,
     CompositeMember,
     CompositeRun,
 )
+from agent_core.domain.fast_path_cache import composite_cache_key
 from agent_core.domain.intents import (
     PLAN_ARGUMENT_INVALID,
     PLAN_OVER_BUDGET,
@@ -84,6 +94,7 @@ from agent_core.domain.intents import (
 from agent_core.domain.profile import AgentProfile
 from agent_core.domain.routing import error_reason
 from agent_core.domain.turn import TurnId, TurnOutcome, TurnRequest, delegated_identity
+from agent_core.ports.answer_cache import AnswerCache
 from agent_core.ports.audit_sink import AuditSink
 from agent_core.ports.context_engine import ContextEngine
 from agent_core.ports.conversation_store import ConversationStore
@@ -152,11 +163,15 @@ class RunIntent:
         request_persisted: RequestPersisted | None = None,
         composer: str | None = None,
         max_composite_calls: int = MAX_COMPOSITE_CALLS,
+        cache: AnswerCache | None = None,
+        cache_ttl_seconds: int = 0,
     ) -> None:
         if tool_timeout_ms < 1:
             raise ValueError(f"the plan tool timeout must be at least 1 ms, got {tool_timeout_ms}")
         if max_composite_calls < 1:
             raise ValueError("a composite must be allowed at least one call")
+        if not 0 <= cache_ttl_seconds <= MAX_TTL_SECONDS:
+            raise ValueError(f"the composite cache TTL must be 0-{MAX_TTL_SECONDS} s")
         self._runner = runner
         self._store = store
         self._audit = audit
@@ -170,6 +185,9 @@ class RunIntent:
         # S10. The profile that writes a composite's reply (None: the turn's entry profile).
         self._composer = composer
         self._max_composite_calls = max_composite_calls
+        # S10 (5.8). None, or a TTL of 0, remembers nothing.
+        self._cache = cache if cache_ttl_seconds > 0 else None
+        self._cache_ttl = cache_ttl_seconds
 
     async def prepare(
         self, turn_id: TurnId, request: TurnRequest, call: IntentCall
@@ -287,7 +305,10 @@ class RunIntent:
         self, turn_id: TurnId, request: TurnRequest, composite: CompositeCall
     ) -> CompositeRun:
         """Every member's calls, concurrently and deduplicated; the results grouped by intent, or
-        the reason the composite cannot answer."""
+        the reason the composite cannot answer. A remembered reply answers with no call."""
+        cached = await self._cached(request, composite)
+        if cached is not None:
+            return CompositeRun(cached=cached)
         context = {
             "today": self._today().isoformat(),
             "channel": request.caller.channel,
@@ -347,10 +368,15 @@ class RunIntent:
     ) -> TurnOutcome | None:
         """ONE reply from every group, then the person's turn persisted; None when it could not be
         written (nothing persisted: the caller falls back)."""
-        mode = "composite"
+        mode = "composite" if run.cached is None else "cache"
         try:
             composer = self._profiles[self._composer or request.profile_id]
-            outcome = await self._runner.compose_composite(turn_id, request, composer, run.groups)
+            if run.cached is not None:
+                outcome = self._runner.template_reply(turn_id, run.cached)
+            else:
+                outcome = await self._runner.compose_composite(
+                    turn_id, request, composer, run.groups
+                )
         except Exception:
             _LOG.warning(
                 "the composite reply of turn %s failed; the turn falls back",
@@ -360,6 +386,8 @@ class RunIntent:
             return None
         if not await self._persist(turn_id, request, outcome):
             return None
+        if run.cached is None and outcome.result is not None:
+            await self._remember(request, composite, composer, outcome.result.text)
         counts = {intent: len(results) for intent, results in run.groups}
         for member in composite.members:
             await self._record(
@@ -375,6 +403,32 @@ class RunIntent:
                 ),
             )
         return outcome
+
+    async def _cached(self, request: TurnRequest, composite: CompositeCall) -> str | None:
+        """The remembered reply, or None (no cache, a miss, or a cache that failed)."""
+        if self._cache is None:
+            return None
+        try:
+            composer = self._profiles[self._composer or request.profile_id]
+            hit = await self._cache.get(composite_cache_key(request, composite, composer))
+        except Exception:
+            _LOG.warning("the composite answer cache could not be read; a miss", exc_info=True)
+            return None
+        return None if hit is None or not hit.wrapped.strip() else hit.wrapped
+
+    async def _remember(
+        self, request: TurnRequest, composite: CompositeCall, composer: AgentProfile, text: str
+    ) -> None:
+        if self._cache is None or not text.strip() or len(text) > MAX_CACHED_CHARS:
+            return
+        try:
+            await self._cache.put(
+                composite_cache_key(request, composite, composer),
+                CachedAnswer(text),
+                self._cache_ttl,
+            )
+        except Exception:
+            _LOG.warning("the composite reply could not be remembered", exc_info=True)
 
     async def fall_back_composite(
         self,

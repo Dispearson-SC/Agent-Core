@@ -306,6 +306,19 @@ and `planned` = `composite`. Any failure (a plan that cannot run, a failed call,
 compose) records `planned` = `fallback:<reason>` and runs the entry profile's normal path from
 scratch, as the person.
 
+**The composite answer cache (roadmap 5.8)** is off unless `AGENT_CORE_FAST_PATH_CACHE_SECONDS`
+is set (1-86400). A composed composite reply is then remembered in the answer cache table
+(`peer_answer_cache`, D57; the database clock decides expiry, shared by every process) under a
+digest of: the tenant, the sorted intents, the session (the case) and the person, the normalised
+question, and a version made of the caller's `X-Data-Version` and the composer profile's content
+hash. The same question about the same case and data version within the TTL is answered from the
+cache with no call and no compose (`audit_turn_intents.reply_mode = 'cache'`, `planned` = `cache`).
+Only composite replies are stored; a cache that is down is a miss. Invalidation: the TTL, a new
+`X-Data-Version` (a vertical should send its `as_of`/data load id on `POST /turns`; trimmed, at
+most 128 printable characters, else 422), a changed composer profile, or
+`python -m agent_core peer-cache purge --tenant <t>` (the same table; `--target fast_path:<intents>` for one intent set). Without
+`X-Data-Version` only the TTL bounds a stale reply, so keep it short.
+
 The route row says what it did or would have done (migration `0049`, additive; NULL with `off`):
 
 ```postgresql

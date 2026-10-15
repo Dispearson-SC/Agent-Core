@@ -239,11 +239,10 @@ class CompositeRun:
 
     `groups` holds each intent's results in its plan's order, the intents in order; `cached` a
     remembered reply (S10 answer cache: no call ran); `fallback` why the composite cannot answer;
-    `tool_count` how many distinct calls ran; `cache_key` the digest the reply may be stored
-    under (None: not cacheable)."""
+    `tool_count` how many distinct calls ran."""
 
     groups: tuple[tuple[str, tuple[PlanToolResult, ...]], ...] = ()
     cached: str | None = None
     fallback: str | None = None
     tool_count: int = 0
-    cache_key: str | None = None
+

@@ -318,3 +318,85 @@ def test_a_fallback_audits_every_member_as_not_used() -> None:
         IntentRecord("day_summary", SALES, False, 1, "composite", PLAN_TOOL_ERROR, *who),
         IntentRecord("order_plan", STOCK, False, 1, "composite", PLAN_TOOL_ERROR, *who),
     ]
+
+
+# --- the answer cache (S10, 5.8) ---------------------------------------------------------------
+
+from dataclasses import replace as _replace  # noqa: E402
+
+from agent_core.domain.answer_cache import AnswerCacheKey, CachedAnswer  # noqa: E402
+from agent_core.domain.fast_path_cache import composite_cache_key  # noqa: E402
+
+
+class Cache:
+    """An `AnswerCache`: a dict, with the TTL each entry was stored for."""
+
+    def __init__(self, *, broken: bool = False) -> None:
+        self.entries: dict[str, tuple[CachedAnswer, int]] = {}
+        self.broken = broken
+
+    async def get(self, key: AnswerCacheKey) -> CachedAnswer | None:
+        if self.broken:
+            raise RuntimeError("cache down")
+        entry = self.entries.get(key.digest())
+        return None if entry is None else entry[0]
+
+    async def put(self, key: AnswerCacheKey, answer: CachedAnswer, ttl_seconds: int) -> None:
+        if self.broken:
+            raise RuntimeError("cache down")
+        self.entries[key.digest()] = (answer, ttl_seconds)
+
+    async def invalidate(self, tenant_id: str, target: str | None = None) -> int:
+        return 0
+
+
+def _cached_world(cache: Cache, runner: Runner | None = None) -> World:
+    return World(runner or Runner(), cache=cache, cache_ttl_seconds=300)
+
+
+def test_a_composite_reply_is_remembered_and_a_second_ask_answers_without_any_call() -> None:
+    cache = Cache()
+    first = _cached_world(cache)
+    _reply(first, first.run())
+    assert len(cache.entries) == 1 and next(iter(cache.entries.values()))[1] == 300
+
+    runner = Runner()
+    second = _cached_world(cache, runner)
+    run = second.run()
+
+    assert run.cached == "Both answers." and runner.calls == [] and run.groups == ()
+    outcome = _reply(second, run)
+    assert outcome.result.text == "Both answers." and runner.composed == []
+    assert [o.result.text for _, o in second.store.outcomes] == ["Both answers."]
+    assert {r.reply_mode for r in second.routes.intents} == {"cache"}
+
+
+def test_the_cache_key_is_tenant_case_data_version_intents_and_the_normalised_question() -> None:
+    profile = AgentProfile(id=FRONT, persona="f", model="m")
+    base = composite_cache_key(_request(), BOTH, profile)
+    shouted = _request("  How am I doing and what do I ORDER  ")
+    assert base == composite_cache_key(shouted, BOTH, profile)
+    other_case = _replace(_request(), session=SessionRef(SessionId("case-2"), TenantId("t")))
+    newer_data = _replace(_request(), data_version="2026-10-16")
+    one_intent = CompositeCall((CompositeMember("order_plan", STOCK, 1),))
+    for different in (
+        composite_cache_key(other_case, BOTH, profile),
+        composite_cache_key(newer_data, BOTH, profile),
+        composite_cache_key(_request("and tomorrow?"), BOTH, profile),
+        composite_cache_key(_request(), one_intent, profile),
+        composite_cache_key(_request(), BOTH, _replace(profile, persona="changed")),
+    ):
+        assert different.digest() != base.digest()
+    assert base.tenant_id == "t" and base.target == "fast_path:day_summary,order_plan"
+
+
+def test_a_cache_that_is_down_is_a_miss_and_never_fails_the_turn() -> None:
+    world = _cached_world(Cache(broken=True))
+    run = world.run()
+    assert run.cached is None and run.fallback is None
+    assert _reply(world, run) is not None
+
+
+def test_without_a_cache_nothing_is_remembered() -> None:
+    world = World(Runner())
+    assert world.run().cached is None
