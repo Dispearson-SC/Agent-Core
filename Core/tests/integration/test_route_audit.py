@@ -253,3 +253,123 @@ def test_a_route_recorded_before_a_crash_is_replayed_and_never_asked_again(
         ).fetchall()
     assert events[0] == ("routed", w.B, "routed")
     assert [e[0] for e in events].count("routed") == 1
+
+
+class CompositeRunner:
+    """An `IntentRunner` for a composite: counts calls; its compose hangs until released."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.composes = 0
+        self.hang = True
+
+    async def call_tool(self, turn_id: Any, request: Any, profile: Any, call: Any) -> Any:
+        from agent_core.domain.intents import PlanToolResult
+
+        self.calls.append(call.tool)
+        return PlanToolResult(call.step_id, call.tool, content=f"{call.tool}=1")
+
+    async def compose_composite(
+        self, turn_id: Any, request: Any, profile: Any, groups: Any
+    ) -> Any:
+        from agent_core.domain.turn import TurnOutcome, TurnResult
+
+        self.composes += 1
+        while self.hang:
+            await asyncio.sleep(0.05)
+        return TurnOutcome(turn_id=turn_id, messages=(), result=TurnResult(text="both"))
+
+    def template_reply(self, turn_id: Any, text: str) -> Any:  # pragma: no cover - unused
+        raise AssertionError("no template here")
+
+
+def test_a_composite_recorded_before_a_crash_replays_its_calls_and_never_reruns_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S10 on a REAL DBOS: the route step's composite and the step that ran every call are read back
+    from the operation log after a process death; only the reply runs again."""
+    from agent_core.application.run_intent import RunIntent
+    from agent_core.domain.fast_path import Assessment, FastPathMode
+    from agent_core.domain.intents import IntentPlan, PlanStep
+    from tests.fakes.ports import FakeAuditSink, FakeConversationStore
+
+    w.bind(monkeypatch, _DATABASE)
+    plans = {
+        "first": IntentPlan("first", w.B, (PlanStep("a", "read_a"),)),
+        "second": IntentPlan("second", w.B, (PlanStep("b", "read_b"),)),
+    }
+    router = CountingRouter(
+        RouteDecision(
+            kind=RouteKind.PASS,
+            assessment=Assessment.of({"first": 0.9, "second": 0.8}, action=0.0, complexity=0.0),
+        )
+    )
+    profiles = w.profiles()
+    profiles[w.A] = dataclasses.replace(
+        profiles[w.A], routing=RoutingPolicy(router="jev", targets=(w.B,), intents=True)
+    )
+    runner = CompositeRunner()
+
+    class Context:
+        def update_from_response(self, session: Any, usage: Any) -> None:
+            return None
+
+    deps = turn_workflow._dependencies  # noqa: SLF001
+    assert deps is not None
+    monkeypatch.setattr(
+        turn_workflow,
+        "_dependencies",
+        dataclasses.replace(
+            deps,
+            events=PgEventPublisher(w.conninfo(_DATABASE)),
+            route_turn=RouteTurn(
+                routers=router,
+                audit=PgRouteAudit(_connect),
+                profiles=profiles,
+                plans=plans,
+                peer_gate=FlippingGate(),
+                policy=allowing_policy(),
+                fast_path=FastPathMode.ON,
+            ),
+            run_intent=RunIntent(
+                runner=runner,  # type: ignore[arg-type]
+                store=FakeConversationStore(),
+                audit=FakeAuditSink(),
+                routes=PgRouteAudit(_connect),
+                context=Context(),  # type: ignore[arg-type]
+                profiles=profiles,
+                plans=plans,
+            ),
+        ),
+    )
+    turn = str(w.ASKING_TURN)
+    seen: dict[str, Any] = {}
+
+    async def first_process() -> None:
+        async with w.Dbos(_DATABASE):
+            await turn_workflow.enqueue_turn(w.request(), turn_id=w.ASKING_TURN)
+            await w.until_step_recorded(turn, "_step_composite_run")
+            await w.until(lambda: runner.composes == 1, "the composite reply to start")
+
+    async def second_process() -> None:
+        runner.hang = False
+        async with w.Dbos(_DATABASE, drop=False):
+            seen["outcome"] = await w.result_of(turn)
+
+    with w.dying_process(monkeypatch):
+        asyncio.run(first_process())
+    asyncio.run(second_process())
+
+    assert router.calls == 1, "the composite is read back from the log, never re-classified"
+    assert sorted(runner.calls) == ["read_a", "read_b"], "every call ran once, before the crash"
+    assert runner.composes == 2, "only the reply, which had not finished, runs again"
+    assert seen["outcome"].result is not None and seen["outcome"].result.text == "both"
+    with _connect() as conn:
+        route = conn.execute(
+            "SELECT fast_path_mode, fast_path, fast_path_intents FROM audit_turn_routes"
+        ).fetchall()
+        intents = conn.execute(
+            "SELECT intent, plan_used, reply_mode FROM audit_turn_intents ORDER BY intent"
+        ).fetchall()
+    assert route == [("on", "composite", "first,second")]
+    assert intents == [("first", True, "composite"), ("second", True, "composite")]
