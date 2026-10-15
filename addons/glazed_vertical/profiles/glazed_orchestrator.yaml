@@ -208,7 +208,11 @@ peers:
       capabilities:
         - glazed.liaison
   max_hops: 1
-  visibility: summary
+  # Phase 5 (L24): `summary` made a model call before every ask (6-9 s between the ask and the
+  # specialist's start, cut at its 500-token bound); `full` hands the newest messages verbatim within
+  # the same cap, with no model call.
+  visibility: full
+  max_context_chars: 4000
   reply_timeout_seconds: 600
   # Phase 5 (P5): every ask of one step runs to its end and the turn resumes once with all answers (C10,
   # Core's default, stated so the deployment says it). S9: the persona asks every independent specialist

@@ -51,6 +51,29 @@ def test_no_other_glazed_profile_routes() -> None:
         assert glazed.profile(role).routing is None, role
 
 
+@pytest.mark.parametrize("role", glazed.ROLES)
+def test_every_glazed_role_thinks_with_low_reasoning_effort(role: str) -> None:
+    """L24: with no effort a specialist's answer spent 1.7k reasoning tokens (35.6 s live) and
+    `low` 0.5k (14.0 s) for the same facts; the orchestrator's final reply 19.1 s -> 8.8 s. Set
+    once in the base, inherited by every role, no output bound (a cut reply is not a reply)."""
+    settings = glazed.profile(role).model_settings
+
+    assert settings is not None
+    assert settings.reasoning_effort == "low"
+    assert settings.max_tokens is None
+
+
+def test_the_orchestrator_tells_its_peers_the_conversation_verbatim_not_a_summary() -> None:
+    """L24: `summary` made a model call before EVERY ask (6-9 s live between the ask and the
+    peer's start, once 36 s) and it was cut at its 500-token bound; `full` reads the newest
+    messages within the same 4000-character cap with no model call."""
+    from agent_core.domain.peers import PeerVisibility
+
+    peers = glazed.profile("orchestrator").peers
+    assert peers.visibility is PeerVisibility.FULL
+    assert peers.max_context_chars == 4000
+
+
 def test_the_orchestrator_collects_every_peer_answer_of_a_step() -> None:
     """`all_settled` is also Core's default, so the loaded value alone would pass with the line
     deleted: the profile must SAY it, so a change of Core's default never changes glazed."""

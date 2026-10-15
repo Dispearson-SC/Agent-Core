@@ -373,11 +373,12 @@ def test_the_addon_serves_the_eight_roles_and_its_base(tmp_path: Path) -> None:
 def test_every_specialist_is_served_exactly_as_vertical_glazed_served_it(
     tmp_path: Path, role: str
 ) -> None:
-    """Persona byte for byte, model, toolsets, budgets, peers, compaction and media."""
+    """Persona byte for byte, model, toolsets, budgets, peers, compaction and media; the one
+    intended Phase 5 change is the base's low reasoning effort (L24, test_glazed_fast_comms.py)."""
     new, old = glazed.served(tmp_path)[f"glazed_{role}"], glazed.reference()[f"glazed_{role}"]
 
     assert new.persona == old.persona
-    assert new == old
+    assert replace(new, model_settings=None, content_hash=old.content_hash) == old
 
 
 def _section_of(persona: str) -> tuple[str, str]:
@@ -402,9 +403,19 @@ def test_the_orchestrator_is_vertical_glazeds_with_plain_language_in_its_section
     for kept in ('"producto"', "esto lo decides tú", "unos 120 dólares", "por ciento"):
         assert kept in glazed_words
     # every other field is the old one (the content hash follows the persona), but the Phase 5
-    # routing opt-in (P5, inert until AGENT_CORE_TURN_ROUTING is on; test_glazed_fast_comms.py)
+    # routing opt-in (P5, inert until AGENT_CORE_TURN_ROUTING is on), the low reasoning effort and
+    # the verbatim peer context (L24); all three are pinned in test_glazed_fast_comms.py
     assert replace(
-        new, persona=old.persona, content_hash=old.content_hash, routing=None
+        new,
+        persona=old.persona,
+        content_hash=old.content_hash,
+        routing=None,
+        model_settings=None,
+        peers=replace(
+            new.peers,
+            visibility=old.peers.visibility,
+            max_context_chars=old.peers.max_context_chars,
+        ),
     ) == old
 
 

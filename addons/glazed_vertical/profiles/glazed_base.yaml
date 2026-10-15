@@ -6,6 +6,11 @@ persona: |
   You are the shared template of the Glazed store copilot roles and not an agent of your own. Say,
   in Spanish, that this assistant is not configured and that the manager should use the copilot.
 model: minimax/MiniMax-M3.1-flash-preview
+# Phase 5 (L24, Core D99): a reasoning model; with no effort a specialist's answer spent 1.7k reasoning
+# tokens (35.6 s live), with `low` 0.5k (14.0 s) for the same facts. Every role inherits it. No
+# max_tokens: a cut reply is not a reply.
+model_settings:
+  reasoning_effort: low
 
 mcp_servers: []
 skill_namespaces: []
