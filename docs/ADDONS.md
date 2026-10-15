@@ -344,7 +344,12 @@ escape_description: Several teams, or small talk       # optional
 routes:
   - {label: billing, description: Invoices, refunds and payments, target: "profile:billing"}
   - {label: opening_hours, description: When the shop is open, target: "intent:opening_hours"}
+  - {label: request_action, description: Asks to do something rather than to be told, target: pass}
 ```
+
+A route whose target is `pass` is a labelled abstention: chosen, the turn passes (reason
+`pass_route`) whatever the confidence. One specific option competes with the routes better than a
+broad escape description (a request to propose an order otherwise lands on the read-only plan).
 
 ```
 AGENT_CORE_ADDONS=...,system_one_router

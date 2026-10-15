@@ -179,3 +179,8 @@ questions:
   - {id: ps10, text: "¿Cuándo es el próximo día festivo?", expected: pass, note: "the briefing calendar"}
   - {id: ps11, text: "¿Cómo va a estar el clima mañana?", expected: pass, note: "out of scope"}
   - {id: ps12, text: "Compara lo que vendimos con lo pronosticado y dime si pido más", expected: pass, note: "two specialists and a recommendation"}
+  # Recorded (stress battery phase5, 2026-10-15, L18): real wordings the routes got wrong or must keep passing.
+  - {id: ps13, text: "Propón el pedido para el producto con más riesgo de agotarse y déjalo pendiente de mi aprobación.", expected: pass, note: "a write (propose_action); phase5 routed it to order_plan at 0.74"}
+  - {id: ps14, text: "¿Y cuál de esos es el más urgente?", expected: pass, note: "a follow-up: 'esos' is in the conversation; phase5 routed it to active_issues at 0.59"}
+  - {id: ps15, text: "Prepárame el plan de mañana: qué pedir, qué está por caducar y si me alcanza el personal para atenderlo.", expected: pass, note: "three specialists; phase5 passed it at 0.80"}
+  - {id: ps16, text: "Haz el pedido de leche para mañana y déjamelo listo para aprobar", expected: pass, note: "a write"}

@@ -579,3 +579,29 @@ def test_an_unchanged_routes_file_is_parsed_once(
     SYSTEM_ONE.load_routes(settings)
 
     assert parsed == []
+
+
+# --- a labelled pass option (L18: "Propón el pedido..." routed to a read-only plan at 0.74) ----
+
+
+def test_a_route_whose_target_is_pass_is_offered_by_label_and_passes_when_chosen(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "routes.yaml").write_text(
+        ROUTES + "  - label: request_action\n"
+        "    description: Asks to do something, not to read something\n"
+        "    target: pass\n",
+        encoding="utf-8",
+    )
+    seen: list[httpx.Request] = []
+
+    answer = _route(
+        _replying(httpx.Response(200, json=_answer("request_action", 0.91)), seen=seen),
+        _settings(tmp_path),
+    )
+
+    criteria = json.loads(seen[0].content)["questions"]["route"]["criteria"]
+    assert criteria["request_action"] == "Asks to do something, not to read something"
+    assert answer["decision"] == "pass" and answer["reason"] == "pass_route"
+    assert answer["label"] == "request_action" and answer["confidence"] == 0.91
+    assert decision_from_mapping(answer).kind is RouteKind.PASS

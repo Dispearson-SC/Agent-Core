@@ -18,6 +18,9 @@
 # with Spanish descriptions: 94%, 98% committed, p50 105 ms / p95 150 ms; English kept. Thresholds
 # 0.5-0.6 are the best plateau (0.4: 95%, one wrong commit at 0.44; 0.7: 94%; 0.9: 85%).
 # The descriptions were written knowing the set, so expect less on recorded questions.
+# RERUN (2026-10-15, L18, request_action added, 82 questions = 78 + 4 recorded from stress phase5):
+# 96% (100% committed, 23% abstention, router p50 80 ms / p95 124 ms); the same three synthetic
+# abstentions as before (ds01, to02, sg01); every recorded question passes.
 instructions: >-
   A bakery store manager sent this message to the store copilot. Which single option is it asking
   for? Choose none_of_these when it asks for advice, a recommendation or a proposal, needs two or
@@ -88,3 +91,14 @@ routes:
   - label: integrity_finding
     target: profile:glazed_auditor
     description: Explain one specific data-integrity finding in depth, such as the costliest one.
+  # L18 (stress phase5): "Propón el pedido ... y déjalo pendiente de mi aprobación" chose order_plan
+  # (a read-only plan) at 0.74, so no proposal was made. A labelled abstention competes better than
+  # the broad escape description; `target: pass` runs the orchestrator, which can propose. Probed
+  # (jev-1.13.0): that wording -> request_action 0.93 (was order_plan 0.67). Widening the
+  # instructions or narrowing order_plan's description instead made "¿Qué tengo que pedir?" and
+  # five more questions abstain (90%), so neither changed.
+  - label: request_action
+    target: pass
+    description: >-
+      Asks the copilot to do something rather than to tell something - propose, place, prepare,
+      approve or leave pending an order, a purchase or another change for the manager's approval.

@@ -27,7 +27,7 @@ def test_the_set_is_synthetic_sized_and_started_on_the_orchestrator() -> None:
 
     assert question_set.synthetic is True
     assert question_set.entry_profile == "glazed_orchestrator"
-    assert 60 <= len(question_set.questions) <= 80
+    assert 60 <= len(question_set.questions) <= 90  # 78 synthetic + 4 recorded (L18)
 
 
 def test_every_route_is_one_the_vertical_can_take_and_each_is_covered() -> None:

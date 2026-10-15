@@ -15,6 +15,9 @@ WHAT IT ANSWERS
       (intent:<name>);
     * the escape label, or a confidence below the threshold: `pass` with reason `escape` or
       `below_threshold`, the label and confidence kept so the abstention can be tuned;
+    * a route whose target is `pass` (a labelled abstention, e.g. "asks to DO something"): `pass`
+      with reason `pass_route` whatever its confidence. A specific option competes with the routes
+      better than one broad escape description (L18);
     * no key (`missing_api_key`), an HTTP error (`http_<status>`), the time budget spent
       (`timeout`), a transport error (`network_error:<Class>`) or an answer that does not hold
       the contract (`bad_response`): `pass` with that reason.
@@ -62,6 +65,7 @@ RETRY_STATUSES: Final = frozenset({429, 529})
 _MAX_TEXT: Final = 200  # Core refuses longer label/model/reason strings
 _LABEL: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _TARGET: Final = re.compile(r"^(profile|intent):([A-Za-z0-9][A-Za-z0-9_.-]{0,127})$")
+PASS_TARGET: Final = "pass"
 _ROUTE_KEYS: Final = frozenset({"label", "description", "target"})
 _FILE_KEYS: Final = frozenset({"routes", "instructions", "escape_description"})
 _ADDONS_ROOT: Final = Path(__file__).resolve().parents[2]
@@ -75,7 +79,7 @@ class SystemOneConfigError(ValueError):
 class Route:
     label: str
     description: str
-    kind: str  # "profile" or "intent"
+    kind: str  # "profile", "intent" or "pass"
     name: str
 
 
@@ -145,10 +149,15 @@ def parse_routes(document: object, *, escape_label: str, source: str) -> RouteTa
             raise SystemOneConfigError(f"{where}: label {label!r} is used twice")
         seen.add(label)
         target = raw.get("target")
+        description = _text(raw.get("description"), f"{where}: description")
+        if target == PASS_TARGET:
+            routes.append(Route(label, description, PASS_TARGET, ""))
+            continue
         match = _TARGET.match(target) if isinstance(target, str) else None
         if match is None:
-            raise SystemOneConfigError(f"{where}: target must be profile:<id> or intent:<name>")
-        description = _text(raw.get("description"), f"{where}: description")
+            raise SystemOneConfigError(
+                f"{where}: target must be profile:<id>, intent:<name> or {PASS_TARGET}"
+            )
         routes.append(Route(label, description, match.group(1), match.group(2)))
     instructions = document.get("instructions")
     escape = document.get("escape_description")
@@ -274,9 +283,11 @@ def _decide(
     answer: dict[str, Any] = {"label": choice, "confidence": confidence}
     if choice == settings["escape_label"]:
         return {"decision": "pass", "reason": "escape", **answer}
+    route = table.by_label()[choice]
+    if route.kind == PASS_TARGET:
+        return {"decision": "pass", "reason": "pass_route", **answer}
     if confidence < settings["threshold"]:
         return {"decision": "pass", "reason": "below_threshold", **answer}
-    route = table.by_label()[choice]
     if route.kind == "profile":
         return {"decision": "route", "profile_id": route.name, **answer}
     return {"decision": "intent", "intent": route.name, **answer}

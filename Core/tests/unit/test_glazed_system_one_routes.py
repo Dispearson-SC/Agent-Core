@@ -25,12 +25,15 @@ def test_the_routes_file_is_valid_and_targets_every_labelled_route_of_the_set() 
         escape_label="none_of_these",
         source=str(ROUTES),
     )
-    targets = {f"{route.kind}:{route.name}" for route in table.routes}
+    targets = {f"{route.kind}:{route.name}" for route in table.routes if route.kind != "pass"}
     labelled = {q.expected for q in load_question_set(QUESTIONS).questions} - {PASS}
 
     assert targets == labelled
     assert sum(route.kind == "intent" for route in table.routes) == 10
     assert sum(route.kind == "profile" for route in table.routes) == 7
+    # L18. One labelled abstention: a request to DO something runs the orchestrator, which can
+    # propose; a read-only plan cannot.
+    assert [r.label for r in table.routes if r.kind == "pass"] == ["request_action"]
 
 
 def test_the_vertical_does_not_enable_the_router() -> None:
