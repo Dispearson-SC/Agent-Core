@@ -12,6 +12,8 @@ and the audit rows. Everything must be equal except, each asserted on its own be
 
 ACCEPTED (by the user, G4/G5):
   * the orchestrator's "How to talk to the manager" section is the `plain_language` fragment;
+  * S9 (P11): the orchestrator asks every independent specialist in the same step instead of one per
+    step (`glazed_vertical_support.INTENDED_ORCHESTRATOR_CHANGES`, applied to the golden persona);
   * a 404/503 refusal carries the backend's reason (D91): an error value gains `reason`, an
     "unavailable" answer says "The backend said: ...".
 DOCUMENTED (D87, pinned value by value in test_glazed_tools_contract.py):
@@ -139,6 +141,7 @@ def _persona(role: str, old: str, new: str) -> str:
     the old persona with that section in place (so it compares equal); asserted on its own below."""
     if role != "orchestrator":
         return old
+    old = glazed.with_intended_changes(old)  # S9, P11: asserted on its own below
     start, end = old.index(SECTION_START), old.index(SECTION_END)
     if new.startswith(old[:start]) and new.endswith(old[end:]):
         return new
@@ -234,7 +237,8 @@ def test_a_scripted_turn_plays_exactly_as_on_vertical_glazed(
 def test_the_orchestrator_persona_differs_only_in_the_plain_language_section(
     actual: dict[str, dict[str, Any]],
 ) -> None:
-    old = GOLDEN["orchestrator-reads-the-briefing-and-proposes"]["persona"]
+    golden = GOLDEN["orchestrator-reads-the-briefing-and-proposes"]["persona"]
+    old = glazed.with_intended_changes(golden)
     new = actual["orchestrator-reads-the-briefing-and-proposes"]["persona"]
     start, end = old.index(SECTION_START), old.index(SECTION_END)
     slot = glazed.contributions().fragments["plain_language"].read_text(encoding="utf-8").strip()

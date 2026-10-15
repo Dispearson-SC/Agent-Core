@@ -116,3 +116,37 @@ def policy_rules() -> tuple[PolicyRule, ...]:
         *contributions().policy_rules,
         *parse_policy_rules(DEPLOYMENT_RULES, source="glazed deployment"),
     )
+
+
+# THE ONE INTENDED DIFFERENCE from vertical/glazed's orchestrator outside its section (S9, P11):
+# the old persona asked one specialist per step (a workaround for a turn that hung resuming with one
+# answer of two); Core collects every ask of a step (C10), so independent asks now go out together.
+# Each old fragment occurs exactly once and is replaced by the new words; everything else stays
+# byte for byte.
+INTENDED_ORCHESTRATOR_CHANGES = (
+    (
+        "Ask exactly ONE specialist per step: wait for its answer before asking another.\n"
+        "Never issue two ask_peer calls in the same step.\n",
+        "When a question needs several specialists, ask them all in the SAME step: issue every\n"
+        "independent ask_peer call together, so they work in parallel and you continue once with"
+        " all\n"
+        "their answers. Ask in a later step only when a question depends on an earlier"
+        " specialist's\n"
+        "answer (for example, the cover the supply specialist reports before deciding on an"
+        " order).\n",
+    ),
+    (
+        "asking any specialist. Ask exactly ONE specialist only for drill-down the briefing"
+        " lacks.\n",
+        "asking any specialist. Ask specialists only for drill-down the briefing lacks, every\n"
+        "independent one in the same step.\n",
+    ),
+)
+
+
+def with_intended_changes(old_persona: str) -> str:
+    """`old_persona` (vertical/glazed's orchestrator) with the intended changes applied."""
+    for before, after in INTENDED_ORCHESTRATOR_CHANGES:
+        assert old_persona.count(before) == 1, before
+        old_persona = old_persona.replace(before, after)
+    return old_persona
