@@ -214,8 +214,10 @@ row only together with its reply.
 An intent plan's reply is ONE tool-less model call (the compose). It is bounded per deployment:
 `AGENT_CORE_COMPOSE_MAX_TOKENS` (default 4096, reasoning included on providers that count it there)
 and `AGENT_CORE_COMPOSE_REASONING_EFFORT` (`minimal`/`low`/`medium`/`high`, default `low`; set it
-EMPTY to send no effort, for a provider or a LiteLLM proxy that refuses `reasoning_effort` - such a
-provider fails every compose and every plan falls back to the normal path). A compose cut at the
+EMPTY to send no effort, for a provider or a LiteLLM proxy that refuses `reasoning_effort`). A
+compose the provider refuses with a 400 naming the parameter is sent once more without it, and the
+log says `the provider refused the compose reasoning effort` (each compose pays that refused call
+until the variable is emptied). A compose cut at the
 bound, or with no text, falls back too. Measured on the glazed deployment (reasoning model, L18):
 unbounded composes spent 7-17k reasoning tokens (47-112 s); `low` effort took one from 33-38 s to
 3-7 s.

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models import Model
 from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -312,6 +313,65 @@ def test_a_cut_or_empty_compose_raises_so_the_plan_falls_back(response: ModelRes
 
     with pytest.raises(ComposeIncompleteError):
         asyncio.run(runner.compose_reply(TURN, _request(), _profile(), results))
+
+
+def _refusing_effort(body: object, status: int = 400) -> tuple[Any, list[dict[str, Any]]]:
+    """A model that answers 400 `body` while `openai_reasoning_effort` is sent, else "ok"."""
+    seen: list[dict[str, Any]] = []
+
+    def compose(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        settings = dict(info.model_settings or {})
+        seen.append(settings)
+        if "openai_reasoning_effort" in settings:
+            raise ModelHTTPError(status_code=status, model_name="m", body=body)
+        return ModelResponse(parts=[TextPart("ok")])
+
+    def factory(model_id: str, base_url: str | None) -> Model:
+        return FunctionModel(compose)
+
+    return _runner(Backend(), model_factory=factory), seen
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": {"message": "Unsupported parameter: 'reasoning_effort' is not supported"}},
+        "litellm.UnsupportedParamsError: minimax does not support parameters: reasoning_effort",
+        {"error": {"code": "unsupported_parameter", "param": "reasoning"}},
+    ],
+    ids=["openai_message", "litellm_text", "unsupported_parameter_code"],
+)
+def test_a_provider_that_refuses_the_reasoning_effort_gets_the_compose_once_more_without_it(
+    body: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Slice 39 warning: the default effort ("low") is refused by some providers, which would make
+    every plan fall back. A 400 that names the parameter is retried ONCE without it, and logged."""
+    runner, seen = _refusing_effort(body)
+    results = (PlanToolResult("stock_levels", "stock_levels", content='{"units": 2}'),)
+
+    with caplog.at_level("WARNING"):
+        outcome = asyncio.run(runner.compose_reply(TURN, _request(), _profile(), results))
+
+    assert outcome.result is not None and outcome.result.text == "ok"
+    assert len(seen) == 2
+    assert seen[0]["openai_reasoning_effort"] == "low"
+    assert "openai_reasoning_effort" not in seen[1] and seen[1]["max_tokens"] == 4096
+    assert "reasoning effort" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [(400, {"error": {"message": "the prompt is too long"}}), (500, "reasoning_effort")],
+    ids=["another_400", "not_a_400"],
+)
+def test_any_other_compose_error_is_not_retried(status: int, body: object) -> None:
+    runner, seen = _refusing_effort(body, status)
+    results = (PlanToolResult("stock_levels", "stock_levels", content='{"units": 2}'),)
+
+    with pytest.raises(ModelHTTPError):
+        asyncio.run(runner.compose_reply(TURN, _request(), _profile(), results))
+
+    assert len(seen) == 1
 
 
 def test_the_compose_instructions_ask_for_a_brief_answer_that_copies_numbers() -> None:

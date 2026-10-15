@@ -60,6 +60,7 @@ __all__ = [
     "PlanRefusedError",
     "PlanScript",
     "compose_prompt",
+    "refuses_reasoning_effort",
 ]
 
 PLAN_PROMPT: Final[str] = "Run the planned tool call."
@@ -87,8 +88,9 @@ class ComposeSettings:
 
     `max_tokens` bounds the whole answer, reasoning included on a provider that counts it there;
     a reply cut at it is not a reply (`ComposeIncompleteError`) and the plan falls back.
-    `reasoning_effort` is sent as the OpenAI-compatible `reasoning_effort`; None sends nothing (a
-    provider or proxy that refuses the parameter fails every compose, and every plan falls back).
+    `reasoning_effort` is sent as the OpenAI-compatible `reasoning_effort`; None sends nothing. A
+    provider or proxy that refuses the parameter (`refuses_reasoning_effort`) gets the compose once
+    more without it, with a log line, instead of every plan falling back.
     Measured (L18): "low" took the same compose from 33-38 s to 3-7 s."""
 
     max_tokens: int = DEFAULT_COMPOSE_MAX_TOKENS
@@ -108,6 +110,23 @@ class ComposeSettings:
         if self.reasoning_effort is not None:
             settings["openai_reasoning_effort"] = self.reasoning_effort
         return settings
+
+
+def refuses_reasoning_effort(status_code: int, body: object) -> bool:
+    """Whether a provider error is a refusal of the `reasoning_effort` parameter (slice 39).
+
+    Some providers and proxies answer 400 to a parameter they do not take (litellm's
+    `UnsupportedParamsError` for minimax, OpenAI's "Unsupported parameter", an
+    `unsupported_parameter` code). Only a 400 that names the parameter, or names an unsupported
+    parameter about reasoning, counts: any other error is the compose's own failure."""
+    if status_code != 400:
+        return False
+    text = str(body).lower()
+    if "reasoning_effort" in text or "reasoning effort" in text:
+        return True
+    return "reasoning" in text and any(
+        word in text for word in ("unsupported", "not supported", "unrecognized", "unknown")
+    )
 
 
 class ComposeIncompleteError(Exception):

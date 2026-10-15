@@ -95,6 +95,7 @@ from pydantic_ai.capabilities import AbstractCapability, ProcessHistory, Validat
 from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,
+    ModelHTTPError,
     ModelRetry,
     SkipToolExecution,
     UsageLimitExceeded,
@@ -138,6 +139,7 @@ from agent_core.adapters.driven.agent_pydantic.intent_plan import (
     PlanRefusedError,
     PlanScript,
     compose_prompt,
+    refuses_reasoning_effort,
 )
 from agent_core.adapters.driven.agent_pydantic.reply_stream import ReplyStreamHandler
 from agent_core.adapters.driven.mcp.toolsets import result_budget_for
@@ -1815,14 +1817,34 @@ class PydanticAgentRunner:
         agent = self._composer_for(profile)
         instructions = [*(_turn_instructions(profile, request.caller) or []), COMPOSE_INSTRUCTIONS]
         stream = self._reply_stream(turn_id, request)
-        try:
-            result = await agent.run(
+        settings = self._compose_settings.model_settings()
+
+        async def compose(model_settings: dict[str, Any]) -> AgentRunResult[str]:
+            return await agent.run(
                 compose_prompt(request.input.text, results),
                 instructions=instructions,
-                model_settings=cast(ModelSettings, self._compose_settings.model_settings()),
+                model_settings=cast(ModelSettings, model_settings),
                 usage_limits=UsageLimits(request_limit=1, cost_limit=profile.max_cost_usd),
                 event_stream_handler=stream,
             )
+
+        try:
+            try:
+                result = await compose(settings)
+            except ModelHTTPError as error:
+                if "openai_reasoning_effort" not in settings or not refuses_reasoning_effort(
+                    error.status_code, error.body
+                ):
+                    raise
+                _LOG.warning(
+                    "the provider refused the compose reasoning effort %r for turn %s; composing "
+                    "once more without it (an empty AGENT_CORE_COMPOSE_REASONING_EFFORT stops "
+                    "sending it)",
+                    settings["openai_reasoning_effort"],
+                    turn_id,
+                )
+                settings = {k: v for k, v in settings.items() if k != "openai_reasoning_effort"}
+                result = await compose(settings)
             if result.response.finish_reason == "length":
                 raise ComposeIncompleteError(
                     f"the compose of turn {turn_id} was cut at "
