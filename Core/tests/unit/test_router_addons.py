@@ -217,6 +217,14 @@ def test_the_routing_switch_and_timeout_are_read_strictly() -> None:
             Settings.from_env(bad, env_file=_NO_ENV_FILE)
 
 
+def test_follow_ups_are_not_routed_unless_the_deployment_says_so() -> None:
+    assert Settings.from_env({}, env_file=_NO_ENV_FILE).turn_routing_follow_ups is False
+    on = Settings.from_env({"AGENT_CORE_TURN_ROUTING_FOLLOW_UPS": "1"}, env_file=_NO_ENV_FILE)
+    assert on.turn_routing_follow_ups is True
+    with pytest.raises(ValueError):
+        Settings.from_env({"AGENT_CORE_TURN_ROUTING_FOLLOW_UPS": "y"}, env_file=_NO_ENV_FILE)
+
+
 # --- the startup check -------------------------------------------------------------------------
 
 

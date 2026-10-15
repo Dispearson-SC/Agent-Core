@@ -275,7 +275,7 @@ from agent_core.application.decide_approval import DecideApproval, PendingCheck,
 from agent_core.application.event_feed import EventFeed
 from agent_core.application.ingest_media import IngestMedia
 from agent_core.application.resume_turn import ResumeTurn
-from agent_core.application.route_turn import DEFAULT_ROUTER_TIMEOUT_MS, RouteTurn
+from agent_core.application.route_turn import DEFAULT_ROUTER_TIMEOUT_MS, HasHistory, RouteTurn
 from agent_core.application.run_intent import RequestPersisted, RunIntent
 from agent_core.application.start_turn import StartTurn
 from agent_core.domain.intents import IntentPlan
@@ -287,6 +287,7 @@ from agent_core.domain.topology import validate_topology
 from agent_core.domain.turn import (
     CallerIdentity,
     PendingKind,
+    SessionRef,
     TenantId,
     ToolCallId,
     TurnId,
@@ -731,6 +732,10 @@ class Settings:
     # L18. The bounds of an intent plan's compose call: `AGENT_CORE_COMPOSE_MAX_TOKENS` (positive,
     # default 4096) and `AGENT_CORE_COMPOSE_REASONING_EFFORT` (minimal/low/medium/high, default
     # low; empty sends no effort, for a provider or proxy that refuses the parameter).
+    # L18. A turn that continues a conversation is NOT routed unless this is set
+    # (`AGENT_CORE_TURN_ROUTING_FOLLOW_UPS`, true/false/1/0): a router reads the message alone and
+    # a plan's compose has no history, so "and which of those...?" landed on a wrong plan.
+    turn_routing_follow_ups: bool = False
     compose_max_tokens: int = DEFAULT_COMPOSE_MAX_TOKENS
     compose_reasoning_effort: str | None = DEFAULT_COMPOSE_REASONING_EFFORT
 
@@ -819,6 +824,9 @@ class Settings:
             ),
             turn_router_timeout_ms=_parse_router_timeout_ms(
                 env.get("AGENT_CORE_TURN_ROUTER_TIMEOUT_MS")
+            ),
+            turn_routing_follow_ups=_parse_flag(
+                "AGENT_CORE_TURN_ROUTING_FOLLOW_UPS", env.get("AGENT_CORE_TURN_ROUTING_FOLLOW_UPS")
             ),
             compose_max_tokens=_parse_compose_max_tokens(env.get("AGENT_CORE_COMPOSE_MAX_TOKENS")),
             compose_reasoning_effort=_parse_compose_effort(
@@ -1795,6 +1803,32 @@ def _pg_request_persisted(conninfo: str) -> RequestPersisted:
     return persisted
 
 
+# L18. Another turn of the same session and tenant (never the turn's own row, should it exist).
+_SESSION_HAS_HISTORY_SQL = """
+    SELECT 1 FROM turns
+    WHERE session_id = %s AND tenant_id = %s AND turn_id::text <> %s
+    LIMIT 1
+"""
+
+
+def _session_has_history_sync(conninfo: str, session: SessionRef, turn_id: TurnId) -> bool:
+    with psycopg.connect(conninfo) as conn:
+        row = conn.execute(
+            _SESSION_HAS_HISTORY_SQL,
+            (str(session.session_id), str(session.tenant_id), str(turn_id)),
+        ).fetchone()
+    return row is not None
+
+
+def _pg_session_has_history(conninfo: str) -> HasHistory:
+    """Bind `RouteTurn`'s `has_history` seat to the app database's `turns` table (L18)."""
+
+    async def has_history(session: SessionRef, turn_id: TurnId) -> bool:
+        return await asyncio.to_thread(_session_has_history_sync, conninfo, session, turn_id)
+
+    return has_history
+
+
 def route_peer_gate(
     entry: AgentProfile, target: AgentProfile, hop: int
 ) -> tuple[int | None, str | None]:
@@ -2378,6 +2412,12 @@ def build_container(
             # S8. A route runs delegated, gated as the requested profile's own ask_peer would be.
             peer_gate=route_peer_gate,
             policy=policy,
+            # L18. A follow-up runs the normal path unless the deployment routes follow-ups too.
+            has_history=(
+                None
+                if resolved.turn_routing_follow_ups
+                else _pg_session_has_history(resolved.app_conninfo)
+            ),
         )
         if resolved.turn_routing
         else None

@@ -54,6 +54,7 @@ __all__ = [
     "FALLBACK_ASK_PEER_NOT_ALLOWED",
     "FALLBACK_AUDIT_UNAVAILABLE",
     "FALLBACK_DELEGATION_UNAVAILABLE",
+    "FALLBACK_FOLLOW_UP",
     "FALLBACK_INTENT_NOT_SUPPORTED",
     "FALLBACK_INTENT_UNKNOWN",
     "FALLBACK_PEER_REFUSED",
@@ -75,6 +76,10 @@ FALLBACK_TARGET_NOT_STARTABLE: Final[str] = "target_not_startable"
 FALLBACK_INTENT_NOT_SUPPORTED: Final[str] = "intent_not_supported"
 FALLBACK_INTENT_UNKNOWN: Final[str] = "intent_unknown"
 FALLBACK_AUDIT_UNAVAILABLE: Final[str] = "audit_unavailable"
+# L18. The turn continues a conversation: a router reads one message alone, so "and which of those
+# is the most urgent?" lands on whatever "those" sounds like, and a plan's compose has no history.
+# Such a turn is not routed; the router is not asked.
+FALLBACK_FOLLOW_UP: Final[str] = "follow_up"
 # S8. A route runs delegated, as an ask_peer from the requested profile to its target would. These
 # say why it could not: no peer gate or policy is wired (`delegation_unavailable`), the two-sided
 # peer gate refused the hop (`peer_refused:<gate reason>`) or the person's policy does not allow

@@ -24,6 +24,7 @@ from agent_core.domain.agent_mode import AgentMode
 from agent_core.domain.profile import AgentProfile, ProfileValidationError
 from agent_core.domain.routing import (
     FALLBACK_AUDIT_UNAVAILABLE,
+    FALLBACK_FOLLOW_UP,
     FALLBACK_INTENT_NOT_SUPPORTED,
     FALLBACK_TARGET_NOT_ALLOWED,
     FALLBACK_TARGET_NOT_STARTABLE,
@@ -422,3 +423,63 @@ def test_a_decision_refuses_negative_or_non_integer_usage() -> None:
     for usage in ({"input_tokens": -1}, {"input_tokens": 1.5}, {"output_tokens": True}):
         with pytest.raises(ValueError, match="usage"):
             RouteDecision(kind=RouteKind.PASS, usage=usage)  # type: ignore[arg-type]
+
+
+# --- follow-ups (stress phase5 L18: "¿Y cuál de esos es el más urgente?" routed to a plan) -----
+
+
+def _with_history(answer: bool | Exception) -> Any:
+    seen: list[Any] = []
+
+    async def has_history(session: Any, turn_id: TurnId) -> bool:
+        seen.append((session, turn_id))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    return has_history, seen
+
+
+def test_a_turn_that_continues_a_conversation_is_not_routed_and_the_router_is_not_asked() -> None:
+    router = ScriptedRouter(RouteDecision(kind=RouteKind.ROUTE, profile_id=BILLING))
+    has_history, seen = _with_history(True)
+    use_case, audit = _use_case(router)
+    use_case = RouteTurn(
+        routers=router, audit=audit, profiles=_profiles(), has_history=has_history, **delegation()
+    )
+
+    routed = _run(use_case)
+
+    assert routed.request == _request() and routed.intent is None
+    assert router.seen == []
+    assert routed.record.decision is None
+    assert routed.record.fallback_reason == FALLBACK_FOLLOW_UP
+    assert [c[2].fallback_reason for c in audit.calls] == [FALLBACK_FOLLOW_UP]
+    assert seen == [(_request().session, TurnId("turn-1"))]
+
+
+def test_the_first_turn_of_a_conversation_is_routed_as_before() -> None:
+    router = ScriptedRouter(RouteDecision(kind=RouteKind.ROUTE, profile_id=BILLING))
+    has_history, _ = _with_history(False)
+    audit = RecordedRoutes()
+    use_case = RouteTurn(
+        routers=router, audit=audit, profiles=_profiles(), has_history=has_history, **delegation()
+    )
+
+    routed = _run(use_case)
+
+    assert routed.request.profile_id == BILLING and len(router.seen) == 1
+
+
+def test_a_history_check_that_fails_runs_the_normal_path_with_the_error_class() -> None:
+    router = ScriptedRouter(RouteDecision(kind=RouteKind.ROUTE, profile_id=BILLING))
+    has_history, _ = _with_history(ConnectionError("db down"))
+    audit = RecordedRoutes()
+    use_case = RouteTurn(
+        routers=router, audit=audit, profiles=_profiles(), has_history=has_history, **delegation()
+    )
+
+    routed = _run(use_case)
+
+    assert routed.request == _request() and router.seen == []
+    assert routed.record.fallback_reason == "error:ConnectionError"

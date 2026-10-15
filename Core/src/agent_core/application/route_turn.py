@@ -29,6 +29,12 @@ WHAT IT GUARANTEES
     * Never fails the turn. A router slower than `timeout_ms`, one that raises, a decision that
       cannot land and a route that cannot be audited all run the requested profile, with the
       reason recorded. A route is applied only once its audit row is written.
+    * A turn that continues a conversation (the session already holds another turn, `has_history`)
+      is NOT routed and its router is not asked (L18): a router reads the message alone, so a
+      follow-up such as "and which of those is the most urgent?" lands on a wrong plan, and a
+      plan's compose has no history. It runs the requested profile with reason `follow_up`
+      (audited); a history check that fails does the same with the error class. Without
+      `has_history` every turn is routed, as before.
     * The audit row is bounded: the label, model, intent, reason and fallback reason a router
       produced are cut to `MAX_AUDIT_TEXT` characters, whichever adapter answered. Its token usage
       is recorded as input and output tokens (L12).
@@ -39,7 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 
 from agent_core.domain.intents import IntentCall, IntentPlan
@@ -49,6 +55,7 @@ from agent_core.domain.routing import (
     FALLBACK_ASK_PEER_NOT_ALLOWED,
     FALLBACK_AUDIT_UNAVAILABLE,
     FALLBACK_DELEGATION_UNAVAILABLE,
+    FALLBACK_FOLLOW_UP,
     FALLBACK_PEER_REFUSED,
     FALLBACK_TIMEOUT,
     RouteDecision,
@@ -58,12 +65,19 @@ from agent_core.domain.routing import (
     error_reason,
     resolve_route,
 )
-from agent_core.domain.turn import TurnId, TurnRequest, delegated_identity
+from agent_core.domain.turn import SessionRef, TurnId, TurnRequest, delegated_identity
 from agent_core.ports.route_audit import RouteAudit
 from agent_core.ports.tool_policy import ToolPolicy
 from agent_core.ports.turn_router import TurnRouter
 
-__all__ = ["DEFAULT_ROUTER_TIMEOUT_MS", "MAX_AUDIT_TEXT", "PeerGate", "RouteTurn", "RoutedTurn"]
+__all__ = [
+    "DEFAULT_ROUTER_TIMEOUT_MS",
+    "MAX_AUDIT_TEXT",
+    "HasHistory",
+    "PeerGate",
+    "RouteTurn",
+    "RoutedTurn",
+]
 
 # The tool a route stands in for (StartTurn's `ASK_PEER_TOOL`; an application module may not import
 # another, so the name is repeated, and test_delegated_routing.py pins that they agree).
@@ -72,6 +86,10 @@ ASK_PEER_TOOL = "ask_peer"
 PeerGate = Callable[[AgentProfile, AgentProfile, int], tuple[int | None, str | None]]
 """May the entry profile ask the target at this hop? `(next_hop, None)` when it may, `(None,
 reason)` when the two-sided peer gate refuses. Composition binds it to the gate ask_peer uses."""
+
+HasHistory = Callable[[SessionRef, TurnId], Awaitable[bool]]
+"""Does the session already hold a turn other than this one? Composition binds it to the store's
+own table, like `RunIntent`'s `RequestPersisted`: one read, not a port member."""
 
 _LOG = logging.getLogger(__name__)
 
@@ -103,6 +121,7 @@ class RouteTurn:
         plans: Mapping[str, IntentPlan] | None = None,
         peer_gate: PeerGate | None = None,
         policy: ToolPolicy | None = None,
+        has_history: HasHistory | None = None,
     ) -> None:
         if timeout_ms < 1:
             raise ValueError(f"the router timeout must be at least 1 ms, got {timeout_ms}")
@@ -119,6 +138,8 @@ class RouteTurn:
         # S8. Both are needed to delegate; without either no route is applied.
         self._peer_gate = peer_gate
         self._policy = policy
+        # L18. None routes every turn (follow-ups included), as before.
+        self._has_history = has_history
 
     def applies(self, request: TurnRequest) -> bool:
         """Whether `request` consults a router: a channel start of a profile declaring routing."""
@@ -136,11 +157,12 @@ class RouteTurn:
 
         started = self._clock()
         decision: RouteDecision | None = None
-        failure: str | None = None
+        failure = await self._follow_up(turn_id, request)
         try:
-            decision = await asyncio.wait_for(
-                self._routers.route(policy.router, _route_request(request)), self._timeout
-            )
+            if failure is None:
+                decision = await asyncio.wait_for(
+                    self._routers.route(policy.router, _route_request(request)), self._timeout
+                )
         except TimeoutError:
             failure = FALLBACK_TIMEOUT
         except Exception as error:
@@ -214,6 +236,18 @@ class RouteTurn:
             hop=next_hop,
         )
         return RoutedTurn(delegated_request, record, intent)
+
+    async def _follow_up(self, turn_id: TurnId, request: TurnRequest) -> str | None:
+        """`follow_up` when the session already holds another turn, an error reason when that
+        cannot be told (the normal path is always safe), else None (route it)."""
+        if self._has_history is None:
+            return None
+        try:
+            continued = await self._has_history(request.session, turn_id)
+        except Exception as error:
+            _LOG.warning("could not tell whether turn %s continues a conversation", turn_id)
+            return _bounded(error_reason(error))
+        return FALLBACK_FOLLOW_UP if continued else None
 
     async def _delegation(self, request: TurnRequest, target: str) -> tuple[int | None, str | None]:
         """`(next_hop, None)` when the requested profile could itself ask `target`, else `(None,

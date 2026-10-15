@@ -201,6 +201,12 @@ profile names a router no enabled addon provides, or a target that is not loaded
 cannot start. `AGENT_CORE_TURN_ROUTER_TIMEOUT_MS` (default 1500) bounds one consultation. Turning it
 off again needs no drain: the step stays and simply returns the request unchanged.
 
+A turn that continues a conversation (its session already holds another turn) is NOT routed: the
+router is not asked and the audit row says `fallback_reason = 'follow_up'`. A router reads the
+message alone, so "and which of those is the most urgent?" lands on whatever "those" sounds like,
+and an intent plan's compose has no history. `AGENT_CORE_TURN_ROUTING_FOLLOW_UPS=true` routes
+follow-ups too. No drain either way: the check runs inside the recorded route step.
+
 An intent plan's reply is ONE tool-less model call (the compose). It is bounded per deployment:
 `AGENT_CORE_COMPOSE_MAX_TOKENS` (default 4096, reasoning included on providers that count it there)
 and `AGENT_CORE_COMPOSE_REASONING_EFFORT` (`minimal`/`low`/`medium`/`high`, default `low`; set it
