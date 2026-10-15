@@ -22,6 +22,11 @@
 #   pass                   the orchestrator: several specialists, a recommendation or proposal,
 #                          a manager note, a rejection to classify, small talk or out of scope
 #
+# INTENT SETS (S10, the fast path). `intents: [...]` lists the frequent intents a question asks for;
+# without it an `intent:<name>` question asks for that one and every other question for none. The
+# combined questions (cb*) ask two or three at once: their single route is `pass`, and the fast path
+# should answer them with ONE composite of their plans. Run with AGENT_CORE_EVAL_FAST_PATH=1.
+#
 # keyword_router is the OFFLINE floor the benchmark runs without a classifier (first match wins,
 # case and accents ignored). It is not a production router: a real one must beat it.
 name: glazed_store_manager
@@ -167,7 +172,7 @@ questions:
   - {id: au01, text: "Explícame el hallazgo de integridad con más dinero en juego", expected: "profile:glazed_auditor"}
 
   # --- pass (the orchestrator) ----------------------------------------------------------------
-  - {id: ps01, text: "¿Qué me recomiendas hacer con el pedido de mañana?", expected: pass, note: "a recommendation: supply plus a proposal"}
+  - {id: ps01, text: "¿Qué me recomiendas hacer con el pedido de mañana?", expected: pass, intents: [order_plan], note: "a recommendation: supply plus a proposal"}
   - {id: ps02, text: "No quiero pedir más leche, el proveedor siempre llega tarde", expected: pass, note: "a rejection: classify_text"}
   - {id: ps03, text: "Anota que el 19 de julio cerramos por inventario", expected: pass, note: "save_manager_note"}
   - {id: ps04, text: "Dame el panorama general de la tienda", expected: pass, note: "get_briefing"}
@@ -180,7 +185,24 @@ questions:
   - {id: ps11, text: "¿Cómo va a estar el clima mañana?", expected: pass, note: "out of scope"}
   - {id: ps12, text: "Compara lo que vendimos con lo pronosticado y dime si pido más", expected: pass, note: "two specialists and a recommendation"}
   # Recorded (stress battery phase5, 2026-10-15, L18): real wordings the routes got wrong or must keep passing.
-  - {id: ps13, text: "Propón el pedido para el producto con más riesgo de agotarse y déjalo pendiente de mi aprobación.", expected: pass, note: "a write (propose_action); phase5 routed it to order_plan at 0.74"}
+  - {id: ps13, text: "Propón el pedido para el producto con más riesgo de agotarse y déjalo pendiente de mi aprobación.", expected: pass, intents: [order_plan, stockout_risk], note: "a write (propose_action); phase5 routed it to order_plan at 0.74; the fast path passes it as an action"}
   - {id: ps14, text: "¿Y cuál de esos es el más urgente?", expected: pass, note: "a follow-up: 'esos' is in the conversation; phase5 routed it to active_issues at 0.59"}
-  - {id: ps15, text: "Prepárame el plan de mañana: qué pedir, qué está por caducar y si me alcanza el personal para atenderlo.", expected: pass, note: "three specialists; phase5 passed it at 0.80"}
-  - {id: ps16, text: "Haz el pedido de leche para mañana y déjamelo listo para aprobar", expected: pass, note: "a write"}
+  - {id: ps15, text: "Prepárame el plan de mañana: qué pedir, qué está por caducar y si me alcanza el personal para atenderlo.", expected: pass, intents: [expiring_items, order_plan, staffing], note: "three specialists; phase5 passed it at 0.80"}
+  - {id: ps16, text: "Haz el pedido de leche para mañana y déjamelo listo para aprobar", expected: pass, intents: [order_plan], note: "a write: the fast path passes it as an action"}
+
+  # --- combined: two or three frequent intents in one question (S10) ---------------------------
+  - {id: cb01, text: "¿Cómo voy hoy y qué tengo que pedir?", expected: pass, intents: [day_summary, order_plan]}
+  - {id: cb02, text: "¿Qué está por caducar y qué entregas tengo esta semana?", expected: pass, intents: [expiring_items, upcoming_deliveries]}
+  - {id: cb03, text: "Dime los problemas abiertos y si hay riesgo de agotados", expected: pass, intents: [active_issues, stockout_risk]}
+  - {id: cb04, text: "¿Cuánto vendimos ayer y qué promos tenemos activas?", expected: pass, intents: [day_summary, promo_list]}
+  - {id: cb05, text: "¿Me alcanza el personal el sábado y qué me surte el proveedor esta semana?", expected: pass, intents: [staffing, upcoming_deliveries]}
+  - {id: cb06, text: "¿Hay problemas en los datos y qué alertas tengo abiertas?", expected: pass, intents: [active_issues, data_integrity]}
+  - {id: cb07, text: "¿Qué tengo que pedir y qué se me va a acabar esta semana?", expected: pass, intents: [order_plan, stockout_risk]}
+  - {id: cb08, text: "¿Qué se vence pronto y puedo mandar el sobrante a otra sucursal?", expected: pass, intents: [expiring_items, transfer_options]}
+  - {id: cb09, text: "Dame el resumen del día y los pendientes urgentes, porfa", expected: pass, intents: [active_issues, day_summary]}
+  - {id: cb10, text: "¿Qué promos vienen y cuánto personal tengo programado?", expected: pass, intents: [promo_list, staffing]}
+  - {id: cb11, text: "¿Cuándo llega la harina y cuánto pido de dona glaseada?", expected: pass, intents: [order_plan, upcoming_deliveries]}
+  - {id: cb12, text: "¿Cuánto se tiró hoy de merma y qué está por caducar?", expected: pass, intents: [day_summary, expiring_items]}
+  - {id: cb13, text: "¿Qué traspasos me convienen y qué productos se me vencen esta semana?", expected: pass, intents: [expiring_items, transfer_options]}
+  - {id: cb14, text: "Dime cómo vamos hoy, qué pedir y qué alertas hay", expected: pass, intents: [active_issues, day_summary, order_plan]}
+  - {id: cb15, text: "¿Hay SKUs que no cuadran y qué se me va a agotar?", expected: pass, intents: [data_integrity, stockout_risk]}

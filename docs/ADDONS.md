@@ -629,6 +629,11 @@ the specialist that owns the data (present: `day_summary` via `get_snapshot`, `a
 `expiring_items`; supply: `order_plan`, `stockout_risk`, `upcoming_deliveries`; strategist:
 `staffing`, `promo_list`; auditor: `data_integrity`; liaison: `transfer_options`) and a compose
 call of that specialist. Inert until the orchestrator's `routing` block says `intents: true`.
+With the fast path (S10) the routes file also words the extra questions for the store
+(`fast_path:` block) and the question set holds 15 combined questions (`cb*`, two or three intents
+each); the composite's reply is written by the orchestrator (the entry profile). The glazed
+compose ships `AGENT_CORE_FAST_PATH=shadow` and intent threshold 0.7 (its benchmark is in the
+routes file header).
 
 ### Migrating from `AGENT_CORE_ADDON__HTTP_TOOL_BRIDGE__*` (D86)
 

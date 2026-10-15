@@ -21,6 +21,32 @@
 # RERUN (2026-10-15, L18, request_action added, 82 questions = 78 + 4 recorded from stress phase5):
 # 96% (100% committed, 23% abstention, router p50 80 ms / p95 124 ms); the same three synthetic
 # abstentions as before (ds01, to02, sg01); every recorded question passes.
+# FAST PATH (S10, Core's AGENT_CORE_FAST_PATH shadow|on): the same call also asks one yes/no question
+# per intent above, whether the message asks the copilot to DO something, whether it depends on the
+# recent conversation and how complex it is; Core turns two or more detected intents into ONE
+# composite of their plans. The questions below are worded for this store.
+# BENCHMARK (2026-10-15, P12, 97 questions = 82 + 15 combined, jev, one call per question): router
+# p50/p95 84/122 ms with every question asked (single question: 80/124 ms); route accuracy 89%
+# (the 15 combined questions are labelled pass and some commit to one of their intents); intent
+# sets at threshold 0.5: exact 70%, precision 72%, recall 95%; at 0.7 (the glazed compose value):
+# exact 77%, precision 86%, recall 84%, combined questions answered by an exact composite 7/17.
+# Misses: day_summary is under-detected inside combined questions ("¿Cómo voy hoy...?" 0.20) and
+# stockout_risk/active_issues ride along with expiring_items. Hence shadow first.
+fast_path:
+  intent_question: >-
+    A bakery store manager sent this message to the store copilot. Among the things it asks, does it
+    ask for this? {description}
+  action_question: >-
+    Does the store manager ask the copilot to CHANGE something - propose, place, prepare or approve
+    an order or a transfer, record an event, write down a note, reject a plan - rather than only
+    asking for information? Questions such as "what do I have to order?", "give me the summary" or
+    "tell me the alerts" only ask for information.
+  complexity_question: How much work does answering the store manager's message take?
+  complexity_levels:
+    - Look up figures or lists the store system already has (sales, orders, alerts, stock,
+      deliveries, staff, promotions), even several of them
+    - Compare or relate several figures to each other
+    - Give advice, a recommendation, a plan, a judgement or explain why something happened
 instructions: >-
   A bakery store manager sent this message to the store copilot. Which single option is it asking
   for? Choose none_of_these when it asks for advice, a recommendation or a proposal, needs two or

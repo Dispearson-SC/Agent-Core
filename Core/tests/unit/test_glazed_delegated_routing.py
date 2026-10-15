@@ -185,3 +185,43 @@ def test_the_rule_copied_here_is_the_glazed_deployments_own() -> None:
     shipped = parse_policy_rules(text, source="x")
     copied = parse_policy_rules(glazed.DEPLOYMENT_RULES, source="x")
     assert shipped == copied
+
+
+def test_with_the_fast_path_on_every_glazed_intent_can_join_a_delegated_composite() -> None:
+    """S10: all ten intents detected at once become one composite (the orchestrator may ask every
+    owner, each member delegated), so no glazed intent defers a composite for policy reasons."""
+    from agent_core.domain.fast_path import Assessment, FastPathMode, FastPathThresholds
+
+    intents = glazed.contributions().intents
+    use_case = RouteTurn(
+        routers=Router(
+            RouteDecision(
+                kind=RouteKind.PASS,
+                assessment=Assessment.of(
+                    dict.fromkeys(intents, 0.95), action=0.0, complexity=0.0
+                ),
+            )
+        ),
+        audit=Routes(),
+        profiles=glazed.served(glazed.CORE / "profiles"),
+        plans=intents,
+        peer_gate=route_peer_gate,
+        policy=GlazedPolicy(glazed.policy_rules()),  # type: ignore[arg-type]
+        fast_path=FastPathMode.ON,
+        thresholds=FastPathThresholds(max_intents=len(intents)),
+    )
+    request = TurnRequest(
+        session=SessionRef(session_id=SessionId("case-1"), tenant_id=TenantId("S030")),
+        caller=MANAGER,
+        profile_id=ORCHESTRATOR,
+        input=UserInput(text="todo"),
+    )
+
+    routed = asyncio.run(use_case.execute(TurnId("turn-1"), request))
+
+    assert routed.composite is not None, routed.record.fast_path
+    assert routed.request.caller == MANAGER, "the composite turn stays the manager's"
+    assert {m.intent: m.profile_id for m in routed.composite.members} == {
+        name: plan.profile_id for name, plan in intents.items()
+    }
+    assert all(m.hop == 1 for m in routed.composite.members)

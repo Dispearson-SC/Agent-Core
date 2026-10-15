@@ -27,7 +27,8 @@ def test_the_set_is_synthetic_sized_and_started_on_the_orchestrator() -> None:
 
     assert question_set.synthetic is True
     assert question_set.entry_profile == "glazed_orchestrator"
-    assert 60 <= len(question_set.questions) <= 90  # 78 synthetic + 4 recorded (L18)
+    # 78 synthetic + 4 recorded (L18) + 15 combined (S10)
+    assert 60 <= len(question_set.questions) <= 110
 
 
 def test_every_route_is_one_the_vertical_can_take_and_each_is_covered() -> None:
@@ -59,3 +60,20 @@ def test_the_offline_benchmark_runs_on_the_set(tmp_path: Path) -> None:
     assert report["question_set"] == "glazed_store_manager" and report["synthetic"] is True
     assert report["router"]["fallback_rate"] == 0
     assert report["router"]["accuracy"] > report["baseline"]["accuracy"]
+
+
+def test_at_least_fifteen_combined_questions_name_two_or_more_routable_intents() -> None:
+    """S10: questions that ask two things at once, labelled with their intent set; their single
+    route is `pass` (no one route answers both), and each intent is one the router asks about."""
+    question_set = load_question_set(QUESTIONS)
+    routes = yaml.safe_load((glazed.ADDON / "routing" / "system_one_routes.yaml").read_text())
+    routable = {
+        r["target"].removeprefix("intent:")
+        for r in routes["routes"]
+        if r["target"].startswith("intent:")
+    }
+    combined = [q for q in question_set.questions if len(q.expected_intents) >= 2]
+    assert len(combined) >= 15
+    assert all(q.expected == "pass" for q in combined)
+    assert all(set(q.expected_intents) <= routable for q in question_set.questions)
+
