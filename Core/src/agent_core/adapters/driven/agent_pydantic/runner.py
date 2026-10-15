@@ -1942,16 +1942,22 @@ class PydanticAgentRunner:
         """The handler that streams this turn's reply to the event feed (C26), or None.
 
         Only for a turn a person or a channel started (`request.owner is None`): a peer's text is
-        another agent's input and is never put on the feed. A RESUMED turn is not streamed: `resume`
-        has no request, so it cannot tell a person's turn from a peer's, and a turn that waited for
-        a human is not the voice path; its text is read from the turn as before."""
-        if self._reply_events is None or request.owner is not None:
+        another agent's input and is never put on the feed."""
+        return self._stream_for(turn_id, request.session, request.profile_id, request.owner)
+
+    def _stream_for(
+        self, turn_id: TurnId, session: SessionRef, agent: str, owner: PeerOwner | None
+    ) -> ReplyStreamHandler | None:
+        """`_reply_stream` for any run of the turn, its resumes included (L24): `owner` is the
+        turn's, so a person's turn resumed after its peers answered streams the reply it then
+        writes, and a peer's resumed turn stays off the feed like its first run."""
+        if self._reply_events is None or owner is not None:
             return None
         return ReplyStreamHandler(
             self._reply_events,
             turn_id=turn_id,
-            session=request.session,
-            agent=request.profile_id,
+            session=session,
+            agent=agent,
             clock=self._clock,
         )
 
@@ -2088,6 +2094,7 @@ class PydanticAgentRunner:
                 ),
                 usage_limits=self.usage_limits_for(profile),
                 model_settings=_as_model_settings(settings),
+                event_stream_handler=self._stream_for(turn_id, session, profile.id, owner),
             )
 
         try:

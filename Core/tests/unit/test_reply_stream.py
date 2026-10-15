@@ -17,12 +17,14 @@ import asyncio
 import json
 import random
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic_ai.messages import (
+    ModelRequest,
     ModelResponse,
     PartDeltaEvent,
     PartEndEvent,
@@ -30,6 +32,7 @@ from pydantic_ai.messages import (
     TextPart,
     TextPartDelta,
     ToolCallPart,
+    UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -56,6 +59,7 @@ from agent_core.domain.turn import (
     SessionId,
     SessionRef,
     TenantId,
+    ToolCallId,
     TurnId,
     TurnRequest,
     UserInput,
@@ -358,6 +362,56 @@ def test_a_peers_turn_is_not_streamed() -> None:
     runner = _runner(_words("Hello there. ", "Bye."), events)
 
     outcome = asyncio.run(runner.run(TurnId("peer-1"), _request(peer=True), PROFILE, None))
+
+    assert outcome.result is not None and outcome.result.text == "Hello there. Bye."
+    assert events.attempts == 0
+
+
+@dataclass
+class _Answer:
+    tool_call_id: ToolCallId
+    approved: bool
+    payload: object | None = None
+
+
+def _resume(runner: Any, *, peer: bool) -> Any:
+    """Resume a turn suspended on one external call (a peer ask) with that call's answer."""
+    history = [
+        ModelRequest(parts=[UserPromptPart("hi")]),
+        ModelResponse(parts=[ToolCallPart("ask_peer", {"q": "x"}, tool_call_id="call-1")]),
+    ]
+    return asyncio.run(
+        runner.resume(
+            TurnId("turn-1"),
+            PROFILE,
+            history,
+            (_Answer(ToolCallId("call-1"), True, "the peer's answer"),),
+            caller=CALLER,
+            session=SESSION,
+            owner=PeerOwner("root", "asker", "orch", "call-1") if peer else None,
+        )
+    )
+
+
+def test_a_persons_resumed_turn_streams_its_final_reply() -> None:
+    """L24: the reply an orchestrator writes after its peers answered is most of the wait of a
+    multi-agent turn (19-51 s live), and the person saw none of it until the turn finished."""
+    events = _Events()
+    runner = _runner(_words("Your order ships today. ", "It arrives tomorrow."), events)
+
+    outcome = _resume(runner, peer=False)
+
+    assert outcome.result is not None
+    assert "".join(d.text or "" for d in events.deltas) == outcome.result.text
+    assert {d.turn_id for d in events.deltas} == {"turn-1"}
+    assert all(d.owner is None and d.session_id == "s" for d in events.deltas)
+
+
+def test_a_peers_resumed_turn_is_not_streamed() -> None:
+    events = _Events()
+    runner = _runner(_words("Hello there. ", "Bye."), events)
+
+    outcome = _resume(runner, peer=True)
 
     assert outcome.result is not None and outcome.result.text == "Hello there. Bye."
     assert events.attempts == 0

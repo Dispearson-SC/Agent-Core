@@ -2279,9 +2279,8 @@ root turn's reply now travels over the C22 feed while the model writes it.
   reasoning/thinking parts and no tool output. Stored in a new nullable column, `turn_events.text`
   (migration `0040`, additive); every other kind keeps it NULL.
 - **Only a person's turn.** `request.owner is None`. A peer's text is another agent's input and is
-  never put on the feed; a RESUMED turn is not streamed either (resume has no request, so it cannot
-  tell the two apart, and a turn that waited for a human is not the voice path). Streaming a resumed
-  turn needs the owner to reach `resume`: a port change, deferred.
+  never put on the feed. A RESUMED turn streams by the same rule since D99 (`resume` now carries the
+  turn's `owner`), so the reply a person's turn writes after its peers answered reaches the feed.
 - **Snapshots carry the reply.** A subscriber that lagged or reconnected is handed `reply_text` (the
   reply so far) in the snapshot instead of the chunks it missed, the same collapse-to-newest rule
   as every other state (D53), so a slow voice client resumes mid-sentence correctly.
@@ -3479,7 +3478,7 @@ decision 2026-10-13) and are described by `addon.yaml`.
   answer on the `peer` channel. Glazed specialists cannot ask (max_hops 1 and the peer-channel
   `ask_peer` deny); a deployment that lets routed specialists ask in the background should not route.
 
-## D99 - Per-profile model settings (Phase 5, L24)
+## D99 - Per-profile model settings, and a person's resumed turn is streamed (Phase 5, L24)
 
 - **What.** A profile may declare `model_settings: {reasoning_effort: minimal|low|medium|high,
   max_tokens: <n>}` (both optional; `domain.model_routing.ModelTuning`). The runner sends them on
@@ -3496,6 +3495,10 @@ decision 2026-10-13) and are described by `addon.yaml`.
   with a log line, only while nothing of the run can have executed: a turn's first request, or a
   resume whose resolutions are all answers or refusals. A resume carrying a bare approval already
   ran that tool before its first request, so it is never asked again.
+- **Resumed turns stream.** `resume` received the turn's `owner` already; the reply stream is now
+  attached to it with the same rule as `run` (`owner is None`). Live, the orchestrator's reply
+  after `ask_peer` was 19-51 s of a multi-agent turn that the person saw nothing of. A peer's
+  resumed turn stays off the feed.
 - **Replay.** No workflow step changes: the pinned version stays `agent-core-turns.12`, no drain.
   A recovered step re-runs its model call with the profile it loads, as before.
 
