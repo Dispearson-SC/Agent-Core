@@ -439,3 +439,112 @@ def test_shadow_records_an_uncovered_message_but_runs_todays_route() -> None:
 
     assert routed.intent is not None and routed.intent.intent == "order_plan", "today's route"
     assert routes.records[0].fast_path == "pass:uncovered"
+
+
+# --- P14: a confident route that covers the one detected intent is kept --------------------------
+
+# One topic, said twice: the router's request count says two things (0.94), the yes/no values one
+# intent, and the route choice names the profile that owns that intent's plan.
+ONE_TOPIC_TWICE = Assessment.of(
+    {"day_summary": 0.93, "order_plan": 0.04},
+    action=0.06,
+    complexity=0.41,
+    requests=2,
+    request_levels=(0.06, 0.94, 0.0, 0.0),
+)
+
+
+def _sure_route(
+    profile: str = SALES, confidence: float = 1.0, assessment: Assessment = ONE_TOPIC_TWICE
+) -> RouteDecision:
+    return RouteDecision(
+        kind=RouteKind.ROUTE,
+        profile_id=profile,
+        label=profile,
+        confidence=confidence,
+        assessment=assessment,
+    )
+
+
+def test_on_a_sure_specialist_route_covering_the_one_intent_is_kept() -> None:
+    use_case, _, routes = _use_case(_sure_route(), FastPathMode.ON)
+
+    routed = _run(use_case)
+
+    assert routed.request.profile_id == SALES, "the router's own route, not the entry profile"
+    assert routed.composite is None
+    record = routes.records[0]
+    assert record.fast_path == "defer:route_covers" and record.outcome == "routed"
+    assert record.fast_path_intents == "day_summary"
+
+
+def test_shadow_and_off_run_the_same_turn_for_a_covering_route() -> None:
+    on, _, _ = _use_case(_sure_route(), FastPathMode.ON)
+    shadow, _, shadow_routes = _use_case(_sure_route(), FastPathMode.SHADOW)
+    off, _, off_routes = _use_case(_sure_route(), FastPathMode.OFF)
+
+    expected = _run(off).request
+    assert _run(shadow).request == expected == _run(on).request
+    assert shadow_routes.records[0].fast_path == "defer:route_covers"
+    assert off_routes.records[0].fast_path is None
+
+
+def test_on_a_route_that_does_not_cover_the_intent_still_passes_uncovered() -> None:
+    # STOCK owns order_plan, not day_summary: the second thing asked has no plan anywhere.
+    use_case, _, routes = _use_case(_sure_route(profile=STOCK), FastPathMode.ON)
+
+    routed = _run(use_case)
+
+    assert routed.request == _request(), "the entry profile, as the person"
+    assert routes.records[0].fast_path == "pass:uncovered"
+
+
+def test_on_an_unsure_covering_route_still_passes_uncovered() -> None:
+    use_case, _, routes = _use_case(_sure_route(confidence=0.85), FastPathMode.ON)
+
+    routed = _run(use_case)
+
+    assert routed.request == _request()
+    assert routes.records[0].fast_path == "pass:uncovered"
+
+
+def test_on_action_follow_up_and_complex_passes_never_keep_the_route() -> None:
+    cases = {
+        "pass:action_request": Assessment.of(
+            {"day_summary": 0.93}, action=0.9, complexity=0.1, requests=1
+        ),
+        "pass:complex": Assessment.of(
+            {"day_summary": 0.93}, action=0.02, complexity=0.9, requests=1
+        ),
+    }
+    for code, assessment in cases.items():
+        use_case, _, routes = _use_case(_sure_route(assessment=assessment), FastPathMode.ON)
+        assert _run(use_case).request == _request(), code
+        assert routes.records[0].fast_path == code
+    follow = Assessment.of(
+        {"day_summary": 0.93}, action=0.02, follow_up=0.9, complexity=0.1, requests=1
+    )
+    use_case, _, routes = _use_case(
+        _sure_route(assessment=follow), FastPathMode.ON, history=["person: hi"]
+    )
+    assert _run(use_case).request == _request()
+    assert routes.records[0].fast_path == "pass:depends_on_history"
+
+
+def test_on_a_sure_intent_route_choice_of_the_one_topic_is_its_composite() -> None:
+    # The live audit row of "is there data that does not add up?": route choice 1.0, count two.
+    decision = RouteDecision(
+        kind=RouteKind.INTENT,
+        label="day_summary",
+        intent="day_summary",
+        confidence=1.0,
+        assessment=ONE_TOPIC_TWICE,
+    )
+    use_case, _, routes = _use_case(decision, FastPathMode.ON)
+
+    routed = _run(use_case)
+
+    assert routed.composite is not None and routed.composite.intents == ("day_summary",)
+    assert routes.records[0].fast_path == "composite"
+    assert routes.records[0].assessment is not None
+    assert routes.records[0].assessment.endswith(";requests=2;request_levels=0.06,0.94,0.00,0.00")

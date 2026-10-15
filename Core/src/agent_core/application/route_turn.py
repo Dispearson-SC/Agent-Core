@@ -43,17 +43,20 @@ THE FAST PATH (S10, `domain/fast_path.py`)
     `fast_path` is the deployment's switch. OFF (the default) is everything above, unchanged: the
     router gets the request it always got. SHADOW and ON ask the router the extra questions
     (`RouteRequest.fast_path`), with the recent conversation when the session has one
-    (`recent_history`), so a follow-up IS sent to the router then; its verdict, the detected
-    intents and every answer are audited on the route row. SHADOW then does exactly what OFF would
-    have done (a follow-up is still not routed). ON applies the verdict: a `pass:*` runs the entry
-    profile as the person (`pass:uncovered` included: the message asks for more than the detected
-    intents, P13), a `composite` runs the plans of every detected intent and one compose
-    (`RunIntent.run_composite`), and a `defer:*` runs the logic above. A composite is built only
-    when the entry profile opted into intents and EVERY detected intent has a declared plan whose
-    owner is an allowed, startable target the entry profile may ask (the S8 guard, per owner);
-    otherwise it is `defer:<intent>:<reason>`. The composite turn stays the person's turn on the
-    entry profile; each member records the hop its calls run delegated at. Like a route, it is
-    applied only once its audit row is written.
+    (`recent_history`), so a follow-up IS sent to the router then; its verdict, the detected intents
+    and every answer are audited on the route row. SHADOW then does exactly what OFF would have done
+    (a follow-up is still not routed). ON applies the verdict: a `pass:*` runs the entry profile as
+    the person (`pass:uncovered` included: the message asks for more than the detected intents,
+    P13), except that a pass other than an action, a follow-up or a complex message whose route
+    choice is sure (`route_covers`) of the specialist owning the one detected intent's plan becomes
+    `defer:route_covers` and the router's own route runs (P14: the request count said two things for
+    one topic said twice, and the turn lost its specialist), a `composite` runs the plans of every
+    detected intent and one compose (`RunIntent.run_composite`), and a `defer:*` runs the logic
+    above. A composite is built only when the entry profile opted into intents and EVERY detected
+    intent has a declared plan whose owner is an allowed, startable target the entry profile may ask
+    (the S8 guard, per owner); otherwise it is `defer:<intent>:<reason>`. The composite turn stays
+    the person's turn on the entry profile; each member records the hop its calls run delegated at.
+    Like a route, it is applied only once its audit row is written.
 """
 
 from __future__ import annotations
@@ -65,6 +68,9 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 
 from agent_core.domain.fast_path import (
+    PASS_ACTION,
+    PASS_COMPLEX,
+    PASS_FOLLOW_UP,
     Assessment,
     CompositeCall,
     CompositeMember,
@@ -137,6 +143,12 @@ DEFAULT_ROUTER_TIMEOUT_MS = 1500
 MAX_AUDIT_TEXT = 200
 # S10. The longest fast path summary (every answer with its value) and intent list on that row.
 MAX_ASSESSMENT_TEXT = 2000
+
+DEFER_ROUTE_COVERS = "defer:route_covers"
+"""P14. A pass whose sure route choice covers the one detected intent: the router's route runs."""
+
+# The passes the entry profile must answer whatever the route choice said.
+_ENTRY_PASSES = frozenset({PASS_ACTION, PASS_FOLLOW_UP, PASS_COMPLEX})
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,6 +390,8 @@ class RouteTurn:
         verdict = decide_fast_path(
             assessment, self._thresholds, has_history=continued, routed=routed
         )
+        if self._route_covers(verdict, decision):
+            return FastPathVerdict(DEFER_ROUTE_COVERS, verdict.intents), ()
         if not verdict.composite:
             return verdict, ()
         if not policy.intents or self._owners is None:
@@ -406,6 +420,27 @@ class RouteTurn:
                 return FastPathVerdict(_bounded(code) or "", verdict.intents), ()
             members.append(CompositeMember(intent, owner, hop))
         return verdict, tuple(members)
+
+    def _route_covers(self, verdict: FastPathVerdict, decision: RouteDecision) -> bool:
+        """P14. Whether a pass keeps the router's own decision: the route choice is sure (at or
+        above `route_covers`) of a target that covers the one detected intent, and the pass is not
+        one the entry profile must reason about (an action, a follow-up, a complex message). The
+        domain already turns a sure INTENT choice of that intent into its composite, so this is the
+        specialist route that owns the intent's plan."""
+        if (
+            not verdict.passes
+            or verdict.code in _ENTRY_PASSES
+            or len(verdict.intents) != 1
+            or decision.confidence is None
+            or decision.confidence < self._thresholds.route_covers
+        ):
+            return False
+        owner = None if self._owners is None else self._owners.get(verdict.intents[0])
+        return (
+            decision.kind is RouteKind.ROUTE
+            and owner is not None
+            and owner == decision.profile_id
+        )
 
     async def _follow_up(self, turn_id: TurnId, request: TurnRequest) -> str | None:
         """`follow_up` when the session already holds another turn, an error reason when that
