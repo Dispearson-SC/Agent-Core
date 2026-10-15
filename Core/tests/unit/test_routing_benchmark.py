@@ -599,7 +599,7 @@ def test_the_report_carries_the_intent_set_metrics(tmp_path: Path) -> None:
     assert report["router"]["verdicts"][0]["intents"] == ["a", "b"]
     assert report["router"]["verdicts"][0]["assessment"] == {
         "intents": {"a": 0.9, "b": 0.8, "c": 0.1}, "action": 0.01, "follow_up": None,
-        "complexity": 0.1, "requests": None,
+        "complexity": 0.1, "requests": None, "request_levels": None,
     }, "every raw value, so thresholds can be tuned from one run"  # fmt: skip
     markdown = markdown_path.read_text(encoding="utf-8")
     assert "| intent set exact match | - | 50% |" in markdown
@@ -680,3 +680,65 @@ def test_the_report_carries_the_request_count_per_intent_recall_and_combined_com
     markdown = markdown_path.read_text(encoding="utf-8")
     assert "| recall per intent | - | a 100% |" in markdown
     assert "| combined questions answered by an exact composite | - | 0 / 0 |" in markdown
+
+
+# --- P14: single-topic questions the coverage guard sends away, coverage questions it keeps -------
+
+
+def test_single_intent_questions_passed_uncovered_and_coverage_composites_are_counted() -> None:
+    run = _run_of(
+        # One topic, one expected route: the guard must not send it to the entry profile.
+        Verdict("s1", "intent:a", "intent:a", "answered", expected_intents=("a",),
+                intents=("a",), fast_path="pass:uncovered"),
+        Verdict("s2", "intent:b", "intent:b", "answered", expected_intents=("b",),
+                intents=("b",), fast_path="composite"),
+        Verdict("s3", "profile:x", "profile:x", "answered", expected_intents=("a",),
+                intents=("a",), fast_path="defer:route_covers"),
+        # A coverage question: one planned intent plus a part no plan answers (expected pass).
+        Verdict("c1", "pass", "pass", "abstained", expected_intents=("a",),
+                intents=("a",), fast_path="pass:uncovered"),
+        Verdict("c2", "pass", "intent:a", "answered", expected_intents=("a",),
+                intents=("a",), fast_path="composite"),
+        # A combined question (expected pass, two intents) is not a coverage question.
+        Verdict("m1", "pass", "pass", "abstained", expected_intents=("a", "b"),
+                intents=("a", "b"), fast_path="composite"),
+        # Not assessed: not counted.
+        Verdict("s4", "intent:a", "intent:a", "answered", expected_intents=("a",)),
+    )  # fmt: skip
+    assert run.single_intent_uncovered == (1, 3)
+    assert run.coverage_composites == (1, 2)
+
+
+def test_the_report_carries_the_route_confidence_levels_and_p14_counts(tmp_path: Path) -> None:
+    verdict = Verdict(
+        "s1", "intent:a", "intent:a", "answered", expected_intents=("a",), intents=("a",),
+        fast_path="composite", confidence=0.97,
+        assessment=Assessment.of({"a": 0.9}, action=0.0, complexity=0.0, requests=2,
+                                 request_levels=(0.13, 0.87)),
+    )  # fmt: skip
+    comparison = RoutingComparison(
+        question_set="s", synthetic=True, questions=1, started_at="t",
+        baseline=RoutingRun("baseline", "off", (Verdict("s1", "intent:a", "pass", "off"),)),
+        routed=_run_of(verdict),
+    )  # fmt: skip
+    json_path, markdown_path = write_routing_report(comparison, tmp_path)
+    report = json.loads(json_path.read_text(encoding="utf-8"))["router"]
+    assert report["verdicts"][0]["confidence"] == 0.97
+    assert report["verdicts"][0]["assessment"]["request_levels"] == [0.13, 0.87]
+    assert report["single_intent_uncovered"] == [0, 1]
+    assert report["coverage_composites"] == [0, 0]
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "| single-intent questions passed uncovered | - | 0 / 1 |" in markdown
+    assert "| coverage questions answered by a composite | - | 0 / 0 |" in markdown
+
+
+def test_the_benchmark_records_the_route_choice_confidence() -> None:
+    question_set = QuestionSet(
+        name="s", synthetic=True, entry_profile="f",
+        questions=(Question("q1", "a?", "intent:a"),),
+    )  # fmt: skip
+    routed = asyncio.run(
+        run_routing(question_set, router=ChoosingRouter(), router_name="jev",
+                    clock=FakeClock(), fast_path=True)
+    ).routed  # fmt: skip
+    assert routed.verdicts[0].confidence == 0.9

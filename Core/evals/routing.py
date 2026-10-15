@@ -32,6 +32,12 @@ questions in the same call):
                              never detected hides inside the micro average),
     combined composites      of the questions expecting two or more intents, how many the fast
                              path would answer as a composite of exactly that set (P13),
+    single-intent uncovered  of the assessed questions expecting one intent and a route (not a
+                             pass), how many the coverage guard passed to the entry profile
+                             (`pass:uncovered`, P14: each one loses its plan or specialist),
+    coverage composites      of the assessed questions expecting a pass with exactly one intent
+                             (one planned part and one no plan answers), how many the fast path
+                             would answer as a composite (P14: each one drops a part),
     fast path verdicts       how many questions each verdict got (`domain/fast_path.py`, no
                              history, the default thresholds but the intent one),
 
@@ -81,6 +87,7 @@ import yaml
 
 from agent_core.domain.fast_path import (
     COMPOSITE,
+    PASS_UNCOVERED,
     Assessment,
     FastPathThresholds,
     decide_fast_path,
@@ -381,6 +388,8 @@ class Verdict:
     fast_path: str | None = None
     # S10. Every raw answer of the assessment (None: none), so thresholds tune from one run.
     assessment: Assessment | None = None
+    # P14. The route choice's confidence (None: no answer), which the coverage guard reads.
+    confidence: float | None = None
 
     @property
     def correct(self) -> bool:
@@ -477,6 +486,22 @@ class RoutingRun:
         return hits, len(combined)
 
     @property
+    def single_intent_uncovered(self) -> tuple[int, int]:
+        """P14. (passed uncovered, assessed questions expecting one intent and a route)."""
+        single = [
+            v for v in self._assessed() if len(set(v.expected_intents)) == 1 and v.expected != PASS
+        ]
+        return sum(1 for v in single if v.fast_path == PASS_UNCOVERED), len(single)
+
+    @property
+    def coverage_composites(self) -> tuple[int, int]:
+        """P14. (composites, assessed questions expecting a pass with exactly one intent)."""
+        coverage = [
+            v for v in self._assessed() if len(set(v.expected_intents)) == 1 and v.expected == PASS
+        ]
+        return sum(1 for v in coverage if v.fast_path == COMPOSITE), len(coverage)
+
+    @property
     def intent_recall_by_intent(self) -> dict[str, float]:
         """P13. For each intent some question expects: the share of those questions detecting it."""
         expected: Counter[str] = Counter()
@@ -555,7 +580,7 @@ async def _verdict(
     clock: Callable[[], float],
     fast_path: FastPathThresholds | None = None,
 ) -> Verdict:
-    got, outcome, router_ms = PASS, "off", None
+    got, outcome, router_ms, confidence = PASS, "off", None, None
     detected: tuple[str, ...] | None = None
     verdict: str | None = None
     assessment: Assessment | None = None
@@ -577,6 +602,7 @@ async def _verdict(
         else:
             got = route_of(decision)
             outcome = "abstained" if got == PASS else "answered"
+            confidence = decision.confidence
             if fast_path is not None and decision.assessment is not None:
                 assessment = decision.assessment
                 routed = (
@@ -612,6 +638,7 @@ async def _verdict(
         detected,
         verdict,
         assessment,
+        confidence,
     )
 
 
@@ -676,6 +703,8 @@ def _run_json(run: RoutingRun) -> dict[str, Any]:
         "intent_recall": run.intent_recall,
         "intent_recall_by_intent": run.intent_recall_by_intent,
         "combined_composites": list(run.combined_composites),
+        "single_intent_uncovered": list(run.single_intent_uncovered),
+        "coverage_composites": list(run.coverage_composites),
         "fast_path_verdicts": run.fast_path_verdicts,
         "confusion": [
             {"expected": expected, "got": got, "count": count}
@@ -694,6 +723,7 @@ def _run_json(run: RoutingRun) -> dict[str, Any]:
                 "expected_intents": list(v.expected_intents),
                 "intents": None if v.intents is None else list(v.intents),
                 "fast_path": v.fast_path,
+                "confidence": v.confidence,
                 "assessment": _assessment_json(v.assessment),
             }
             for v in run.verdicts
@@ -710,6 +740,9 @@ def _assessment_json(assessment: Assessment | None) -> dict[str, Any] | None:
         "follow_up": assessment.follow_up,
         "complexity": assessment.complexity,
         "requests": assessment.requests,
+        "request_levels": None
+        if assessment.request_levels is None
+        else list(assessment.request_levels),
     }
 
 
@@ -771,6 +804,10 @@ def render_routing_markdown(comparison: RoutingComparison) -> str:
             + " |",
             "| combined questions answered by an exact composite | - | "
             f"{routed.combined_composites[0]} / {routed.combined_composites[1]} |",
+            "| single-intent questions passed uncovered | - | "
+            f"{routed.single_intent_uncovered[0]} / {routed.single_intent_uncovered[1]} |",
+            "| coverage questions answered by a composite | - | "
+            f"{routed.coverage_composites[0]} / {routed.coverage_composites[1]} |",
             "| fast path verdicts | - | "
             + ", ".join(f"{k} {n}" for k, n in routed.fast_path_verdicts.items())
             + " |",
