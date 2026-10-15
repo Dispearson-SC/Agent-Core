@@ -277,18 +277,20 @@ class StartTurnBody(BaseModel):
     text: str = ""
 
 
-# What a poll can say about a turn. Three answers, not two, and the third one is the
+# What a poll can say about a turn. Not two answers, and `running` is the
 # reason this is not just `TurnOutcome | None`:
 #
 #   running   started, nothing stored yet
 #   waiting   suspended on a human or a peer
 #   finished  the answer is here
+#   failed    a ROUTED turn that died before its row was written (slice 39; composition's
+#             `_TURN_LOOKUP_SQL`): without it such a turn read as running for ever
 #
 # `TurnOutcome` cannot express "running": it is SUSPENDED or FINISHED by construction (I2),
 # so a lookup that returned it would have to answer None for a turn that is merely working
 # - indistinguishable from a turn id that does not exist. One of those is 200 and the other
 # is 404, and collapsing them makes a live turn look like a typo.
-TurnStatus = Literal["running", "waiting", "finished"]
+TurnStatus = Literal["running", "waiting", "finished", "failed"]
 
 
 @dataclass(frozen=True, slots=True)

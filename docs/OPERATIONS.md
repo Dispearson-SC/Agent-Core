@@ -211,7 +211,11 @@ runs the normal path with `fallback_reason = 'timeout'`.
 
 A routed turn is visible from its route on: `GET /turns/{id}` answers `running` (and `/events` streams)
 as soon as the route step recorded its `routed` event, although an intent plan writes the turn's
-row only together with its reply.
+row only together with its reply. It is not shown running for ever: with still no row, a turn whose
+workflow recorded `failed`, or whose route is older than 15 minutes
+(`ROUTED_TURN_ROW_MAX_AGE_SECONDS`), answers `failed` - a status `GET /turns/{id}` gives only
+there. Once the row exists (DBOS recovered the workflow) the row answers again. The CLI console's
+durable poll does not know `failed` and waits out its timeout.
 
 An intent plan's reply is ONE tool-less model call (the compose). It is bounded per deployment:
 `AGENT_CORE_COMPOSE_MAX_TOKENS` (default 4096, reasoning included on providers that count it there)

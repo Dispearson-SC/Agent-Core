@@ -1903,11 +1903,22 @@ _TURN_STATE_STARTED = "started"
 _TURN_STATE_SUSPENDED = "suspended"
 _TURN_STATE_FINISHED = "finished"
 
+# Not a `turns.state`: what the lookup below answers for a routed turn that died before its row.
+_ROUTED_TURN_FAILED = "routed_failed"
+
 _TURN_LOOKUP_STATUS: dict[str, TurnStatus] = {
     _TURN_STATE_STARTED: "running",
     _TURN_STATE_SUSPENDED: "waiting",
     _TURN_STATE_FINISHED: "finished",
+    _ROUTED_TURN_FAILED: "failed",
 }
+
+# Slice 39. How long a routed turn may go without its row before the lookup calls it failed. A
+# routed turn writes its row at its start (a route to a profile, a fallback) or with its reply (an
+# intent plan: read-only calls and one bounded compose, seconds to a couple of minutes), so a route
+# this old with still no row belongs to a process that died before writing it. Should DBOS recover
+# the workflow later, its row appears and answers again.
+ROUTED_TURN_ROW_MAX_AGE_SECONDS: Final = 900
 
 # THE TENANT PREDICATE IS INSIDE THE QUERY, NOT APPLIED AFTER IT - `routes.py`'s own
 # `TurnLookup` comment states the rule: a turn id names a conversation, ids leak (logs,
@@ -1922,14 +1933,29 @@ _TURN_LOOKUP_STATUS: dict[str, TurnStatus] = {
 # route step records a `routed` event for the turn in its tenant first; with no row yet that event
 # reads as `started` (running). Still tenant-scoped inside the query, still 404 for an id nobody
 # routed.
-_TURN_LOOKUP_SQL = """
+#
+# Slice 39. NOT RUNNING FOR EVER. A routed turn whose workflow failed before its row (its `failed`
+# event, `_drive_turn`) or whose route is older than `ROUTED_TURN_ROW_MAX_AGE_SECONDS` with still no
+# row reads as `failed`, never as a turn that is still working. The age is the DATABASE's clock.
+_TURN_LOOKUP_SQL = f"""
     SELECT state, result
     FROM turns
     WHERE turn_id = %(turn)s AND tenant_id = %(tenant)s
     UNION ALL
-    SELECT 'started', NULL::jsonb
-    FROM turn_events
-    WHERE turn_id = %(turn)s::text AND tenant_id = %(tenant)s AND kind = 'routed'
+    SELECT CASE
+             WHEN routed.at < now() - make_interval(secs => %(max_age)s)
+               OR EXISTS (
+                 SELECT 1 FROM turn_events failed
+                 WHERE failed.turn_id = %(turn)s::text AND failed.tenant_id = %(tenant)s
+                   AND failed.kind = 'failed'
+               )
+             THEN '{_ROUTED_TURN_FAILED}'
+             ELSE 'started'
+           END,
+           NULL::jsonb
+    FROM turn_events routed
+    WHERE routed.turn_id = %(turn)s::text AND routed.tenant_id = %(tenant)s
+      AND routed.kind = 'routed'
       AND NOT EXISTS (SELECT 1 FROM turns WHERE turn_id = %(turn)s AND tenant_id = %(tenant)s)
     LIMIT 1
 """
@@ -1940,7 +1966,12 @@ def _turn_lookup_sync(
 ) -> tuple[str, object | None] | None:
     with psycopg.connect(conninfo) as conn:
         row = conn.execute(
-            _TURN_LOOKUP_SQL, {"turn": str(turn_id), "tenant": str(tenant_id)}
+            _TURN_LOOKUP_SQL,
+            {
+                "turn": str(turn_id),
+                "tenant": str(tenant_id),
+                "max_age": ROUTED_TURN_ROW_MAX_AGE_SECONDS,
+            },
         ).fetchone()
     return None if row is None else (row[0], row[1])
 

@@ -9,6 +9,10 @@ WHAT IS BEING DEFENDED
     2. A turn whose route was recorded (its `routed` event) but whose row is not written yet (an
        intent plan persists the turn only with its reply) reads as running, in its tenant only;
        once the row exists the row answers.
+    3. Such a turn does not read as running for ever (slice 39): once its workflow recorded a
+       `failed` event, or its route is older than the routed-turn age bound with still no row
+       (the process died before the row and nothing recovered it), it reads as `failed`. A row,
+       once written, answers instead.
 """
 
 from __future__ import annotations
@@ -61,11 +65,14 @@ def test_a_session_with_another_turn_of_its_tenant_has_history() -> None:
     assert asyncio.run(has_history(_session("s3"), TurnId(CURRENT))) is False
 
 
-def _routed_event(conn: Any, turn_id: str, tenant: str) -> None:
+def _routed_event(
+    conn: Any, turn_id: str, tenant: str, kind: str = "routed", age: str = "0"
+) -> None:
     conn.execute(
         "INSERT INTO turn_events (event_id, tenant_id, session_id, turn_id, root_turn_id, kind, "
-        "agent, detail, at) VALUES (%s, %s, 's9', %s, %s, 'routed', 'owner', 'routed', now())",
-        (f"{turn_id}:routed", tenant, turn_id, turn_id),
+        "agent, detail, at) VALUES (%s, %s, 's9', %s, %s, %s, 'owner', %s, "
+        "now() - %s::interval)",
+        (f"{turn_id}:{kind}", tenant, turn_id, turn_id, kind, kind, f"{age} seconds"),
     )
 
 
@@ -89,3 +96,47 @@ def test_a_routed_turn_without_its_row_yet_reads_as_running_in_its_tenant_only()
         )
     view = asyncio.run(lookup(TurnId(PLANNED), person))
     assert view is not None and (view.status, view.text) == ("finished", "done")
+
+
+PERSON = CallerIdentity("manager-7", "shop", TenantId("t"))
+
+
+def test_a_routed_turn_whose_workflow_failed_before_its_row_reads_as_failed() -> None:
+    asyncio.run(w.fresh_databases(_DATABASE))
+    with _connect() as conn:
+        _routed_event(conn, PLANNED, "t")
+        _routed_event(conn, PLANNED, "t", kind="failed")
+        _routed_event(conn, EARLIER, "other", kind="failed")  # another tenant's failure
+        _routed_event(conn, EARLIER, "t")
+    lookup = composition._pg_turn_lookup(w.conninfo(_DATABASE))  # noqa: SLF001
+
+    view = asyncio.run(lookup(TurnId(PLANNED), PERSON))
+    assert view is not None and (view.status, view.text) == ("failed", None)
+    view = asyncio.run(lookup(TurnId(EARLIER), PERSON))
+    assert view is not None and view.status == "running", "a failure of another tenant"
+
+
+def test_a_routed_turn_still_without_its_row_past_the_age_bound_reads_as_failed() -> None:
+    asyncio.run(w.fresh_databases(_DATABASE))
+    bound = composition.ROUTED_TURN_ROW_MAX_AGE_SECONDS
+    with _connect() as conn:
+        _routed_event(conn, PLANNED, "t", age=str(bound + 60))
+        _routed_event(conn, EARLIER, "t", age=str(bound - 60))
+    lookup = composition._pg_turn_lookup(w.conninfo(_DATABASE))  # noqa: SLF001
+
+    view = asyncio.run(lookup(TurnId(PLANNED), PERSON))
+    assert view is not None and view.status == "failed"
+    view = asyncio.run(lookup(TurnId(EARLIER), PERSON))
+    assert view is not None and view.status == "running", "younger than the bound"
+
+
+def test_once_the_row_exists_it_answers_even_after_a_failed_or_old_route() -> None:
+    asyncio.run(w.fresh_databases(_DATABASE))
+    with _connect() as conn:
+        _routed_event(conn, PLANNED, "t", age="100000")
+        _routed_event(conn, PLANNED, "t", kind="failed")
+        _turn(conn, PLANNED, "s9", "t", "started")
+    lookup = composition._pg_turn_lookup(w.conninfo(_DATABASE))  # noqa: SLF001
+
+    view = asyncio.run(lookup(TurnId(PLANNED), PERSON))
+    assert view is not None and view.status == "running"
