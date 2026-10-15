@@ -23,9 +23,15 @@ and with the fast path (S10, `run_routing(..., fast_path=True)`, the router aske
 questions in the same call):
 
     intent set exact match   share of the assessed questions whose detected intents (at or above
-                             the intent threshold) equal the expected set,
+                             the intent threshold, or the route choice's own intent at or above
+                             the route threshold, as production decides) equal the expected set
+                             (as sets: the order either side lists them in does not matter),
     combined set match       the same over the questions expecting two or more intents,
     intent precision/recall  micro-averaged over every (question, intent) pair,
+    recall per intent        that recall for each expected intent alone (P13: one intent that is
+                             never detected hides inside the micro average),
+    combined composites      of the questions expecting two or more intents, how many the fast
+                             path would answer as a composite of exactly that set (P13),
     fast path verdicts       how many questions each verdict got (`domain/fast_path.py`, no
                              history, the default thresholds but the intent one),
 
@@ -73,7 +79,12 @@ from typing import Any, Final, Protocol
 
 import yaml
 
-from agent_core.domain.fast_path import Assessment, FastPathThresholds, decide_fast_path
+from agent_core.domain.fast_path import (
+    COMPOSITE,
+    Assessment,
+    FastPathThresholds,
+    decide_fast_path,
+)
 from agent_core.domain.routing import RouteDecision, RouteKind, RouteRequest
 from agent_core.ports.turn_router import TurnRouter
 
@@ -376,6 +387,10 @@ class Verdict:
         return self.expected == self.got
 
 
+def _same_set(verdict: Verdict) -> bool:
+    return set(verdict.intents or ()) == set(verdict.expected_intents)
+
+
 def percentile(values: Sequence[float], q: float) -> float | None:
     """The nearest-rank `q`-th percentile (0 < q <= 100) of `values`; None when empty."""
     if not values:
@@ -441,15 +456,36 @@ class RoutingRun:
         assessed = self._assessed()
         if not assessed:
             return None
-        return sum(1 for v in assessed if v.intents == v.expected_intents) / len(assessed)
+        return sum(1 for v in assessed if _same_set(v)) / len(assessed)
+
+    def _combined(self) -> list[Verdict]:
+        return [v for v in self._assessed() if len(set(v.expected_intents)) >= 2]
 
     @property
     def combined_set_accuracy(self) -> float | None:
         """S10. `intent_set_accuracy` over the questions expecting two or more intents."""
-        combined = [v for v in self._assessed() if len(v.expected_intents) >= 2]
+        combined = self._combined()
         if not combined:
             return None
-        return sum(1 for v in combined if v.intents == v.expected_intents) / len(combined)
+        return sum(1 for v in combined if _same_set(v)) / len(combined)
+
+    @property
+    def combined_composites(self) -> tuple[int, int]:
+        """P13. (composites of exactly the expected set, questions expecting two or more)."""
+        combined = self._combined()
+        hits = sum(1 for v in combined if v.fast_path == COMPOSITE and _same_set(v))
+        return hits, len(combined)
+
+    @property
+    def intent_recall_by_intent(self) -> dict[str, float]:
+        """P13. For each intent some question expects: the share of those questions detecting it."""
+        expected: Counter[str] = Counter()
+        found: Counter[str] = Counter()
+        for v in self._assessed():
+            for name in set(v.expected_intents):
+                expected[name] += 1
+                found[name] += name in (v.intents or ())
+        return {name: found[name] / expected[name] for name in sorted(expected)}
 
     def _pairs(self) -> tuple[int, int, int]:
         true_positive = predicted = expected = 0
@@ -543,7 +579,16 @@ async def _verdict(
             outcome = "abstained" if got == PASS else "answered"
             if fast_path is not None and decision.assessment is not None:
                 assessment = decision.assessment
-                decided = decide_fast_path(assessment, fast_path, has_history=False)
+                routed = (
+                    (decision.intent, decision.confidence)
+                    if decision.kind is RouteKind.INTENT
+                    and decision.intent
+                    and decision.confidence is not None
+                    else None
+                )
+                decided = decide_fast_path(
+                    assessment, fast_path, has_history=False, routed=routed
+                )
                 detected, verdict = decided.intents, decided.code
         router_ms = (clock() - started) * 1000
     turn_ms, turn_error, plan = None, None, None
@@ -629,6 +674,8 @@ def _run_json(run: RoutingRun) -> dict[str, Any]:
         "combined_set_accuracy": run.combined_set_accuracy,
         "intent_precision": run.intent_precision,
         "intent_recall": run.intent_recall,
+        "intent_recall_by_intent": run.intent_recall_by_intent,
+        "combined_composites": list(run.combined_composites),
         "fast_path_verdicts": run.fast_path_verdicts,
         "confusion": [
             {"expected": expected, "got": got, "count": count}
@@ -662,6 +709,7 @@ def _assessment_json(assessment: Assessment | None) -> dict[str, Any] | None:
         "action": assessment.action,
         "follow_up": assessment.follow_up,
         "complexity": assessment.complexity,
+        "requests": assessment.requests,
     }
 
 
@@ -718,6 +766,11 @@ def render_routing_markdown(comparison: RoutingComparison) -> str:
             f"| combined set match (2+ intents) | - | {_pct(routed.combined_set_accuracy)} |",
             f"| intent precision / recall | - | {_pct(routed.intent_precision)} / "
             f"{_pct(routed.intent_recall)} |",
+            "| recall per intent | - | "
+            + ", ".join(f"{k} {_pct(n)}" for k, n in routed.intent_recall_by_intent.items())
+            + " |",
+            "| combined questions answered by an exact composite | - | "
+            f"{routed.combined_composites[0]} / {routed.combined_composites[1]} |",
             "| fast path verdicts | - | "
             + ", ".join(f"{k} {n}" for k, n in routed.fast_path_verdicts.items())
             + " |",
@@ -739,7 +792,7 @@ def render_routing_markdown(comparison: RoutingComparison) -> str:
             f"- {v.question_id}: expected {v.expected}, got {v.got} ({v.outcome})" for v in wrong
         )
     missed = [
-        v for v in routed.verdicts if v.intents is not None and v.intents != v.expected_intents
+        v for v in routed.verdicts if v.intents is not None and not _same_set(v)
     ]
     if missed:
         lines += ["", "## Intent sets that differ (fast path)", ""]

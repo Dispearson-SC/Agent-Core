@@ -26,6 +26,8 @@ from evals.routing import (
     QuestionSet,
     QuestionSetError,
     RoutingComparison,
+    RoutingRun,
+    Verdict,
     load_question_set,
     parse_route,
     percentile,
@@ -597,8 +599,84 @@ def test_the_report_carries_the_intent_set_metrics(tmp_path: Path) -> None:
     assert report["router"]["verdicts"][0]["intents"] == ["a", "b"]
     assert report["router"]["verdicts"][0]["assessment"] == {
         "intents": {"a": 0.9, "b": 0.8, "c": 0.1}, "action": 0.01, "follow_up": None,
-        "complexity": 0.1,
+        "complexity": 0.1, "requests": None,
     }, "every raw value, so thresholds can be tuned from one run"  # fmt: skip
     markdown = markdown_path.read_text(encoding="utf-8")
     assert "| intent set exact match | - | 50% |" in markdown
     assert "| intent precision / recall | - | 80% / 80% |" in markdown
+
+
+# --- P13: order-independent sets, the route choice signal, the coverage guard, per-intent recall --
+
+
+def _run_of(*verdicts: Verdict) -> RoutingRun:
+    return RoutingRun("router", "jev", verdicts)
+
+
+def test_an_intent_set_matches_whatever_order_either_side_lists_it_in() -> None:
+    run = _run_of(
+        Verdict("q1", "pass", "pass", "abstained", expected_intents=("b", "a"), intents=("a", "b")),
+        Verdict("q2", "pass", "pass", "abstained", expected_intents=("a", "b"), intents=("b", "a")),
+    )
+    assert run.intent_set_accuracy == 1.0
+    assert run.combined_set_accuracy == 1.0
+
+
+def test_recall_is_reported_per_intent_and_combined_composites_are_counted() -> None:
+    run = _run_of(
+        Verdict("q1", "pass", "pass", "abstained", expected_intents=("a", "b"),
+                intents=("a", "b"), fast_path="composite"),
+        Verdict("q2", "pass", "pass", "abstained", expected_intents=("a", "b"),
+                intents=("a",), fast_path="pass:uncovered"),
+        Verdict("q3", "pass", "pass", "abstained", expected_intents=("a", "b"),
+                intents=("a", "b"), fast_path="pass:complex"),
+        Verdict("q4", "intent:b", "intent:b", "answered", expected_intents=("b",),
+                intents=(), fast_path="defer:no_intent"),
+    )  # fmt: skip
+    assert run.intent_recall_by_intent == {"a": 1.0, "b": pytest.approx(2 / 4)}
+    assert run.combined_composites == (1, 3), "composite AND the exact set, of the combined"
+    assert run.fast_path_verdicts["pass:uncovered"] == 1
+
+
+class ChoosingRouter:
+    """Routes every question to intent `a` at 0.9 while its yes/no for `a` is low."""
+
+    async def route(self, router: str, request: RouteRequest) -> RouteDecision:
+        return RouteDecision(
+            kind=RouteKind.INTENT, intent="a", label="a", confidence=0.9,
+            assessment=Assessment.of({"a": 0.2}, action=0.01, complexity=0.1, requests=1),
+        )  # fmt: skip
+
+
+def test_the_benchmark_counts_a_confident_route_choice_as_detected_like_production() -> None:
+    question_set = QuestionSet(
+        name="s", synthetic=True, entry_profile="f",
+        questions=(Question("q1", "a?", "intent:a"),),
+    )  # fmt: skip
+    routed = asyncio.run(
+        run_routing(question_set, router=ChoosingRouter(), router_name="jev",
+                    clock=FakeClock(), fast_path=True)
+    ).routed  # fmt: skip
+    assert routed.verdicts[0].intents == ("a",)
+    assert routed.verdicts[0].fast_path == "composite"
+
+
+def test_the_report_carries_the_request_count_per_intent_recall_and_combined_composites(
+    tmp_path: Path,
+) -> None:
+    question_set = QuestionSet(
+        name="s", synthetic=True, entry_profile="f",
+        questions=(Question("q1", "a?", "intent:a"),),
+    )  # fmt: skip
+    comparison = asyncio.run(
+        run_routing(question_set, router=ChoosingRouter(), router_name="jev",
+                    clock=FakeClock(), fast_path=True)
+    )  # fmt: skip
+    json_path, markdown_path = write_routing_report(comparison, tmp_path)
+    report = json.loads(json_path.read_text(encoding="utf-8"))
+    assert report["router"]["verdicts"][0]["assessment"]["requests"] == 1
+    assert report["router"]["intent_recall_by_intent"] == {"a": 1.0}
+    assert report["router"]["combined_composites"] == [0, 0]
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "| recall per intent | - | a 100% |" in markdown
+    assert "| combined questions answered by an exact composite | - | 0 / 0 |" in markdown
