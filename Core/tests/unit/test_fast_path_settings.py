@@ -131,3 +131,21 @@ def test_the_route_choice_threshold_is_read_from_the_environment_and_checked() -
     assert fast_path_thresholds_for(_settings()).route_intent == 0.7
     with pytest.raises(ValueError, match="AGENT_CORE_FAST_PATH_ROUTE_THRESHOLD"):
         _settings(AGENT_CORE_FAST_PATH_ROUTE_THRESHOLD="1.5")
+
+
+def test_the_p14_coverage_thresholds_are_read_from_the_environment_and_checked() -> None:
+    thresholds = fast_path_thresholds_for(
+        _settings(
+            AGENT_CORE_FAST_PATH_UNCOVERED_THRESHOLD="0.75",
+            AGENT_CORE_FAST_PATH_ROUTE_COVERS_THRESHOLD="0.9",
+        )
+    )
+    assert (thresholds.uncovered, thresholds.route_covers) == (0.75, 0.9)
+    defaults = fast_path_thresholds_for(_settings())
+    assert (defaults.uncovered, defaults.route_covers) == (0.6, 0.95)
+    for name in (
+        "AGENT_CORE_FAST_PATH_UNCOVERED_THRESHOLD",
+        "AGENT_CORE_FAST_PATH_ROUTE_COVERS_THRESHOLD",
+    ):
+        with pytest.raises(ValueError, match=name):
+            _settings(**{name: "2"})

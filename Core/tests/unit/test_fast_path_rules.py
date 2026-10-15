@@ -229,3 +229,127 @@ def test_the_route_threshold_and_the_requests_answer_are_checked() -> None:
             Assessment.of({}, requests=bad)  # type: ignore[arg-type]
     counted = Assessment.of({"a": 0.5}, action=0.02, complexity=0.2, requests=2)
     assert counted.summary() == "intents=a:0.50;action=0.02;follow_up=-;complexity=0.20;requests=2"
+
+
+# --- P14: a precise coverage guard ---------------------------------------------------------------
+#
+# The P13 battery in `on` sent single-topic questions to the entry profile (5 s -> 30 s): the
+# request count rounded "two things" for one topic said twice. The fixtures are the live audit rows
+# of those turns (`audit_turn_routes`: route choice, yes/no values, action, complexity) with the
+# request-count distribution a probe of the same router answered for the same text (the audit
+# keeps only the rounded count).
+
+LIVE = FastPathThresholds(intent=0.7)  # the deployment's intent threshold
+
+# "How is the staff for the next days? Are the shifts enough?" -> staffing, route choice 1.0.
+STAFFING = Assessment.of(
+    {"active_issues": 0.10, "data_integrity": 0.04, "day_summary": 0.03, "expiring_items": 0.02,
+     "order_plan": 0.02, "promo_list": 0.02, "staffing": 0.95, "stockout_risk": 0.03,
+     "transfer_options": 0.09, "upcoming_deliveries": 0.03},
+    action=0.09, complexity=0.26, requests=2, request_levels=(0.13, 0.87, 0.0, 0.0),
+)  # fmt: skip
+# "Is there data that does not add up in the inventory or the sales?" -> route choice 1.0.
+DATA_INTEGRITY = Assessment.of(
+    {"active_issues": 0.14, "data_integrity": 0.93, "day_summary": 0.09, "expiring_items": 0.05,
+     "order_plan": 0.04, "promo_list": 0.05, "staffing": 0.03, "stockout_risk": 0.06,
+     "transfer_options": 0.12, "upcoming_deliveries": 0.06},
+    action=0.06, complexity=0.41, requests=2, request_levels=(0.06, 0.94, 0.0, 0.0),
+)  # fmt: skip
+# "What urgent problems or alerts do I have open?" -> route choice 1.0.
+ACTIVE_ISSUES = Assessment.of(
+    {"active_issues": 0.98, "data_integrity": 0.17, "day_summary": 0.04, "expiring_items": 0.16,
+     "order_plan": 0.03, "promo_list": 0.03, "staffing": 0.03, "stockout_risk": 0.10,
+     "transfer_options": 0.05, "upcoming_deliveries": 0.06},
+    action=0.04, complexity=0.0, requests=2, request_levels=(0.53, 0.46, 0.01, 0.0),
+)  # fmt: skip
+# "Give me the open alerts and explain what a lost sale means" (a coverage question, the P13
+# benchmark's answer): the route choice still says active_issues, but only at 0.85 - the unplanned
+# part takes the rest.
+ALERTS_AND_A_DEFINITION = Assessment.of(
+    {"active_issues": 0.96, "data_integrity": 0.38, "day_summary": 0.17, "expiring_items": 0.13,
+     "order_plan": 0.03, "promo_list": 0.1, "staffing": 0.03, "stockout_risk": 0.14,
+     "transfer_options": 0.06, "upcoming_deliveries": 0.09},
+    action=0.04, complexity=0.175, requests=2, request_levels=(0.0, 1.0, 0.0, 0.0),
+)  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("assessment", "intent"),
+    [(STAFFING, "staffing"), (DATA_INTEGRITY, "data_integrity"), (ACTIVE_ISSUES, "active_issues")],
+)
+def test_a_single_topic_the_route_choice_is_sure_of_is_a_composite_not_uncovered(
+    assessment: Assessment, intent: str
+) -> None:
+    verdict = decide_fast_path(assessment, LIVE, has_history=False, routed=(intent, 1.0))
+    assert verdict.code == COMPOSITE and verdict.intents == (intent,)
+
+
+def test_a_route_choice_below_the_covering_threshold_keeps_the_guard() -> None:
+    from agent_core.domain.fast_path import PASS_UNCOVERED
+
+    verdict = decide_fast_path(
+        ALERTS_AND_A_DEFINITION, LIVE, has_history=False, routed=("active_issues", 0.85)
+    )
+    assert verdict.code == PASS_UNCOVERED and verdict.intents == ("active_issues",)
+    # The covering threshold is the deployment's: at 0.8 the same answer is a composite.
+    lenient = FastPathThresholds(intent=0.7, route_covers=0.8)
+    loose = decide_fast_path(
+        ALERTS_AND_A_DEFINITION, lenient, has_history=False, routed=("active_issues", 0.85)
+    )
+    assert loose.code == COMPOSITE
+
+
+def test_a_route_choice_of_another_intent_does_not_cover_the_detected_one() -> None:
+    from agent_core.domain.fast_path import PASS_UNCOVERED
+
+    # The choice's intent joins the detected ones (two now), and two things asked are covered.
+    verdict = decide_fast_path(STAFFING, LIVE, has_history=False, routed=("promo_list", 1.0))
+    assert verdict.code == COMPOSITE and verdict.intents == ("promo_list", "staffing")
+    # Without a route choice the guard reads the distribution: 0.87 that it asks two things.
+    alone = decide_fast_path(STAFFING, LIVE, has_history=False)
+    assert alone.code == PASS_UNCOVERED
+
+
+def test_the_guard_reads_the_probability_of_more_requests_not_the_rounded_count() -> None:
+    from agent_core.domain.fast_path import PASS_UNCOVERED
+
+    # Rounded, 0.47 expected extra requests is "two"; the probability of two or more is 0.47.
+    unsure = decide_fast_path(ACTIVE_ISSUES, LIVE, has_history=False)
+    assert unsure.code == COMPOSITE
+    # Two detected intents: uncovered only when three or more requests are likely enough.
+    two = {"a": 0.9, "b": 0.9}
+    likely = Assessment.of(two, action=0.0, complexity=0.0, requests=3,
+                           request_levels=(0.0, 0.3, 0.7))  # fmt: skip
+    assert decide_fast_path(likely, T, has_history=False).code == PASS_UNCOVERED
+    doubtful = Assessment.of(two, action=0.0, complexity=0.0, requests=3,
+                             request_levels=(0.0, 0.45, 0.55))  # fmt: skip
+    assert decide_fast_path(doubtful, T, has_history=False).code == COMPOSITE
+    strict = FastPathThresholds(uncovered=0.5)
+    assert decide_fast_path(doubtful, strict, has_history=False).code == PASS_UNCOVERED
+
+
+def test_without_a_request_answer_the_guard_never_passes() -> None:
+    verdict = decide_fast_path(
+        Assessment.of({"a": 0.9}, action=0.0, complexity=0.0), T, has_history=False
+    )
+    assert verdict.code == COMPOSITE
+
+
+def test_the_p14_thresholds_and_request_levels_are_checked() -> None:
+    assert (T.uncovered, T.route_covers) == (0.6, 0.95)
+    for bad in ({"uncovered": 1.2}, {"route_covers": -0.1}):
+        with pytest.raises(ValueError):
+            FastPathThresholds(**bad)  # type: ignore[arg-type]
+    for levels in ((), (0.5, 1.5), (float("nan"),), tuple([0.0] * 256)):
+        with pytest.raises(ValueError):
+            Assessment.of({}, request_levels=levels)
+    counted = Assessment.of(
+        {"a": 0.5}, action=0.02, complexity=0.2, requests=2, request_levels=(0.13, 0.87)
+    )
+    assert counted.summary() == (
+        "intents=a:0.50;action=0.02;follow_up=-;complexity=0.20;requests=2;"
+        "request_levels=0.13,0.87"
+    )
+    assert counted.more_requests_than(1) == pytest.approx(0.87)
+    assert counted.more_requests_than(2) == 0.0
+    assert Assessment.of({}, requests=2).more_requests_than(1) is None

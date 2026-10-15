@@ -25,6 +25,18 @@ message has no plan: a composite would answer the planned parts and could only s
 detected). The turn passes to the entry profile, which reasons about all of it. A router that does
 not count (`requests` None) gets the P12 rules.
 
+P14 made it precise, because the rounded count overestimates: "Are there figures that do not add
+up in the stock or the sales?" is one topic said twice, counted "two", and in `on` it lost its
+5-second plan to a 30-second orchestrator turn. So:
+  * with the count's distribution (`Assessment.request_levels`), the guard fires only when the
+    probability of more requests than detected intents is at or above `uncovered` (0.6), never on
+    the rounded expected value alone (the count is the guard only for a router without levels);
+  * it never fires when exactly one intent is detected and the route choice itself picked that
+    intent with a confidence at or above `route_covers` (0.95): a message with an unplanned part
+    leaves its mass elsewhere (the P13 coverage questions scored 0.60-0.87 on their one intent; the
+    single-topic battery questions 1.0). A confident specialist route that covers the one intent is
+    the use case's to keep (`application/route_turn.py`, `defer:route_covers`).
+
 `application/route_turn.py` then checks that every intent of a composite has a declared plan whose
 owner the entry profile may ask (the S8 delegation guard, per owner); one that cannot is
 `defer:<reason>` and the existing logic runs. A verdict never widens what a turn may do: a pass
@@ -104,7 +116,10 @@ def _unit(name: str, value: float) -> None:
 @dataclass(frozen=True, slots=True)
 class FastPathThresholds:
     """Where each answer tips the verdict. `max_intents` bounds one composite (its budget);
-    `route_intent` is the route choice confidence at which its intent counts as detected (P13)."""
+    `route_intent` is the route choice confidence at which its intent counts as detected (P13);
+    `uncovered` the probability of more requests than detected intents at which the coverage guard
+    passes, and `route_covers` the route choice confidence at which its one intent covers the whole
+    message (P14)."""
 
     intent: float = 0.5
     action: float = 0.5
@@ -112,9 +127,14 @@ class FastPathThresholds:
     complexity: float = 0.6
     max_intents: int = 3
     route_intent: float = 0.7
+    uncovered: float = 0.6
+    route_covers: float = 0.95
 
     def __post_init__(self) -> None:
-        for name in ("intent", "action", "follow_up", "complexity", "route_intent"):
+        for name in (
+            "intent", "action", "follow_up", "complexity", "route_intent", "uncovered",
+            "route_covers",
+        ):  # fmt: skip
             _unit(f"{name} threshold", getattr(self, name))
         if self.max_intents < 1:
             raise ValueError(
@@ -129,13 +149,16 @@ class Assessment:
     `intents` maps each assessed intent to the probability the message asks for it (sorted by
     name). `follow_up` is None when it was not asked (no conversation yet). `complexity` is the
     router's score normalised to [0, 1] (0 the simplest level, 1 the most complex). `requests` is
-    how many separate things the message asks for (P13; None when the router does not count)."""
+    how many separate things the message asks for (P13; None when the router does not count);
+    `request_levels` the probability of each count, from one (P14; the last level means "that many
+    or more"; None when the router gave no distribution)."""
 
     intents: tuple[tuple[str, float], ...] = ()
     action: float | None = None
     follow_up: float | None = None
     complexity: float | None = None
     requests: int | None = None
+    request_levels: tuple[float, ...] | None = None
 
     def __post_init__(self) -> None:
         if len(self.intents) > MAX_ASSESSED_INTENTS:
@@ -159,6 +182,12 @@ class Assessment:
             raise ValueError(
                 f"an assessment counts 1-{MAX_REQUESTS} requests, got {self.requests!r}"
             )
+        if self.request_levels is not None:
+            if not 1 <= len(self.request_levels) <= MAX_REQUESTS:
+                raise ValueError(f"an assessment holds 1-{MAX_REQUESTS} request levels")
+            for level, value in enumerate(self.request_levels, start=1):
+                _unit(f"probability of {level} requests", value)
+            object.__setattr__(self, "request_levels", tuple(map(float, self.request_levels)))
         object.__setattr__(self, "intents", tuple(sorted(self.intents)))
 
     @classmethod
@@ -170,6 +199,7 @@ class Assessment:
         follow_up: float | None = None,
         complexity: float | None = None,
         requests: int | None = None,
+        request_levels: tuple[float, ...] | None = None,
     ) -> Assessment:
         return cls(
             tuple((str(k), float(v)) for k, v in intents.items()),
@@ -177,17 +207,28 @@ class Assessment:
             follow_up=follow_up,
             complexity=complexity,
             requests=requests,
+            request_levels=request_levels,
         )
+
+    def more_requests_than(self, count: int) -> float | None:
+        """P14. The probability that the message asks for more than `count` things; None without
+        a distribution."""
+        if self.request_levels is None:
+            return None
+        return min(1.0, sum(self.request_levels[count:]))
 
     def summary(self) -> str:
         """Every answer with its value, compact, for the audit row: `intents=a:0.93,b:0.10;
-        action=0.02;follow_up=-;complexity=0.21`, then `;requests=2` when the router counted."""
+        action=0.02;follow_up=-;complexity=0.21`, then `;requests=2` when the router counted and
+        `;request_levels=0.13,0.87` when it gave the distribution."""
 
         def value(number: float | None) -> str:
             return "-" if number is None else f"{number:.2f}"
 
         intents = ",".join(f"{name}:{score:.2f}" for name, score in self.intents)
         counted = "" if self.requests is None else f";requests={self.requests}"
+        if self.request_levels is not None:
+            counted += ";request_levels=" + ",".join(f"{p:.2f}" for p in self.request_levels)
         return (
             f"intents={intents};action={value(self.action)};"
             f"follow_up={value(self.follow_up)};complexity={value(self.complexity)}{counted}"
@@ -240,9 +281,23 @@ def decide_fast_path(
         return FastPathVerdict(DEFER_NO_INTENT, detected)
     if len(detected) > thresholds.max_intents:
         return FastPathVerdict(PASS_TOO_MANY, detected)
-    if assessment.requests is not None and assessment.requests > len(detected):
+    covered = (
+        len(detected) == 1
+        and routed is not None
+        and routed[0] == detected[0]
+        and routed[1] >= thresholds.route_covers
+    )
+    if not covered and _uncovered(assessment, len(detected), thresholds):
         return FastPathVerdict(PASS_UNCOVERED, detected)
     return FastPathVerdict(COMPOSITE, detected)
+
+
+def _uncovered(assessment: Assessment, detected: int, thresholds: FastPathThresholds) -> bool:
+    """Rule 6 (P14): the distribution when the router gave one, else the count; unknown is no."""
+    beyond = assessment.more_requests_than(detected)
+    if beyond is not None:
+        return beyond >= thresholds.uncovered
+    return assessment.requests is not None and assessment.requests > detected
 
 
 @dataclass(frozen=True, slots=True)

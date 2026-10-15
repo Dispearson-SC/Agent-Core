@@ -288,7 +288,18 @@ coverage guard exists because a composite can only answer the parts it planned: 
 "How am I doing today and what do I order?" with only the order detected answered the order and
 called the day's figures unavailable; `pass:uncovered` runs the entry profile instead, and the
 composite compose is told to leave out (never call unavailable) a part no result covers. A router
-that does not count requests gets the rules without the guard. A router answer without the action or
+that does not count requests gets the rules without the guard. P14 made the guard precise, because
+the rounded count overestimates ("Is there data that does not add up in the stock or the sales?"
+is one topic said twice, counted two, and in `on` it went from a 5-second plan to a 30-second
+orchestrator turn): with the count's distribution (`request_levels`) a message passes only when the
+probability of more requests than detected intents is at or above
+`AGENT_CORE_FAST_PATH_UNCOVERED_THRESHOLD` (0.6); and it never passes uncovered when exactly one
+intent is detected and the route choice picked that intent with a confidence at or above
+`AGENT_CORE_FAST_PATH_ROUTE_COVERS_THRESHOLD` (0.95; the single-topic battery questions scored 1.0,
+the coverage questions 0.60-0.87 because their unplanned part takes the rest). With `on`, a pass
+other than an action, a follow-up or a complex message, whose route choice is that sure of the
+specialist owning the one detected intent's plan, is `defer:route_covers`: the router's own route
+runs instead of the entry profile. A missing request count is unknown: no `pass:uncovered`. A router answer without the action or
 complexity value is `defer:unassessed`. A composite needs the entry profile's `routing.intents`
 (else `defer:intent_not_supported`) and, for EVERY detected intent, a declared plan
 (`defer:<intent>:intent_unknown`) whose owner is a listed, startable target

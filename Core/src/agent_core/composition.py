@@ -764,6 +764,12 @@ class Settings:
     # P13. The route choice confidence at which its intent counts as detected
     # (`AGENT_CORE_FAST_PATH_ROUTE_THRESHOLD` in [0, 1], default 0.7).
     fast_path_route_threshold: float = _FAST_PATH_DEFAULTS.route_intent
+    # P14. The coverage guard: the probability of more requests than detected intents at which a
+    # message passes (`AGENT_CORE_FAST_PATH_UNCOVERED_THRESHOLD`, default 0.6), and the route
+    # choice confidence at which its one intent covers the message
+    # (`AGENT_CORE_FAST_PATH_ROUTE_COVERS_THRESHOLD`, default 0.95). Both in [0, 1].
+    fast_path_uncovered_threshold: float = _FAST_PATH_DEFAULTS.uncovered
+    fast_path_route_covers_threshold: float = _FAST_PATH_DEFAULTS.route_covers
     # S10. The profile that writes a composite's one reply (`AGENT_CORE_FAST_PATH_COMPOSER`); unset
     # or empty is the turn's entry profile. Startup stops when it names no loaded profile.
     fast_path_composer: str | None = None
@@ -891,6 +897,16 @@ class Settings:
                 "AGENT_CORE_FAST_PATH_ROUTE_THRESHOLD",
                 env.get("AGENT_CORE_FAST_PATH_ROUTE_THRESHOLD"),
                 _FAST_PATH_DEFAULTS.route_intent,
+            ),
+            fast_path_uncovered_threshold=_parse_unit(
+                "AGENT_CORE_FAST_PATH_UNCOVERED_THRESHOLD",
+                env.get("AGENT_CORE_FAST_PATH_UNCOVERED_THRESHOLD"),
+                _FAST_PATH_DEFAULTS.uncovered,
+            ),
+            fast_path_route_covers_threshold=_parse_unit(
+                "AGENT_CORE_FAST_PATH_ROUTE_COVERS_THRESHOLD",
+                env.get("AGENT_CORE_FAST_PATH_ROUTE_COVERS_THRESHOLD"),
+                _FAST_PATH_DEFAULTS.route_covers,
             ),
             fast_path_composer=(env.get("AGENT_CORE_FAST_PATH_COMPOSER") or "").strip() or None,
             fast_path_cache_seconds=_parse_cache_seconds(
@@ -1049,6 +1065,8 @@ def fast_path_thresholds_for(settings: Settings) -> FastPathThresholds:
         complexity=settings.fast_path_complexity_threshold,
         max_intents=settings.fast_path_max_intents,
         route_intent=settings.fast_path_route_threshold,
+        uncovered=settings.fast_path_uncovered_threshold,
+        route_covers=settings.fast_path_route_covers_threshold,
     )
 
 
