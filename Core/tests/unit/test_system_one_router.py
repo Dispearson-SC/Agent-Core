@@ -631,6 +631,7 @@ def _fast_answer(
     action: float = 0.03,
     complexity: float = 0.2,
     follow_up: float | None = None,
+    requests: float | None = 0.0,
 ) -> dict[str, Any]:
     body = _answer(choice, 0.9)
     for label, value in (intents or {}).items():
@@ -643,6 +644,8 @@ def _fast_answer(
     }  # fmt: skip
     if follow_up is not None:
         body["answers"]["follow_up"] = {"type": "noul", "noul": follow_up}
+    if requests is not None:
+        body["answers"]["requests"] = {"type": "score", "score": requests, "confidence": 0.9}
     return body
 
 
@@ -688,6 +691,7 @@ def test_the_fast_path_asks_every_question_in_one_call(tmp_path: Path) -> None:
     questions = body["questions"]
     assert set(questions) == {
         "route", "intent__opening_hours", "intent__stock_level", "action", "complexity",
+        "requests",
     }  # fmt: skip
     assert questions["intent__opening_hours"]["type"] == "noul"
     assert "When the shop is open" in questions["intent__opening_hours"]["instructions"]
@@ -740,6 +744,7 @@ def test_the_answers_come_back_as_an_assessment_by_intent_name(tmp_path: Path) -
         "action": 0.04,
         "follow_up": 0.1,
         "complexity": 0.25,  # score 0.5 on levels 0..2
+        "requests": 1,  # score 0.0: the first level, one request
     }
     decision = decision_from_mapping(answer)  # Core reads it
     assert decision.assessment is not None and decision.assessment.complexity == 0.25
@@ -766,3 +771,122 @@ def test_a_fast_path_call_that_fails_passes_as_before(tmp_path: Path) -> None:
         _replying(httpx.Response(529)), _fast_settings(tmp_path), _fast_request("x")
     )
     assert answer["decision"] == "pass" and "assessment" not in answer
+
+
+# --- P13: the coverage count and per-intent criteria ---------------------------------------------
+
+BOTH_LOW = {"opening_hours": 0.1, "stock_level": 0.1}
+
+
+def test_the_fast_path_asks_how_many_separate_things_the_message_asks_for(tmp_path: Path) -> None:
+    seen: list[httpx.Request] = []
+    _fast_route(
+        _replying(httpx.Response(200, json=_fast_answer()), seen=seen),
+        _fast_settings(tmp_path),
+        _fast_request("x"),
+    )
+    question = json.loads(seen[0].content)["questions"]["requests"]
+    assert question["type"] == "score"
+    assert question["instructions"] == SYSTEM_ONE.DEFAULT_REQUESTS_QUESTION
+    assert question["criteria"] == list(SYSTEM_ONE.DEFAULT_REQUESTS_LEVELS)
+    assert len(question["criteria"]) == 4, "one, two, three, four or more"
+
+
+def test_a_routes_file_may_word_the_requests_question_and_levels(tmp_path: Path) -> None:
+    (tmp_path / "routes.yaml").write_text(
+        FAST_ROUTES
+        + "  requests_question: How many things does the customer ask?\n"
+        + "  requests_levels: [One, Two or more]\n",
+        encoding="utf-8",
+    )
+    seen: list[httpx.Request] = []
+    answer = _fast_route(
+        _replying(
+            httpx.Response(200, json=_fast_answer(intents=BOTH_LOW, requests=1.0)), seen=seen
+        ),
+        _settings(tmp_path),
+        _fast_request("x"),
+    )
+    question = json.loads(seen[0].content)["questions"]["requests"]
+    assert question["instructions"] == "How many things does the customer ask?"
+    assert question["criteria"] == ["One", "Two or more"]
+    assert answer["assessment"]["requests"] == 2
+
+
+@pytest.mark.parametrize(("score", "count"), [(0.0, 1), (0.4, 1), (0.96, 2), (1.99, 3), (3.0, 4)])
+def test_the_requests_score_is_a_count_from_one(tmp_path: Path, score: float, count: int) -> None:
+    answer = _fast_route(
+        _replying(httpx.Response(200, json=_fast_answer(intents=BOTH_LOW, requests=score))),
+        _fast_settings(tmp_path),
+        _fast_request("x"),
+    )
+    assert answer["assessment"]["requests"] == count
+    decision = decision_from_mapping(answer)
+    assert decision.assessment is not None and decision.assessment.requests == count
+
+
+@pytest.mark.parametrize("requests", [None, 4.5, -1.0])
+def test_a_missing_or_impossible_requests_answer_drops_the_assessment(
+    tmp_path: Path, requests: float | None
+) -> None:
+    answer = _fast_route(
+        _replying(httpx.Response(200, json=_fast_answer(intents=BOTH_LOW, requests=requests))),
+        _fast_settings(tmp_path),
+        _fast_request("x"),
+    )
+    assert "assessment" not in answer and answer["reason"] == "bad_assessment"
+
+
+def test_an_intent_route_may_give_its_yes_no_question_criteria(tmp_path: Path) -> None:
+    (tmp_path / "routes.yaml").write_text(
+        ROUTES
+        + """\
+  - label: stock_level
+    description: How much of a product is left
+    target: intent:stock_level
+    criteria:
+      true: {what: It asks how much is left, examples: ["any bread left?"]}
+      false: It asks about prices or opening hours
+""",
+        encoding="utf-8",
+    )
+    seen: list[httpx.Request] = []
+    _fast_route(
+        _replying(httpx.Response(200, json=_fast_answer()), seen=seen),
+        _settings(tmp_path),
+        _fast_request("x"),
+    )
+    questions = json.loads(seen[0].content)["questions"]
+    assert questions["intent__stock_level"]["criteria"] == {
+        "true": {"what": "It asks how much is left", "examples": ["any bread left?"]},
+        "false": "It asks about prices or opening hours",
+    }
+    assert "criteria" not in questions["intent__opening_hours"]
+
+
+@pytest.mark.parametrize(
+    "criteria",
+    [
+        "    criteria: yes\n",
+        "    criteria: {true: a}\n",
+        "    criteria: {true: a, false: b, maybe: c}\n",
+        "    criteria: {true: '', false: b}\n",
+    ],
+)
+def test_malformed_criteria_stop_the_router(tmp_path: Path, criteria: str) -> None:
+    routes = ROUTES + criteria
+    with pytest.raises(SYSTEM_ONE.SystemOneConfigError, match="criteria"):
+        SYSTEM_ONE.parse_routes(
+            __import__("yaml").safe_load(routes), escape_label="none_of_these", source="t"
+        )
+
+
+def test_criteria_belong_to_intent_routes_only() -> None:
+    routes = ROUTES.replace(
+        "    target: profile:billing\n",
+        "    target: profile:billing\n    criteria: {true: a, false: b}\n",
+    )
+    with pytest.raises(SYSTEM_ONE.SystemOneConfigError, match="criteria"):
+        SYSTEM_ONE.parse_routes(
+            __import__("yaml").safe_load(routes), escape_label="none_of_these", source="t"
+        )

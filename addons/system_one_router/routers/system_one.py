@@ -32,14 +32,20 @@ THE FAST PATH (S10, Core's AGENT_CORE_FAST_PATH)
     When Core's request says `fast_path: true`, the SAME call also asks (the Typesafe fan-out
     pattern; questions run in parallel, so they cost little latency):
       * `intent__<label>`: one `noul` per `intent:` route, "does the message ask for this?" (the
-        route's `question`, or the default built from its description);
+        route's `question`, or the default built from its description), with the route's
+        `criteria` (`{true, false}`: what a yes and a no mean, a string or a `{what, examples}`
+        mapping) when it has them (P13: Typesafe's way to pin a subtle yes/no boundary);
       * `action`: a `noul`, does it ask to DO something rather than to be told;
       * `follow_up`: a `noul`, only when Core sent a recent conversation: does the message depend
         on it (the state is then `{message, recent_conversation}`);
-      * `complexity`: a `score` over three levels (a routes file may name its own).
+      * `complexity`: a `score` over three levels (a routes file may name its own);
+      * `requests`: a `score`, how many separate things the message asks for (P13; levels one, two,
+        three, four or more unless the routes file names its own). Core's coverage guard passes a
+        message that asks for more things than the intents it detected.
     The answer then carries `assessment: {intents: {<intent name>: p}, action, follow_up,
-    complexity}` (the score normalised to [0, 1]); the route choice is decided exactly as without
-    it. A missing or malformed fast path answer drops the assessment only (reason
+    complexity, requests}` (the complexity normalised to [0, 1]; `requests` the count, 1 for the
+    first level: Typesafe's score is the expected level, rounded); the route choice is decided
+    exactly as without it. A missing or malformed fast path answer drops the assessment only (reason
     `bad_assessment`): Core then never takes the fast path for that turn. Without the flag the
     request is exactly the one choice question.
 
@@ -81,12 +87,13 @@ _MAX_TEXT: Final = 200  # Core refuses longer label/model/reason strings
 _LABEL: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _TARGET: Final = re.compile(r"^(profile|intent):([A-Za-z0-9][A-Za-z0-9_.-]{0,127})$")
 PASS_TARGET: Final = "pass"
-_ROUTE_KEYS: Final = frozenset({"label", "description", "target", "question"})
+_ROUTE_KEYS: Final = frozenset({"label", "description", "target", "question", "criteria"})
 _FILE_KEYS: Final = frozenset({"routes", "instructions", "escape_description", "fast_path"})
 _FAST_KEYS: Final = frozenset(
     {"intent_question", "action_question", "follow_up_question", "complexity_question",
-     "complexity_levels"}
+     "complexity_levels", "requests_question", "requests_levels"}
 )  # fmt: skip
+_LEVEL_KEYS: Final = frozenset({"complexity_levels", "requests_levels"})
 INTENT_PREFIX: Final = "intent__"
 DEFAULT_INTENT_QUESTION: Final = "Does this message ask for the following? {description}"
 DEFAULT_ACTION_QUESTION: Final = (
@@ -103,6 +110,13 @@ DEFAULT_COMPLEXITY_LEVELS: Final = (
     "Combines or compares several facts",
     "Needs analysis, advice, a plan, a judgement or a decision",
 )
+DEFAULT_REQUESTS_QUESTION: Final = "How many separate things does this message ask for?"
+DEFAULT_REQUESTS_LEVELS: Final = (
+    "It asks for one thing",
+    "It asks for two different things",
+    "It asks for three different things",
+    "It asks for four or more different things",
+)
 _ADDONS_ROOT: Final = Path(__file__).resolve().parents[2]
 
 
@@ -117,6 +131,7 @@ class Route:
     kind: str  # "profile", "intent" or "pass"
     name: str
     question: str | None = None  # S10: the intent's own yes/no question
+    criteria: dict[str, Any] | None = None  # P13: what a yes and a no mean for that question
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +143,8 @@ class FastQuestions:
     follow_up_question: str = DEFAULT_FOLLOW_UP_QUESTION
     complexity_question: str = DEFAULT_COMPLEXITY_QUESTION
     complexity_levels: tuple[str, ...] = DEFAULT_COMPLEXITY_LEVELS
+    requests_question: str = DEFAULT_REQUESTS_QUESTION
+    requests_levels: tuple[str, ...] = DEFAULT_REQUESTS_LEVELS
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +218,11 @@ def parse_routes(document: object, *, escape_label: str, source: str) -> RouteTa
         question = raw.get("question")
         if question is not None:
             question = _text(question, f"{where}: question")
+        criteria = raw.get("criteria")
+        if criteria is not None:
+            if not (isinstance(target, str) and target.startswith("intent:")):
+                raise SystemOneConfigError(f"{where}: criteria belong to an intent: route")
+            criteria = _criteria(criteria, where)
         if target == PASS_TARGET:
             routes.append(Route(label, description, PASS_TARGET, ""))
             continue
@@ -209,7 +231,9 @@ def parse_routes(document: object, *, escape_label: str, source: str) -> RouteTa
             raise SystemOneConfigError(
                 f"{where}: target must be profile:<id>, intent:<name> or {PASS_TARGET}"
             )
-        routes.append(Route(label, description, match.group(1), match.group(2), question))
+        routes.append(
+            Route(label, description, match.group(1), match.group(2), question, criteria)
+        )
     instructions = document.get("instructions")
     escape = document.get("escape_description")
     return RouteTable(
@@ -218,6 +242,25 @@ def parse_routes(document: object, *, escape_label: str, source: str) -> RouteTa
         escape_description=None if escape is None else _text(escape, "escape_description"),
         fast=_fast_questions(document.get("fast_path"), source),
     )
+
+
+def _criteria(raw: object, where: str) -> dict[str, Any]:
+    """P13. A noul's `{true, false}` criteria: each a non-empty string or a non-empty mapping
+    (Typesafe's `{what, examples}`), sent as they are."""
+    if not isinstance(raw, Mapping) or set(raw) != {True, False} and set(raw) != {"true", "false"}:
+        raise SystemOneConfigError(f"{where}: criteria must be a mapping of exactly true and false")
+    criteria: dict[str, Any] = {}
+    for key, value in raw.items():
+        name = str(key).lower()
+        if isinstance(value, str):
+            criteria[name] = _text(value, f"{where}: criteria {name}")
+        elif isinstance(value, Mapping) and value:
+            criteria[name] = dict(value)
+        else:
+            raise SystemOneConfigError(
+                f"{where}: criteria {name} must be a non-empty string or mapping"
+            )
+    return criteria
 
 
 def _fast_questions(raw: object, source: str) -> FastQuestions:
@@ -230,18 +273,15 @@ def _fast_questions(raw: object, source: str) -> FastQuestions:
     if extra:
         raise SystemOneConfigError(f"{where} has unknown keys: {sorted(map(str, extra))}")
     values: dict[str, Any] = {
-        key: _text(raw[key], f"{where}: {key}") for key in _FAST_KEYS - {"complexity_levels"}
-        if key in raw
+        key: _text(raw[key], f"{where}: {key}") for key in _FAST_KEYS - _LEVEL_KEYS if key in raw
     }  # fmt: skip
     if "intent_question" in values and "{description}" not in values["intent_question"]:
         raise SystemOneConfigError(f"{where}: intent_question must contain {{description}}")
-    if "complexity_levels" in raw:
-        levels = raw["complexity_levels"]
+    for key in sorted(_LEVEL_KEYS & set(raw)):
+        levels = raw[key]
         if not isinstance(levels, list) or not 2 <= len(levels) <= 10:
-            raise SystemOneConfigError(f"{where}: complexity_levels must list 2-10 levels")
-        values["complexity_levels"] = tuple(
-            _text(level, f"{where}: complexity level") for level in levels
-        )
+            raise SystemOneConfigError(f"{where}: {key} must list 2-10 levels")
+        values[key] = tuple(_text(level, f"{where}: {key} level") for level in levels)
     return FastQuestions(**values)
 
 
@@ -310,7 +350,10 @@ def _fast_path_questions(table: RouteTable, has_history: bool) -> dict[str, Any]
     for route in table.routes:
         if route.kind == "intent":
             text = route.question or fast.intent_question.format(description=route.description)
-            questions[INTENT_PREFIX + route.label] = {"type": "noul", "instructions": text}
+            question: dict[str, Any] = {"type": "noul", "instructions": text}
+            if route.criteria is not None:
+                question["criteria"] = route.criteria
+            questions[INTENT_PREFIX + route.label] = question
     questions["action"] = {"type": "noul", "instructions": fast.action_question}
     if has_history:
         questions["follow_up"] = {"type": "noul", "instructions": fast.follow_up_question}
@@ -318,6 +361,11 @@ def _fast_path_questions(table: RouteTable, has_history: bool) -> dict[str, Any]
         "type": "score",
         "instructions": fast.complexity_question,
         "criteria": list(fast.complexity_levels),
+    }
+    questions["requests"] = {
+        "type": "score",
+        "instructions": fast.requests_question,
+        "criteria": list(fast.requests_levels),
     }
     return questions
 
@@ -363,7 +411,21 @@ def read_assessment(
         "action": noul("action"),
         "follow_up": noul("follow_up") if has_history else None,
         "complexity": round(float(score) / top, 4),
+        "requests": _requests(answers.get("requests"), len(table.fast.requests_levels)),
     }
+
+
+def _requests(answer: object, levels: int) -> int:
+    """P13. The request count: the score's expected level, rounded, plus one (level 0 is one)."""
+    score = answer.get("score") if isinstance(answer, Mapping) else None
+    if (
+        isinstance(score, bool)
+        or not isinstance(score, (int, float))
+        or not math.isfinite(score)
+        or not 0 <= score <= levels - 1
+    ):
+        raise _BadResponse("the requests answer is not a score on its levels")
+    return int(math.floor(score + 0.5)) + 1
 
 
 # --- the answer ----------------------------------------------------------------------------------

@@ -267,10 +267,12 @@ a follow-up IS sent to the router then). A router that supports it answers, besi
  "assessment": {"intents": {"refund": 0.91, "opening_hours": 0.04},  # P(the message asks it)
                 "action": 0.02,        # P(it asks to DO something rather than to be told)
                 "follow_up": 0.10,     # P(it depends on the conversation); null without history
-                "complexity": 0.15}}   # the router's complexity score, normalised to [0, 1]
+                "complexity": 0.15,    # the router's complexity score, normalised to [0, 1]
+                "requests": 1}}        # P13, optional: how many separate things it asks for
 ```
 
-Every value must be a number in [0, 1] (`follow_up` may be null) and the intent names at most 64
+Every value must be a number in [0, 1] (`follow_up` may be null; `requests`, when sent, an integer
+of at least 1: Core passes a message asking for more things than the intents it detected) and the intent names at most 64
 characters; anything else is a malformed answer (the turn runs as asked). Core decides with them
 (the rules are in docs/OPERATIONS.md); a router that ignores the flag and sends no `assessment` is
 simply never on the fast path. With the fast path off neither key is in the request, so a router
@@ -372,8 +374,11 @@ routes:
 (`AGENT_CORE_FAST_PATH` shadow or on), the same POST also asks one `noul` per `intent:` route
 (`intent__<label>`: the route's optional `question`, else "Does this message ask for the following?
 <description>"), an `action` noul (asks to DO something), a `follow_up` noul when Core sent a recent
-conversation (the state is then `{message, recent_conversation}`) and a `complexity` score over
-three levels. The answer adds `assessment` (intent NAMES, the score normalised to [0, 1]); the
+conversation (the state is then `{message, recent_conversation}`), a `complexity` score over
+three levels and a `requests` score (P13: how many separate things the message asks for, levels
+one, two, three, four or more). The answer adds `assessment` (intent NAMES, the complexity
+normalised to [0, 1], `requests` the count: the score is Typesafe's expected level, rounded, plus
+one); the
 route choice is decided exactly as without it. A missing or malformed fast path answer drops the
 assessment only (reason `bad_assessment`). A routes file may word the questions:
 
@@ -384,10 +389,22 @@ fast_path:                       # optional; every key optional
   follow_up_question: Does `message` need `recent_conversation` to be understood?
   complexity_question: How much work is the answer?
   complexity_levels: [One fact, Several facts, Advice or a plan]  # 2-10 levels
+  requests_question: How many things does the customer ask for?   # P13
+  requests_levels: [One thing, Two things, Three or more]          # 2-10 levels, first = one
 routes:
-  - {label: stock_level, description: How much is left, target: "intent:stock_level",
-     question: Does the message ask how much of a product is left?}
+  - label: stock_level
+    description: How much is left
+    target: "intent:stock_level"
+    question: Does the message ask how much of a product is left?
+    criteria:                    # P13, intent routes only: what a yes and a no mean
+      true: {what: It asks how much is left, examples: ["any bread left?"]}
+      false: It asks about prices or opening hours
 ```
+
+`criteria` is Typesafe's way to pin a subtle yes/no boundary (docs.typesafe.ai, primitives/noul):
+each side a string or a `{what, examples}` mapping, sent as written. On the glazed set, a question
+plus criteria moved day_summary's yes/no on its own questions from 0.10-0.92 to 0.84-0.97, with
+nothing else above 0.42 (P13 probe).
 
 A route whose target is `pass` is a labelled abstention: chosen, the turn passes (reason
 `pass_route`) whatever the confidence. One specific option competes with the routes better than a

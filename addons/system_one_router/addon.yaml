@@ -15,7 +15,8 @@
 #
 # THE FAST PATH (S10). With Core's AGENT_CORE_FAST_PATH set to shadow or on, the same call also asks one
 # yes/no question per intent route, whether the message asks to DO something, whether it depends on the
-# recent conversation (only when there is one) and its complexity, and answers them as `assessment`; Core
+# recent conversation (only when there is one), its complexity and how many separate things it asks for
+# (P13: Core passes a message asking for more than the intents it detected), and answers them as `assessment`; Core
 # decides with them (docs/OPERATIONS.md, "The fast path"). Off, the request is the one choice question.
 #
 # A router is not a safety barrier: a route only picks which profile runs, inside `routing.targets`, and
