@@ -77,6 +77,11 @@ questions:
   - {id: ds03, text: "Dame el resumen del día", expected: "intent:day_summary"}
   - {id: ds04, text: "¿Cuánto se tiró hoy de merma?", expected: "intent:day_summary"}
   - {id: ds05, text: "¿Cuánto dejamos de vender ayer por faltantes?", expected: "intent:day_summary"}
+  # P13: the P12 battery's plain question was never detected at 0.7; more ways to ask for the day.
+  - {id: ds06, text: "Dame el resumen del día de hoy.", expected: "intent:day_summary", note: "recorded: the P12 battery (shadow and on: defer:no_intent)"}
+  - {id: ds07, text: "¿Qué tal van las ventas hoy?", expected: "intent:day_summary"}
+  - {id: ds08, text: "¿Cómo nos fue ayer en la tienda?", expected: "intent:day_summary"}
+  - {id: ds09, text: "¿Cuánto llevamos vendido hoy?", expected: "intent:day_summary"}
 
   # --- intent:active_issues -------------------------------------------------------------------
   - {id: ai01, text: "¿Qué problemas tenemos ahorita en la tienda?", expected: "intent:active_issues"}
@@ -191,7 +196,7 @@ questions:
   - {id: ps16, text: "Haz el pedido de leche para mañana y déjamelo listo para aprobar", expected: pass, intents: [order_plan], note: "a write: the fast path passes it as an action"}
 
   # --- combined: two or three frequent intents in one question (S10) ---------------------------
-  - {id: cb01, text: "¿Cómo voy hoy y qué tengo que pedir?", expected: pass, intents: [day_summary, order_plan]}
+  - {id: cb01, text: "¿Cómo voy hoy y qué tengo que pedir?", expected: pass, intents: [day_summary, order_plan], note: "the P12 battery (on) answered the order and called the day 'no disponible'"}
   - {id: cb02, text: "¿Qué está por caducar y qué entregas tengo esta semana?", expected: pass, intents: [expiring_items, upcoming_deliveries]}
   - {id: cb03, text: "Dime los problemas abiertos y si hay riesgo de agotados", expected: pass, intents: [active_issues, stockout_risk]}
   - {id: cb04, text: "¿Cuánto vendimos ayer y qué promos tenemos activas?", expected: pass, intents: [day_summary, promo_list]}
@@ -206,3 +211,14 @@ questions:
   - {id: cb13, text: "¿Qué traspasos me convienen y qué productos se me vencen esta semana?", expected: pass, intents: [expiring_items, transfer_options]}
   - {id: cb14, text: "Dime cómo vamos hoy, qué pedir y qué alertas hay", expected: pass, intents: [active_issues, day_summary, order_plan]}
   - {id: cb15, text: "¿Hay SKUs que no cuadran y qué se me va a agotar?", expected: pass, intents: [data_integrity, stockout_risk]}
+  - {id: cb16, text: "¿Cuánto vendimos hoy y hay algo urgente que atender?", expected: pass, intents: [active_issues, day_summary]}
+  - {id: cb17, text: "Dame el resumen de hoy y dime qué se me va a acabar", expected: pass, intents: [day_summary, stockout_risk]}
+  - {id: cb18, text: "¿Cómo vamos hoy y qué entregas llegan mañana?", expected: pass, intents: [day_summary, upcoming_deliveries]}
+  - {id: cb19, text: "¿Cuánto se ha tirado hoy y qué promociones están activas?", expected: pass, intents: [day_summary, promo_list]}
+  # --- coverage (P13): one frequent intent plus a part no intent plan covers --------------------
+  # The fast path must not answer these as a composite of the one intent (the coverage guard, or a
+  # complexity pass): the other part would be dropped or called unavailable.
+  - {id: cv01, text: "¿Qué tengo que pedir y por qué bajaron las ventas esta semana?", expected: pass, intents: [order_plan]}
+  - {id: cv02, text: "¿Qué está por caducar y qué me recomiendas hacer con eso?", expected: pass, intents: [expiring_items]}
+  - {id: cv03, text: "Dame las alertas abiertas y explícame qué significa venta perdida", expected: pass, intents: [active_issues]}
+  - {id: cv04, text: "¿Qué entregas llegan esta semana y cómo nos fue con la promo de San Valentín?", expected: pass, intents: [upcoming_deliveries]}

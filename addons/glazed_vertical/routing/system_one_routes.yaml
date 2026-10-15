@@ -32,6 +32,25 @@
 # exact 77%, precision 86%, recall 84%, combined questions answered by an exact composite 7/17.
 # Misses: day_summary is under-detected inside combined questions ("¿Cómo voy hoy...?" 0.20) and
 # stockout_risk/active_issues ride along with expiring_items. Hence shadow first.
+# P13 (2026-10-15, after the shadow/on battery): day_summary was never detected at 0.7, not even
+# "Dame el resumen del día de hoy". A probe (one Jev call per question of this set, several
+# wordings fanned out) gave day_summary's yes/no 0.10-0.92 on its questions with the description
+# above, 0.38-0.93 with a question naming "how the store is doing", and 0.84-0.97 with that question
+# plus `criteria` (true/false with examples; the highest score on any other question 0.42). So
+# day_summary gets its own question and criteria, and three intents that over- or under-fired get
+# criteria too. The new `requests_*` question counts the separate things a message asks for: Core
+# passes a message asking for more things than the intents it detected (the coverage guard; the
+# battery's "¿Cómo voy hoy y qué tengo que pedir?" answered the order and called the day "no
+# disponible"). The probe counted 92/97 questions right; the 5 misses are advice or action
+# questions, which pass anyway.
+# BENCHMARK (2026-10-15, P13, 109 questions = 97 + 4 day_summary + 4 combined + 4 coverage, jev,
+# intent threshold 0.7, route threshold 0.7): route accuracy 88%, intent sets exact 94% (P12: 77%),
+# precision/recall 95%/99%, day_summary recall 100% (every day question; P12 missed "¿Cómo voy
+# hoy...?"), combined questions answered by an exact composite 19/21 (P12: 7/17; the two others
+# are an action and a complex question, which pass), coverage questions (cv*) never a composite
+# (2 pass:uncovered, 2 pass:complex), every single-intent question counted as one request, router
+# p50/p95 94/154 ms. expiring_items got criteria after it rode along with "se me va a acabar"
+# (a run without them: exact 91%, combined composites 17/21).
 fast_path:
   intent_question: >-
     A bakery store manager sent this message to the store copilot. Among the things it asks, does it
@@ -47,6 +66,12 @@ fast_path:
       deliveries, staff, promotions), even several of them
     - Compare or relate several figures to each other
     - Give advice, a recommendation, a plan, a judgement or explain why something happened
+  requests_question: How many separate things does the store manager ask for in this message?
+  requests_levels:
+    - It asks for one thing
+    - It asks for two different things
+    - It asks for three different things
+    - It asks for four or more different things
 instructions: >-
   A bakery store manager sent this message to the store copilot. Which single option is it asking
   for? Choose none_of_these when it asks for advice, a recommendation or a proposal, needs two or
@@ -59,18 +84,63 @@ routes:
   - label: day_summary
     target: intent:day_summary
     description: Today's or yesterday's numbers for the store - sales, waste and lost sales of one day.
+    question: >-
+      A bakery store manager sent this message to the store copilot. Among the things it asks, does
+      it ask how the store is doing today or on one recent day: the day's summary or results, its
+      sales, its waste (merma) or its lost sales?
+    criteria:
+      true:
+        what: >-
+          It asks how the day is going or went, a summary of today or yesterday, or a figure of one
+          day: sales, waste or sales lost to stockouts.
+        examples: ["¿Qué tal vamos?", "Resumen de hoy", "¿Cómo cerramos ayer?", "¿Cuánta merma llevamos?"]
+      false:
+        what: >-
+          It asks only about something else (orders, alerts, stock, deliveries, staff, promotions),
+          or about a week, a month or a comparison of periods.
+        examples: ["¿Qué tengo que pedir?", "¿Cómo fueron las ventas de la semana?"]
   - label: active_issues
     target: intent:active_issues
     description: The open problems, alerts or urgent operational items of the store right now.
+    criteria:
+      true: It asks for the store's open problems, alerts, or pending or urgent items in general.
+      false: >-
+        It asks only about one specific topic - data that does not add up, products running out or
+        expiring, orders, deliveries - without asking for the open alerts or problems.
   - label: order_plan
     target: intent:order_plan
     description: What to order or how much to order - the purchase order plan and its deadlines.
+    criteria:
+      true:
+        what: >-
+          It asks what or how much to order or buy, the purchase plan, or when an order must be sent,
+          or asks to prepare or propose such an order.
+        examples: ["¿Cuánto compro de harina?", "¿Qué va en el pedido del jueves?"]
+      false: >-
+        It asks about something else: products running out, deliveries already on their way,
+        expiring products, sales or staff.
   - label: stockout_risk
     target: intent:stockout_risk
     description: Products about to run out, whether stock lasts until a day, risk of stockouts.
+    criteria:
+      true:
+        what: It asks which products may run out, or whether the stock lasts until a day.
+        examples: ["¿Me va a alcanzar el pan para el fin de semana?", "¿Qué se me puede terminar?"]
+      false: >-
+        It asks about products expiring or close to their best-before date, open alerts or what to
+        order, and not whether the stock runs out.
   - label: expiring_items
     target: intent:expiring_items
     description: Products about to expire or close to their best-before date.
+    criteria:
+      true:
+        what: It asks which products expire, go bad or reach their best-before date soon.
+        examples: ["¿Qué caduca mañana?", "¿Hay pan que se eche a perder pronto?"]
+      false:
+        what: >-
+          It asks only which products will run out, end or be sold out (se acaba, se agota, me quedo
+          sin): stock running out is not expiry.
+        examples: ["¿Qué producto se me termina primero?"]
   - label: upcoming_deliveries
     target: intent:upcoming_deliveries
     description: Supplier deliveries arriving in the next days - when an order or supplier arrives.

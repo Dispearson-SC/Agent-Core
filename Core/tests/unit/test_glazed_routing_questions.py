@@ -77,3 +77,20 @@ def test_at_least_fifteen_combined_questions_name_two_or_more_routable_intents()
     assert all(q.expected == "pass" for q in combined)
     assert all(set(q.expected_intents) <= routable for q in question_set.questions)
 
+
+
+def test_coverage_questions_pair_one_routable_intent_with_a_part_no_intent_covers() -> None:
+    """P13. The coverage guard's questions (cv*): one intent plus advice, an explanation or a past
+    event. The fast path must not answer them as a composite of that one intent."""
+    question_set = load_question_set(QUESTIONS)
+    coverage = [q for q in question_set.questions if q.id.startswith("cv")]
+    assert len(coverage) >= 4
+    assert all(q.expected == "pass" and len(q.expected_intents) == 1 for q in coverage)
+
+
+def test_day_summary_has_plain_and_combined_phrasings() -> None:
+    """P13. day_summary was never detected at 0.7 in the P12 battery: the set asks it many ways."""
+    question_set = load_question_set(QUESTIONS)
+    asks = [q for q in question_set.questions if "day_summary" in q.expected_intents]
+    assert sum(len(q.expected_intents) == 1 for q in asks) >= 8
+    assert sum(len(q.expected_intents) >= 2 for q in asks) >= 8
