@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
+from agent_core.domain.intents import PlanToolResult
+
 __all__ = [
     "COMPOSITE",
     "DEFER_NO_INTENT",
@@ -47,8 +49,10 @@ __all__ = [
     "PASS_FOLLOW_UP",
     "PASS_TOO_MANY",
     "Assessment",
+    "MAX_COMPOSITE_CALLS",
     "CompositeCall",
     "CompositeMember",
+    "CompositeRun",
     "FastPathMode",
     "FastPathThresholds",
     "FastPathVerdict",
@@ -61,6 +65,9 @@ PASS_FOLLOW_UP: Final[str] = "pass:depends_on_history"
 PASS_COMPLEX: Final[str] = "pass:complex"
 PASS_TOO_MANY: Final[str] = "pass:too_many_intents"
 DEFER_NO_INTENT: Final[str] = "defer:no_intent"
+
+MAX_COMPOSITE_CALLS: Final[int] = 12
+"""The most distinct tool calls one composite runs (each owner's `max_iterations` applies too)."""
 
 MAX_ASSESSED_INTENTS: Final[int] = 254
 """As many intents as one Typesafe choice question may list (255 options, an escape among them)."""
@@ -224,3 +231,19 @@ class CompositeCall:
     @property
     def intents(self) -> tuple[str, ...]:
         return tuple(member.intent for member in self.members)
+
+
+@dataclass(frozen=True, slots=True)
+class CompositeRun:
+    """How a composite's calls ended (a recorded step result).
+
+    `groups` holds each intent's results in its plan's order, the intents in order; `cached` a
+    remembered reply (S10 answer cache: no call ran); `fallback` why the composite cannot answer;
+    `tool_count` how many distinct calls ran; `cache_key` the digest the reply may be stored
+    under (None: not cacheable)."""
+
+    groups: tuple[tuple[str, tuple[PlanToolResult, ...]], ...] = ()
+    cached: str | None = None
+    fallback: str | None = None
+    tool_count: int = 0
+    cache_key: str | None = None

@@ -329,6 +329,7 @@ __all__ = [
     "compose_settings_for",
     "fast_path_thresholds_for",
     "recent_history_lines",
+    "refuse_unknown_composer",
     "dbos_config",
     "load_profiles",
     "refuse_unplannable_intents",
@@ -759,6 +760,9 @@ class Settings:
     fast_path_follow_up_threshold: float = _FAST_PATH_DEFAULTS.follow_up
     fast_path_complexity_threshold: float = _FAST_PATH_DEFAULTS.complexity
     fast_path_max_intents: int = _FAST_PATH_DEFAULTS.max_intents
+    # S10. The profile that writes a composite's one reply (`AGENT_CORE_FAST_PATH_COMPOSER`); unset
+    # or empty is the turn's entry profile. Startup stops when it names no loaded profile.
+    fast_path_composer: str | None = None
 
     @property
     def resolved_audit_conninfo(self) -> str:
@@ -874,6 +878,7 @@ class Settings:
                 env.get("AGENT_CORE_FAST_PATH_COMPLEXITY_THRESHOLD"),
                 _FAST_PATH_DEFAULTS.complexity,
             ),
+            fast_path_composer=(env.get("AGENT_CORE_FAST_PATH_COMPOSER") or "").strip() or None,
             fast_path_max_intents=_parse_positive(
                 "AGENT_CORE_FAST_PATH_MAX_INTENTS",
                 env.get("AGENT_CORE_FAST_PATH_MAX_INTENTS"),
@@ -991,6 +996,15 @@ def _parse_positive(name: str, raw: str | None, default: int) -> int:
     if value < 1:
         raise ValueError(f"{name} must be a whole number of at least 1, got {raw!r}")
     return value
+
+
+def refuse_unknown_composer(profiles: Mapping[str, AgentProfile], composer: str | None) -> None:
+    """Stop startup when `AGENT_CORE_FAST_PATH_COMPOSER` names no loaded profile (S10)."""
+    if composer is not None and composer not in profiles:
+        raise ValueError(
+            f"AGENT_CORE_FAST_PATH_COMPOSER names {composer!r}, which is not a loaded profile; "
+            f"loaded: {sorted(profiles)}"
+        )
 
 
 def fast_path_thresholds_for(settings: Settings) -> FastPathThresholds:
@@ -2613,6 +2627,8 @@ def build_container(
     # store, audit sink and context engine `StartTurn` holds, so a planned call is policed, audited
     # and accounted exactly as a model's call is.
     plans = addons.intents if resolved.turn_routing and addons.intents else None
+    if resolved.turn_routing and resolved.fast_path is not FastPathMode.OFF:
+        refuse_unknown_composer(profiles, resolved.fast_path_composer)
     route_turn = (
         RouteTurn(
             routers=AddonTurnRouter(addons.routers),
@@ -2653,6 +2669,8 @@ def build_container(
             profiles=profiles,
             plans=plans,
             request_persisted=_pg_request_persisted(resolved.app_conninfo),
+            # S10. The profile that writes a composite's reply (None: the entry profile).
+            composer=resolved.fast_path_composer,
         )
     )
     container = Container(

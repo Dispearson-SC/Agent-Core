@@ -178,6 +178,7 @@ from agent_core.domain.answer_cache import (
 )
 from agent_core.domain.compaction import ContextState
 from agent_core.domain.events import EventKind, EventOwner, ProgressEvent, progress_event_id
+from agent_core.domain.fast_path import COMPOSITE, CompositeCall, CompositeRun
 from agent_core.domain.intents import (
     PLAN_NOT_WIRED,
     PLAN_REPLY_FAILED,
@@ -1215,17 +1216,85 @@ async def _run_plan(turn_id: TurnId, request: TurnRequest, call: IntentCall) -> 
     return None
 
 
-async def _start(turn_id: TurnId, request: TurnRequest, intent: IntentCall | None) -> TurnOutcome:
-    """The first outcome of a turn: its intent's plan when it has one that answers, else the
-    normal path. Without an intent (every peer turn, every unrouted turn) only `_step_start`.
+# --- S10: a fast path composite, as recorded steps -----------------------------------------------
+#
+# A turn whose route step handed a composite on runs it INSTEAD of `_step_start`: one step runs
+# every call (concurrently, inside the step, in a sorted order: replay reads the step's result
+# back and never re-runs a call), one step writes the reply. Like the intent steps, they are
+# reached only when the RECORDED route names a composite, so a turn without one keeps its
+# operation log and no new pinned version is needed. Any failure records the fallback and then
+# runs `_step_start` with the same request (the person's, on the entry profile).
+
+
+@DBOS.step()
+async def _step_composite_run(
+    turn_id: TurnId, request: TurnRequest, composite: CompositeCall
+) -> CompositeRun:
+    """Every call of every member's plan; `not_wired` when no executor is bound any more."""
+    run_intent = _require_dependencies().run_intent
+    if run_intent is None:
+        return CompositeRun(fallback=PLAN_NOT_WIRED)
+    return await run_intent.run_composite(turn_id, request, composite)
+
+
+@DBOS.step()
+async def _step_composite_reply(
+    turn_id: TurnId, request: TurnRequest, composite: CompositeCall, run: CompositeRun
+) -> TurnOutcome | None:
+    """The one reply, persisted, and the `planned` event; None when it failed."""
+    run_intent = _require_dependencies().run_intent
+    if run_intent is None:
+        return None
+    outcome = await run_intent.reply_composite(turn_id, request, composite, run)
+    if outcome is not None:
+        await _publish_planned(turn_id, request, "cache" if run.cached is not None else COMPOSITE)
+    return outcome
+
+
+@DBOS.step()
+async def _step_composite_fallback(
+    turn_id: TurnId, request: TurnRequest, composite: CompositeCall, reason: str, tool_count: int
+) -> None:
+    """Audit the composite that gave up and publish `planned` with `fallback:<reason>`."""
+    run_intent = _require_dependencies().run_intent
+    if run_intent is not None:
+        await run_intent.fall_back_composite(turn_id, request, composite, reason, tool_count)
+    await _publish_planned(turn_id, request, f"fallback:{reason}")
+
+
+async def _run_composite(
+    turn_id: TurnId, request: TurnRequest, composite: CompositeCall
+) -> TurnOutcome | None:
+    """The composite's steps; the finished outcome, or None after recording why it fell back.
+    Every branch is a function of step results (R1)."""
+    run = await _step_composite_run(turn_id, request, composite)
+    reason = run.fallback
+    if reason is None:
+        outcome = await _step_composite_reply(turn_id, request, composite, run)
+        if outcome is not None:
+            return outcome
+        reason = PLAN_REPLY_FAILED
+    await _step_composite_fallback(turn_id, request, composite, reason, run.tool_count)
+    return None
+
+
+async def _start(
+    turn_id: TurnId, request: TurnRequest, intent: IntentCall | CompositeCall | None
+) -> TurnOutcome:
+    """The first outcome of a turn: its intent's plan (or its composite, S10) when it has one that
+    answers, else the normal path. Without either (every peer turn, every unrouted turn) only
+    `_step_start`.
 
     The branch reads the RECORDED intent only, never the process's configuration: a turn recovered
     after routing was turned off still runs the plan steps its route implies (they fall back as
     `not_wired`), so the operation log replays (slice 36, DBOSUnexpectedStepError)."""
-    if intent is not None:
+    planned: TurnOutcome | None = None
+    if isinstance(intent, CompositeCall):
+        planned = await _run_composite(turn_id, request, intent)
+    elif intent is not None:
         planned = await _run_plan(turn_id, request, intent)
-        if planned is not None:
-            return planned
+    if planned is not None:
+        return planned
     return await _step_start(turn_id, request)
 
 
@@ -2851,7 +2920,9 @@ async def _step_progress(
     return at
 
 
-async def _drive_turn(request: TurnRequest, intent: IntentCall | None = None) -> _TurnEnd:
+async def _drive_turn(
+    request: TurnRequest, intent: IntentCall | CompositeCall | None = None
+) -> _TurnEnd:
     """The turn itself, durably, with its progress events (C21): `started` first, then the turn,
     then `finished` (also when it gave up: `detail="closed"`) or `failed` and the error re-raised.
 
@@ -2874,7 +2945,7 @@ async def _drive_turn(request: TurnRequest, intent: IntentCall | None = None) ->
 
 
 async def _run_turn(
-    turn_id: TurnId, request: TurnRequest, intent: IntentCall | None = None
+    turn_id: TurnId, request: TurnRequest, intent: IntentCall | CompositeCall | None = None
 ) -> _TurnEnd:
     """The turn itself, durably: start it, then collect or wait for whatever it suspends on,
     resume, and repeat until it finishes or gives up.
@@ -3017,7 +3088,10 @@ async def run_turn_workflow(request: TurnRequest) -> TurnOutcome:
         routed = await _step_route(request)
         request = routed.request
         # D97. `getattr`: a route recorded by a `.12` build without intents has no such slot.
-        intent: IntentCall | None = getattr(routed, "intent", None)
+        # S10. A composite (the fast path on) takes the place of a single intent.
+        intent: IntentCall | CompositeCall | None = getattr(routed, "composite", None) or getattr(
+            routed, "intent", None
+        )
 
         end = await _drive_turn(request, intent)
         if end.closed:

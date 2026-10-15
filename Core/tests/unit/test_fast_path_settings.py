@@ -89,3 +89,23 @@ def test_the_recent_conversation_is_the_last_texts_of_both_sides_oldest_first_an
         "agent: Order 12 trays.",
     )
     assert recent_history_lines([], limit=3) == ()
+
+
+# --- the composer --------------------------------------------------------------------------------
+
+from agent_core.composition import refuse_unknown_composer  # noqa: E402
+from agent_core.domain.profile import AgentProfile  # noqa: E402
+
+
+def test_the_composer_is_the_entry_profile_unless_one_is_named() -> None:
+    assert _settings().fast_path_composer is None
+    assert _settings(AGENT_CORE_FAST_PATH_COMPOSER=" writer ").fast_path_composer == "writer"
+    assert _settings(AGENT_CORE_FAST_PATH_COMPOSER="").fast_path_composer is None
+
+
+def test_a_composer_that_is_not_a_loaded_profile_stops_startup() -> None:
+    profiles = {"writer": AgentProfile(id="writer", persona="w", model="m")}
+    refuse_unknown_composer(profiles, "writer")
+    refuse_unknown_composer(profiles, None)
+    with pytest.raises(ValueError, match="AGENT_CORE_FAST_PATH_COMPOSER.*ghost"):
+        refuse_unknown_composer(profiles, "ghost")

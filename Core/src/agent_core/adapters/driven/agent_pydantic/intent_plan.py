@@ -51,6 +51,7 @@ from agent_core.domain.tool_replay import ReplayPolicy, replay_policy
 
 __all__ = [
     "COMPOSE_INSTRUCTIONS",
+    "COMPOSITE_INSTRUCTIONS",
     "DEFAULT_COMPOSE_MAX_TOKENS",
     "DEFAULT_COMPOSE_REASONING_EFFORT",
     "REASONING_EFFORTS",
@@ -60,6 +61,7 @@ __all__ = [
     "PlanRefusedError",
     "PlanScript",
     "compose_prompt",
+    "composite_prompt",
     "refuses_reasoning_effort",
 ]
 
@@ -76,6 +78,12 @@ COMPOSE_INSTRUCTIONS: Final[str] = (
 """Measured on the live provider (L18, a reasoning model): the earlier wording, which listed every
 kind of fact not to invent, estimate or round, made it verify each figure and spend 6-7k reasoning
 tokens (33-38 s) composing from an 11k-token result; this wording about 1k (7-8 s)."""
+
+COMPOSITE_INSTRUCTIONS: Final[str] = (
+    "The results are grouped by topic. The question may ask about several of them: answer every "
+    "topic it asks about, in the order it asks, each in a sentence or two."
+)
+"""S10. Added to `COMPOSE_INSTRUCTIONS` for a fast path composite (several intents, one reply)."""
 
 DEFAULT_COMPOSE_MAX_TOKENS: Final = 4096
 DEFAULT_COMPOSE_REASONING_EFFORT: Final = "low"
@@ -205,3 +213,16 @@ def compose_prompt(question: str, results: tuple[PlanToolResult, ...]) -> str:
     """The one prompt of a compose call: the person's question, then each result by tool."""
     blocks = "\n\n".join(f"### {r.tool} ({r.step_id})\n{r.content}" for r in results)
     return f"{question}\n\n## Tool results\n\n{blocks}"
+
+
+def composite_prompt(
+    question: str, groups: tuple[tuple[str, tuple[PlanToolResult, ...]], ...]
+) -> str:
+    """S10. The one prompt of a composite compose: the question, then each intent's results under
+    the intent's name, in intent order."""
+    sections = []
+    for intent, results in groups:
+        blocks = "\n\n".join(f"### {r.tool} ({r.step_id})\n{r.content}" for r in results)
+        sections.append(f"## {intent}\n\n{blocks}")
+    body = "\n\n".join(sections)
+    return f"{question}\n\n# Tool results by topic\n\n{body}"

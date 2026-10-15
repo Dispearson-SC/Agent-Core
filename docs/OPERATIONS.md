@@ -291,6 +291,21 @@ D98 peer gate and the person's `ask_peer` policy: `defer:<intent>:peer_refused:<
 runs the route logic above (a follow-up is still not routed). A history read that fails runs
 today's path whatever the verdict.
 
+A composite (with `on`) runs the plans of EVERY detected intent and ONE reply: all their calls in
+one recorded step, concurrently (started in a sorted order; identical calls of one owner run once),
+each as its owner through the owner's grant, policy, wrappers and audit, delegated as an ask_peer
+to that owner would run (`audit_tool_calls.caller = 'peer-agent'`, `on_behalf_of` the person). A
+plan in a composite takes constants and context values only (no router-extracted arguments). The
+budget is each owner's `max_iterations` and 12 distinct calls in all. Then one tool-less compose
+writes the reply from every result, grouped by intent, on the profile
+`AGENT_CORE_FAST_PATH_COMPOSER` names (default: the entry profile; startup stops when it is not a
+loaded profile), with the same bounds, streaming and withdraw-on-cut as an intent plan's compose
+(`AGENT_CORE_COMPOSE_*`). The turn is the person's turn of the entry profile. Each member is one
+`audit_turn_intents` row (`reply_mode = 'composite'`), and the feed shows `routed` = `composite`
+and `planned` = `composite`. Any failure (a plan that cannot run, a failed call, the budget, the
+compose) records `planned` = `fallback:<reason>` and runs the entry profile's normal path from
+scratch, as the person.
+
 The route row says what it did or would have done (migration `0049`, additive; NULL with `off`):
 
 ```postgresql

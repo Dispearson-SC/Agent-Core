@@ -18,6 +18,9 @@ audit; the workflow makes each call a recorded step.
     compose_reply   ONE model call of `profile`, offered NO tools, that writes the reply to the
                     person's question from the results and from nothing else. A finished outcome
                     carrying the reply message, its usage and its streamed text.
+    compose_composite  S10. `compose_reply` for a fast path composite: ONE tool-less model call
+                    of `profile` that answers every part of the question from the results of
+                    several intents, grouped by intent (`groups`, in intent order).
     template_reply  a finished outcome carrying `text` as the agent's reply, no model call.
 
 An adapter may raise; `RunIntent` turns a raise into a fallback to the normal path.
@@ -45,6 +48,14 @@ class IntentRunner(Protocol):
         request: TurnRequest,
         profile: AgentProfile,
         results: tuple[PlanToolResult, ...],
+    ) -> TurnOutcome: ...
+
+    async def compose_composite(
+        self,
+        turn_id: TurnId,
+        request: TurnRequest,
+        profile: AgentProfile,
+        groups: tuple[tuple[str, tuple[PlanToolResult, ...]], ...],
     ) -> TurnOutcome: ...
 
     def template_reply(self, turn_id: TurnId, text: str) -> TurnOutcome: ...

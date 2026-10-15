@@ -133,12 +133,14 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from agent_core.adapters.driven.agent_pydantic.intent_plan import (
     COMPOSE_INSTRUCTIONS,
+    COMPOSITE_INSTRUCTIONS,
     PLAN_PROMPT,
     ComposeIncompleteError,
     ComposeSettings,
     PlanRefusedError,
     PlanScript,
     compose_prompt,
+    composite_prompt,
     refuses_reasoning_effort,
 )
 from agent_core.adapters.driven.agent_pydantic.reply_stream import ReplyStreamHandler
@@ -1867,14 +1869,51 @@ class PydanticAgentRunner:
         (`ReplyStreamHandler.withdraw`, P11), also when the call itself fails: a cut draft must not
         stay on the person's feed contradicting the fallback reply.
         """
+        return await self._compose(
+            turn_id,
+            request,
+            profile,
+            compose_prompt(request.input.text, results),
+            (COMPOSE_INSTRUCTIONS,),
+        )
+
+    async def compose_composite(
+        self,
+        turn_id: TurnId,
+        request: TurnRequest,
+        profile: AgentProfile,
+        groups: tuple[tuple[str, tuple[PlanToolResult, ...]], ...],
+    ) -> TurnOutcome:
+        """S10. `compose_reply` for a fast path composite: the same one tool-less, bounded,
+        streamed call (withdrawn when cut or failed), its prompt every intent's results grouped by
+        intent, its instructions `COMPOSE_INSTRUCTIONS` plus `COMPOSITE_INSTRUCTIONS`."""
+        return await self._compose(
+            turn_id,
+            request,
+            profile,
+            composite_prompt(request.input.text, groups),
+            (COMPOSE_INSTRUCTIONS, COMPOSITE_INSTRUCTIONS),
+        )
+
+    async def _compose(
+        self,
+        turn_id: TurnId,
+        request: TurnRequest,
+        profile: AgentProfile,
+        prompt: str,
+        extra_instructions: tuple[str, ...],
+    ) -> TurnOutcome:
         agent = self._composer_for(profile)
-        instructions = [*(_turn_instructions(profile, request.caller) or []), COMPOSE_INSTRUCTIONS]
+        instructions = [
+            *(_turn_instructions(profile, request.caller) or []),
+            *extra_instructions,
+        ]
         stream = self._reply_stream(turn_id, request)
         settings = self._compose_settings.model_settings()
 
         async def compose(model_settings: dict[str, Any]) -> AgentRunResult[str]:
             return await agent.run(
-                compose_prompt(request.input.text, results),
+                prompt,
                 instructions=instructions,
                 model_settings=cast(ModelSettings, model_settings),
                 usage_limits=UsageLimits(request_limit=1, cost_limit=profile.max_cost_usd),

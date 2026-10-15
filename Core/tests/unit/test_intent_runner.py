@@ -403,3 +403,54 @@ def test_the_compose_bounds_are_read_strictly_and_an_empty_effort_sends_none() -
     ):
         with pytest.raises(ValueError):
             Settings.from_env(bad, env_file=Path("/nonexistent/.env"))
+
+
+def test_a_composite_compose_is_one_tool_less_call_with_every_result_grouped_by_intent() -> None:
+    """S10. The fast path's composite: one compose answers every part of the question."""
+    from agent_core.adapters.driven.agent_pydantic.intent_plan import COMPOSITE_INSTRUCTIONS
+
+    seen: dict[str, Any] = {}
+
+    def compose(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        seen["tools"] = [t.name for t in info.function_tools]
+        seen["instructions"] = info.instructions or ""
+        seen["prompt"] = [
+            p.content for m in messages for p in m.parts if isinstance(p, UserPromptPart)
+        ]
+        seen["requests"] = seen.get("requests", 0) + 1
+        return ModelResponse(parts=[TextPart("Sales 1,200; order 12 trays.")])
+
+    def factory(model_id: str, base_url: str | None) -> Model:
+        return FunctionModel(compose)
+
+    runner = _runner(Backend(), model_factory=factory)
+    groups = (
+        ("day_summary", (PlanToolResult("snap", "get_snapshot", content='{"sales": 1200}'),)),
+        ("order_plan", (PlanToolResult("plan", "get_order_plan", content='{"trays": 12}'),)),
+    )
+
+    outcome = asyncio.run(runner.compose_composite(TURN, _request(), _profile(), groups))
+
+    assert outcome.result.text == "Sales 1,200; order 12 trays."
+    assert seen["tools"] == [] and seen["requests"] == 1
+    assert COMPOSE_INSTRUCTIONS in seen["instructions"]
+    assert COMPOSITE_INSTRUCTIONS in seen["instructions"]
+    prompt = seen["prompt"][0]
+    assert prompt.startswith("what is low on stock?")
+    assert prompt.index("## day_summary") < prompt.index('{"sales": 1200}')
+    assert prompt.index('{"sales": 1200}') < prompt.index("## order_plan")
+    assert prompt.index("## order_plan") < prompt.index('{"trays": 12}')
+    assert [type(m).__name__ for m in outcome.messages] == ["ModelResponse"]
+
+
+def test_a_cut_composite_compose_raises_so_the_composite_falls_back() -> None:
+    def compose(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart("half")], finish_reason="length")
+
+    def factory(model_id: str, base_url: str | None) -> Model:
+        return FunctionModel(compose)
+
+    runner = _runner(Backend(), model_factory=factory)
+    groups = (("a", (PlanToolResult("x", "x", content="1"),)),)
+    with pytest.raises(ComposeIncompleteError):
+        asyncio.run(runner.compose_composite(TURN, _request(), _profile(), groups))
