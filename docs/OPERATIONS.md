@@ -201,6 +201,15 @@ profile names a router no enabled addon provides, or a target that is not loaded
 cannot start. `AGENT_CORE_TURN_ROUTER_TIMEOUT_MS` (default 1500) bounds one consultation. Turning it
 off again needs no drain: the step stays and simply returns the request unchanged.
 
+An intent plan's reply is ONE tool-less model call (the compose). It is bounded per deployment:
+`AGENT_CORE_COMPOSE_MAX_TOKENS` (default 4096, reasoning included on providers that count it there)
+and `AGENT_CORE_COMPOSE_REASONING_EFFORT` (`minimal`/`low`/`medium`/`high`, default `low`; set it
+EMPTY to send no effort, for a provider or a LiteLLM proxy that refuses `reasoning_effort` - such a
+provider fails every compose and every plan falls back to the normal path). A compose cut at the
+bound, or with no text, falls back too. Measured on the glazed deployment (reasoning model, L18):
+unbounded composes spent 7-17k reasoning tokens (47-112 s); `low` effort took one from 33-38 s to
+3-7 s.
+
 What the router did, per turn:
 
 ```postgresql

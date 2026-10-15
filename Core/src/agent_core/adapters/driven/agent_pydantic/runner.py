@@ -87,7 +87,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Final
+from typing import Any, Final, cast
 from urllib.parse import urlsplit
 
 from pydantic_ai import Agent, RunContext
@@ -117,6 +117,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.output import StructuredDict
 from pydantic_ai.run import AgentRunResult
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import (
     DeferredToolApprovalResult,
     DeferredToolRequests,
@@ -132,6 +133,8 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 from agent_core.adapters.driven.agent_pydantic.intent_plan import (
     COMPOSE_INSTRUCTIONS,
     PLAN_PROMPT,
+    ComposeIncompleteError,
+    ComposeSettings,
     PlanRefusedError,
     PlanScript,
     compose_prompt,
@@ -1599,6 +1602,7 @@ class PydanticAgentRunner:
         background_agents: BackgroundAgents | None = None,
         reply_events: EventPublisher | None = None,
         tool_journal: ToolJournal | None = None,
+        compose_settings: ComposeSettings | None = None,
     ) -> None:
         self._model = model
         self._policy = policy
@@ -1624,6 +1628,8 @@ class PydanticAgentRunner:
         self._agents: dict[tuple[str, str, str], Agent[Any, RunOutput]] = {}
         # D97. One tool-less agent per profile for the compose reply of an intent plan.
         self._composers: dict[tuple[str, str, str], Agent[Any, str]] = {}
+        # L18. The compose call's output and reasoning bounds; None keeps the defaults.
+        self._compose_settings = compose_settings or ComposeSettings()
 
     def usage_limits_for(self, profile: AgentProfile) -> UsageLimits:
         """The profile's ceilings, as Pydantic AI enforces them.
@@ -1799,15 +1805,27 @@ class PydanticAgentRunner:
         message alone, and an earlier turn's tool calls could not be sent to a provider that
         refuses tool parts without tools. Streamed like any person's turn (C26). A request limit
         of one: a compose that wants a second request has failed, and the turn falls back.
+
+        Bounded by the deployment's `ComposeSettings` (L18): an answer cut at `max_tokens` or with
+        no text raises `ComposeIncompleteError`, so `RunIntent.reply` falls back to the normal path
+        before anything of the turn is persisted.
         """
         agent = self._composer_for(profile)
         instructions = [*(_turn_instructions(profile, request.caller) or []), COMPOSE_INSTRUCTIONS]
         result = await agent.run(
             compose_prompt(request.input.text, results),
             instructions=instructions,
+            model_settings=cast(ModelSettings, self._compose_settings.model_settings()),
             usage_limits=UsageLimits(request_limit=1, cost_limit=profile.max_cost_usd),
             event_stream_handler=self._reply_stream(turn_id, request),
         )
+        if result.response.finish_reason == "length":
+            raise ComposeIncompleteError(
+                f"the compose of turn {turn_id} was cut at {self._compose_settings.max_tokens} "
+                "output tokens"
+            )
+        if not str(result.output).strip():
+            raise ComposeIncompleteError(f"the compose of turn {turn_id} returned no text")
         return TurnOutcome(
             turn_id=turn_id,
             messages=_messages_the_turn_added(result.new_messages()),

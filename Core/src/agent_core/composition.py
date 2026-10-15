@@ -180,6 +180,12 @@ from agent_core.adapters.driven.addons_fs.registration import (
     collect_audit_for,
     register_addons,
 )
+from agent_core.adapters.driven.agent_pydantic.intent_plan import (
+    DEFAULT_COMPOSE_MAX_TOKENS,
+    DEFAULT_COMPOSE_REASONING_EFFORT,
+    REASONING_EFFORTS,
+    ComposeSettings,
+)
 from agent_core.adapters.driven.agent_pydantic.runner import PydanticAgentRunner
 from agent_core.adapters.driven.context.engine import LadderContextEngine
 from agent_core.adapters.driven.context.summariser import ModelSummariser
@@ -313,6 +319,7 @@ __all__ = [
     "bind_turn_workflow",
     "build_channel_registry",
     "build_container",
+    "compose_settings_for",
     "dbos_config",
     "load_profiles",
     "refuse_unplannable_intents",
@@ -721,6 +728,11 @@ class Settings:
     # runs the requested profile.
     turn_routing: bool = False
     turn_router_timeout_ms: int = DEFAULT_ROUTER_TIMEOUT_MS
+    # L18. The bounds of an intent plan's compose call: `AGENT_CORE_COMPOSE_MAX_TOKENS` (positive,
+    # default 4096) and `AGENT_CORE_COMPOSE_REASONING_EFFORT` (minimal/low/medium/high, default
+    # low; empty sends no effort, for a provider or proxy that refuses the parameter).
+    compose_max_tokens: int = DEFAULT_COMPOSE_MAX_TOKENS
+    compose_reasoning_effort: str | None = DEFAULT_COMPOSE_REASONING_EFFORT
 
     @property
     def resolved_audit_conninfo(self) -> str:
@@ -808,6 +820,10 @@ class Settings:
             turn_router_timeout_ms=_parse_router_timeout_ms(
                 env.get("AGENT_CORE_TURN_ROUTER_TIMEOUT_MS")
             ),
+            compose_max_tokens=_parse_compose_max_tokens(env.get("AGENT_CORE_COMPOSE_MAX_TOKENS")),
+            compose_reasoning_effort=_parse_compose_effort(
+                env.get("AGENT_CORE_COMPOSE_REASONING_EFFORT")
+            ),
         )
 
 
@@ -852,6 +868,41 @@ def _parse_max_redeliveries(raw: str | None) -> int:
             f"AGENT_CORE_PEER_MAX_REDELIVERIES must be a non-negative whole number, got {raw!r}"
         )
     return cap
+
+
+def _parse_compose_max_tokens(raw: str | None) -> int:
+    """`AGENT_CORE_COMPOSE_MAX_TOKENS` as a positive integer; unset means the default."""
+    if raw is None:
+        return DEFAULT_COMPOSE_MAX_TOKENS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise ValueError(
+            f"AGENT_CORE_COMPOSE_MAX_TOKENS must be a positive whole number, got {raw!r}"
+        )
+    return value
+
+
+def _parse_compose_effort(raw: str | None) -> str | None:
+    """`AGENT_CORE_COMPOSE_REASONING_EFFORT`: unset is the default, empty sends none."""
+    if raw is None:
+        return DEFAULT_COMPOSE_REASONING_EFFORT
+    value = raw.strip().lower()
+    if not value:
+        return None
+    if value not in REASONING_EFFORTS:
+        raise ValueError(
+            f"AGENT_CORE_COMPOSE_REASONING_EFFORT must be one of {sorted(REASONING_EFFORTS)} or "
+            f"empty, got {raw!r}"
+        )
+    return value
+
+
+def compose_settings_for(settings: Settings) -> ComposeSettings:
+    """The runner's compose bounds from the resolved settings (L18)."""
+    return ComposeSettings(settings.compose_max_tokens, settings.compose_reasoning_effort)
 
 
 def _parse_router_timeout_ms(raw: str | None) -> int:
@@ -2271,6 +2322,7 @@ def build_container(
         # C30 (D65). A tool that is not `replay: safe` is journaled on the domain pool, so a turn
         # step repeated after a crash does not run it twice.
         tool_journal=tool_journal_for(domain_pool),
+        compose_settings=compose_settings_for(resolved),
     )
 
     channels = build_channel_registry(resolved, addons.pull_channels)

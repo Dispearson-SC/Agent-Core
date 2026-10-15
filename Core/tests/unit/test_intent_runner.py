@@ -15,6 +15,7 @@ model call offered no tools, told to use only the results; a template reply call
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -25,7 +26,12 @@ from pydantic_ai.tools import Tool
 from pydantic_ai.toolsets import FunctionToolset
 
 from agent_core.adapters.driven.agent_pydantic import runner as runner_module
-from agent_core.adapters.driven.agent_pydantic.intent_plan import COMPOSE_INSTRUCTIONS
+from agent_core.adapters.driven.agent_pydantic.intent_plan import (
+    COMPOSE_INSTRUCTIONS,
+    ComposeIncompleteError,
+    ComposeSettings,
+)
+from agent_core.composition import Settings, compose_settings_for
 from agent_core.domain.intents import (
     PLAN_ARGUMENT_INVALID,
     PLAN_NEEDS_APPROVAL,
@@ -243,3 +249,97 @@ def test_a_planned_call_fits_a_profile_allowed_a_single_iteration() -> None:
 
     assert result.ok
     assert backend.calls == [("stock_levels", {"limit": 5})]
+
+
+# --- the compose call's bounds (stress phase5: 16-20k reasoning tokens, 47-112 s per reply) ---
+
+
+def _settings_seen(runner_kwargs: dict[str, Any]) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+
+    def compose(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        seen.update(info.model_settings or {})
+        return ModelResponse(parts=[TextPart("ok")])
+
+    def factory(model_id: str, base_url: str | None) -> Model:
+        return FunctionModel(compose)
+
+    runner = runner_module.PydanticAgentRunner(
+        model=fakes.FakeModelGateway(),
+        policy=_policy(),
+        audit=fakes.FakeAuditSink(),
+        model_factory=factory,
+        **runner_kwargs,
+    )
+    results = (PlanToolResult("stock_levels", "stock_levels", content='{"units": 2}'),)
+    asyncio.run(runner.compose_reply(TURN, _request(), _profile(), results))
+    return seen
+
+
+def test_a_compose_reply_is_bounded_by_default_in_output_tokens_and_reasoning_effort() -> None:
+    seen = _settings_seen({})
+
+    assert seen["max_tokens"] == 4096
+    assert seen["openai_reasoning_effort"] == "low"
+
+
+def test_a_deployment_sets_the_compose_bounds_and_an_unset_effort_is_not_sent() -> None:
+    seen = _settings_seen(
+        {"compose_settings": ComposeSettings(max_tokens=900, reasoning_effort=None)}
+    )
+
+    assert seen["max_tokens"] == 900
+    assert "openai_reasoning_effort" not in seen
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        ModelResponse(parts=[TextPart("Product A has")], finish_reason="length"),
+        ModelResponse(parts=[TextPart("   ")]),
+    ],
+    ids=["cut_at_the_token_bound", "empty"],
+)
+def test_a_cut_or_empty_compose_raises_so_the_plan_falls_back(response: ModelResponse) -> None:
+    def compose(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return response
+
+    def factory(model_id: str, base_url: str | None) -> Model:
+        return FunctionModel(compose)
+
+    runner = _runner(Backend(), model_factory=factory)
+    results = (PlanToolResult("stock_levels", "stock_levels", content='{"units": 2}'),)
+
+    with pytest.raises(ComposeIncompleteError):
+        asyncio.run(runner.compose_reply(TURN, _request(), _profile(), results))
+
+
+def test_the_compose_instructions_ask_for_a_brief_answer_that_copies_numbers() -> None:
+    """Measured on the live provider (L18): the earlier wording ("do not invent, estimate or round
+    any number...") cost 6-7k reasoning tokens on a 11k-token briefing; this one about 1k."""
+    assert "briefly" in COMPOSE_INSTRUCTIONS
+    assert "exactly as they appear" in COMPOSE_INSTRUCTIONS
+
+
+# --- the deployment's compose bounds (`AGENT_CORE_COMPOSE_*`) --------------------------------
+
+
+def test_the_compose_bounds_default_to_4096_tokens_and_low_effort() -> None:
+    settings = Settings.from_env({}, env_file=Path("/nonexistent/.env"))
+
+    assert compose_settings_for(settings) == ComposeSettings(4096, "low")
+
+
+def test_the_compose_bounds_are_read_strictly_and_an_empty_effort_sends_none() -> None:
+    settings = Settings.from_env(
+        {"AGENT_CORE_COMPOSE_MAX_TOKENS": "1200", "AGENT_CORE_COMPOSE_REASONING_EFFORT": ""},
+        env_file=Path("/nonexistent/.env"),
+    )
+    assert compose_settings_for(settings) == ComposeSettings(1200, None)
+    for bad in (
+        {"AGENT_CORE_COMPOSE_MAX_TOKENS": "0"},
+        {"AGENT_CORE_COMPOSE_MAX_TOKENS": "lots"},
+        {"AGENT_CORE_COMPOSE_REASONING_EFFORT": "extreme"},
+    ):
+        with pytest.raises(ValueError):
+            Settings.from_env(bad, env_file=Path("/nonexistent/.env"))

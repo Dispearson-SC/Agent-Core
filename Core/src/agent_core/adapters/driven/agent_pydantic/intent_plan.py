@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Final
 
 from pydantic_ai.messages import (
@@ -50,6 +51,11 @@ from agent_core.domain.tool_replay import ReplayPolicy, replay_policy
 
 __all__ = [
     "COMPOSE_INSTRUCTIONS",
+    "DEFAULT_COMPOSE_MAX_TOKENS",
+    "DEFAULT_COMPOSE_REASONING_EFFORT",
+    "REASONING_EFFORTS",
+    "ComposeIncompleteError",
+    "ComposeSettings",
     "PLAN_PROMPT",
     "PlanRefusedError",
     "PlanScript",
@@ -61,9 +67,51 @@ PLAN_PROMPT: Final[str] = "Run the planned tool call."
 
 COMPOSE_INSTRUCTIONS: Final[str] = (
     "The tools below were already run for this question; no other tool is available. Answer the "
-    "question using ONLY these results. Do not invent, estimate or round any number, date, name "
-    "or fact that is not in them. If they do not answer the question, say so plainly."
+    "question directly and briefly, from these results only: lead with what matters, use at most "
+    "a few short bullets, and leave out what the question did not ask for. Copy numbers, dates "
+    "and names exactly as they appear in the results; never compute new ones. If the results do "
+    "not answer the question, say so plainly."
 )
+"""Measured on the live provider (L18, a reasoning model): the earlier wording, which listed every
+kind of fact not to invent, estimate or round, made it verify each figure and spend 6-7k reasoning
+tokens (33-38 s) composing from an 11k-token result; this wording about 1k (7-8 s)."""
+
+DEFAULT_COMPOSE_MAX_TOKENS: Final = 4096
+DEFAULT_COMPOSE_REASONING_EFFORT: Final = "low"
+REASONING_EFFORTS: Final = frozenset({"minimal", "low", "medium", "high"})
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeSettings:
+    """The bounds of a compose call, set per deployment (`AGENT_CORE_COMPOSE_*`).
+
+    `max_tokens` bounds the whole answer, reasoning included on a provider that counts it there;
+    a reply cut at it is not a reply (`ComposeIncompleteError`) and the plan falls back.
+    `reasoning_effort` is sent as the OpenAI-compatible `reasoning_effort`; None sends nothing (a
+    provider or proxy that refuses the parameter fails every compose, and every plan falls back).
+    Measured (L18): "low" took the same compose from 33-38 s to 3-7 s."""
+
+    max_tokens: int = DEFAULT_COMPOSE_MAX_TOKENS
+    reasoning_effort: str | None = DEFAULT_COMPOSE_REASONING_EFFORT
+
+    def __post_init__(self) -> None:
+        if self.max_tokens < 1:
+            raise ValueError(f"the compose max_tokens must be positive, got {self.max_tokens}")
+        if self.reasoning_effort is not None and self.reasoning_effort not in REASONING_EFFORTS:
+            raise ValueError(
+                f"the compose reasoning effort must be one of {sorted(REASONING_EFFORTS)}, "
+                f"got {self.reasoning_effort!r}"
+            )
+
+    def model_settings(self) -> dict[str, Any]:
+        settings: dict[str, Any] = {"max_tokens": self.max_tokens}
+        if self.reasoning_effort is not None:
+            settings["openai_reasoning_effort"] = self.reasoning_effort
+        return settings
+
+
+class ComposeIncompleteError(Exception):
+    """A compose that came back cut at its token bound or with no text: not a reply."""
 
 
 class PlanRefusedError(Exception):
