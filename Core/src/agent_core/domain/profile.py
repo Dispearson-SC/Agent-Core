@@ -46,7 +46,7 @@ from agent_core.domain.answer_cache import MAX_TTL_SECONDS, AnswerCacheScope
 from agent_core.domain.compaction import CompactionPolicy
 from agent_core.domain.knowledge import KnowledgePolicy, RetrievalMode
 from agent_core.domain.media import MediaDelivery, MediaKind, MediaPolicy
-from agent_core.domain.model_routing import StepKind
+from agent_core.domain.model_routing import ModelTuning, StepKind
 from agent_core.domain.peers import (
     AgentId,
     AgentRef,
@@ -729,6 +729,26 @@ def _build_fast_steps(data: object, model_fast: object) -> tuple[StepKind, ...]:
     return tuple(dict.fromkeys(steps))
 
 
+def _build_model_settings(data: object) -> ModelTuning | None:
+    """`model_settings` (D99): `{reasoning_effort: minimal|low|medium|high, max_tokens: <n>}`, both
+    optional, or None (the default) to send neither."""
+    if data is None:
+        return None
+    mapping = _require_mapping(data, where="model_settings")
+    _reject_unknown_keys(mapping, {"reasoning_effort", "max_tokens"}, where="model_settings")
+    effort = mapping.get("reasoning_effort")
+    limit = mapping.get("max_tokens")
+    try:
+        ModelTuning(reasoning_effort=effort)
+    except ValueError as error:
+        raise ProfileValidationError(f"model_settings.reasoning_effort: {error}") from error
+    try:
+        ModelTuning(max_tokens=limit)
+    except ValueError as error:
+        raise ProfileValidationError(f"model_settings.max_tokens: {error}") from error
+    return ModelTuning(reasoning_effort=effort, max_tokens=limit)
+
+
 def _build_routing(data: object) -> RoutingPolicy | None:
     """`routing` (D95): `{router: <name>, targets: [profile ids], intents: false}`, or None. The
     router is an addon's `provides.routers` entry; `targets` are the only profiles it may send a
@@ -884,6 +904,10 @@ class AgentProfile:
     # the only profiles it may route to. None (the default) never routes. Part of the content hash.
     routing: RoutingPolicy | None = None
 
+    # D99. The reasoning effort and output bound of this profile's model calls (its turns, its peer
+    # answers and their resumes), or None (the default) to send neither. Part of the content hash.
+    model_settings: ModelTuning | None = None
+
     # D20, docs/TASKS.md#t-f1-17. Derived at load time, never read from the YAML.
     # `version` is 0 until a `ProfileVersionRegistry` assigns one: a profile that never
     # passed through a registry must not be able to claim it is version 1, because a turn
@@ -977,6 +1001,7 @@ class AgentProfile:
             mode=_agent_mode(mapping.get("mode", defaults.mode)),
             answer_schema=_build_answer_schema(mapping.get("answer_schema")),
             routing=_build_routing(mapping.get("routing")),
+            model_settings=_build_model_settings(mapping.get("model_settings")),
             channel_instructions=_build_fragment_map(
                 mapping.get("channel_instructions"), where="channel_instructions"
             ),

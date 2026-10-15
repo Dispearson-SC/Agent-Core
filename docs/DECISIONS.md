@@ -3479,3 +3479,23 @@ decision 2026-10-13) and are described by `addon.yaml`.
   answer on the `peer` channel. Glazed specialists cannot ask (max_hops 1 and the peer-channel
   `ask_peer` deny); a deployment that lets routed specialists ask in the background should not route.
 
+## D99 - Per-profile model settings (Phase 5, L24)
+
+- **What.** A profile may declare `model_settings: {reasoning_effort: minimal|low|medium|high,
+  max_tokens: <n>}` (both optional; `domain.model_routing.ModelTuning`). The runner sends them on
+  every model call of that profile's turns, their resumes and the peer answers it gives
+  (`openai_reasoning_effort`, `max_tokens`). Absent sends neither, the call the Core always made.
+  Part of the content hash. The compose call of an intent plan keeps its own deployment bounds
+  (`AGENT_CORE_COMPOSE_*`, L18).
+- **Why.** Measured live on a reasoning model (glazed, MiniMax M3.1 flash): with no effort sent, a
+  specialist's peer answer spent 1758 reasoning of 2660 output tokens (35.6 s); the same request
+  with `low` spent 515 of 851 (14.0 s) with the same facts. The orchestrator's final reply went
+  from 19.1 s to 8.8 s. Peer answers averaged 2.2k reasoning tokens per final answer.
+- **A refused effort.** A provider or proxy that answers 400 naming the parameter
+  (`refuses_reasoning_effort`, the compose rule of slice 39) gets the call once more without it,
+  with a log line, only while nothing of the run can have executed: a turn's first request, or a
+  resume whose resolutions are all answers or refusals. A resume carrying a bare approval already
+  ran that tool before its first request, so it is never asked again.
+- **Replay.** No workflow step changes: the pinned version stays `agent-core-turns.12`, no drain.
+  A recovered step re-runs its model call with the profile it loads, as before.
+

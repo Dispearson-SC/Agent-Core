@@ -355,6 +355,16 @@ turn_id, state, enqueued_at, delivered_at, answered_at FROM peer_messages WHERE 
 '<tenant>' AND root_turn_id = '<root>' ORDER BY enqueued_at;`. Migration `0038` (an index) is
 additive and safe under a running build.
 
+## Model settings per profile (D99)
+
+`model_settings: {reasoning_effort: low, max_tokens: 4096}` on a profile (both keys optional) is sent
+on every model call of its turns, resumes and peer answers. On a reasoning model `low` is the lever:
+reasoning tokens dominate the latency of a long answer (live: 35.6 s to 14.0 s for one peer answer).
+Leave `max_tokens` unset unless a cut reply is acceptable: a turn's reply that reaches it is cut. A
+provider that refuses `reasoning_effort` logs `the provider refused reasoning effort` and the call is
+made once more without it; remove the key to stop sending it. Changing the block changes the
+profile's content hash (a new profile version), so the C21 query below compares before and after.
+
 ## Model tiering and its measurement (C24, D56)
 
 `model_fast: <provider/model>` on a profile sends the peer answers that agent gives (a turn another

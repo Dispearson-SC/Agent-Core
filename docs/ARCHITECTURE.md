@@ -741,6 +741,10 @@ unless the depth limit allows (C29). The ownership tree labels each child `peer`
 keep `model`. Policy, audit and the stored profile version still name the profile as written; only
 the model the runner builds its agent from differs.
 
+**Model settings (D99).** `model_settings: {reasoning_effort, max_tokens}` on a profile bounds every
+model call of its turns, resumes and peer answers; absent sends neither. A provider that refuses the
+effort is asked once more without it while nothing of the run has executed.
+
 **The answer cache (C25, D57).** A driven port (`AnswerCache`, Postgres adapter, migration 0039) that
 the peer round consults AFTER the gate and BEFORE it posts an ask: key = (tenant, target, audience,
 normalised question, version), audience = the asking agent plus the subject (or the roles, if the

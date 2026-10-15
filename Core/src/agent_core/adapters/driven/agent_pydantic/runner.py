@@ -1451,6 +1451,53 @@ def _refuse_if_compaction_broke_pairing(
     )
 
 
+def profile_model_settings(profile: AgentProfile) -> dict[str, Any]:
+    """The `ModelSettings` a profile's `model_settings:` block asks for (D99); empty without one."""
+    tuning = profile.model_settings
+    settings: dict[str, Any] = {}
+    if tuning is None:
+        return settings
+    if tuning.max_tokens is not None:
+        settings["max_tokens"] = tuning.max_tokens
+    if tuning.reasoning_effort is not None:
+        settings["openai_reasoning_effort"] = tuning.reasoning_effort
+    return settings
+
+
+def _as_model_settings(settings: dict[str, Any]) -> ModelSettings | None:
+    return cast(ModelSettings, settings) if settings else None
+
+
+async def _with_profile_settings[T](
+    turn_id: TurnId,
+    profile: AgentProfile,
+    attempt: Callable[[dict[str, Any]], Awaitable[T]],
+    *,
+    may_retry: bool,
+) -> T:
+    """`attempt` with the profile's settings; once more without `reasoning_effort` when the
+    provider refuses that parameter (`refuses_reasoning_effort`, the compose rule of slice 39) and
+    `may_retry` says nothing of the run can have executed yet. Any other error is the turn's."""
+    settings = profile_model_settings(profile)
+    try:
+        return await attempt(settings)
+    except ModelHTTPError as error:
+        if (
+            not may_retry
+            or "openai_reasoning_effort" not in settings
+            or not refuses_reasoning_effort(error.status_code, error.body)
+        ):
+            raise
+        _LOG.warning(
+            "the provider refused reasoning effort %r of profile %r for turn %s; asking once "
+            "more without it (remove model_settings.reasoning_effort to stop sending it)",
+            settings["openai_reasoning_effort"],
+            profile.id,
+            turn_id,
+        )
+        return await attempt({k: v for k, v in settings.items() if k != "openai_reasoning_effort"})
+
+
 def _domain_usage(usage: RunUsage) -> Usage:
     """Pydantic AI accounting -> the domain's `Usage`.
 
@@ -1695,8 +1742,8 @@ class PydanticAgentRunner:
         if history_capability is not None:
             capabilities.append(history_capability)
 
-        try:
-            result = await agent.run(
+        async def attempt(settings: dict[str, Any]) -> AgentRunResult[RunOutput]:
+            return await agent.run(
                 request.input.text,
                 message_history=message_history,
                 # Channel / modality fragments: extra INSTRUCTIONS for this run only, never
@@ -1708,8 +1755,14 @@ class PydanticAgentRunner:
                 # never on the cached agent: the agent is shared across tenants.
                 deps=self._turn_context(turn_id, request, profile, rules),
                 usage_limits=self.usage_limits_for(profile),
+                model_settings=_as_model_settings(settings),
                 event_stream_handler=self._reply_stream(turn_id, request),
             )
+
+        try:
+            # D99. A refused effort can only be refused by the FIRST request, before any tool of
+            # this run has executed, so asking once more without it repeats nothing.
+            result = await _with_profile_settings(turn_id, profile, attempt, may_retry=True)
         except UsageLimitExceeded as exhausted:
             # An exhausted budget is an ORDINARY outcome, not an exception - see
             # application/start_turn.py, WHAT THIS METHOD MUST NEVER DO. Letting it escape
@@ -2015,8 +2068,8 @@ class PydanticAgentRunner:
         if history_capability is not None:
             capabilities.append(history_capability)
 
-        try:
-            result = await agent.run(
+        async def attempt(settings: dict[str, Any]) -> AgentRunResult[RunOutput]:
+            return await agent.run(
                 message_history=message_history,
                 deferred_tool_results=_deferred_results(resolutions, profile.media.delivery),
                 instructions=_turn_instructions(profile, caller),
@@ -2034,6 +2087,17 @@ class PydanticAgentRunner:
                     **self._background_deps(profile, turn_id, caller, session),
                 ),
                 usage_limits=self.usage_limits_for(profile),
+                model_settings=_as_model_settings(settings),
+            )
+
+        try:
+            # D99. A bare approval executes its deferred tool BEFORE the first request, so a
+            # resume that carries one is never asked again: the tool would run twice.
+            result = await _with_profile_settings(
+                turn_id,
+                profile,
+                attempt,
+                may_retry=all(r.payload is not None or not r.approved for r in resolutions),
             )
         except UsageLimitExceeded as exhausted:
             # An exhausted budget is an ORDINARY outcome on this path too - see `run`.
