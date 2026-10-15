@@ -157,12 +157,18 @@ class RouteTurn:
 
         started = self._clock()
         decision: RouteDecision | None = None
-        failure = await self._follow_up(turn_id, request)
+        failure: str | None = None
+
+        async def consult() -> tuple[str | None, RouteDecision | None]:
+            follow_up = await self._follow_up(turn_id, request)
+            if follow_up is not None:
+                return follow_up, None
+            return None, await self._routers.route(policy.router, _route_request(request))
+
         try:
-            if failure is None:
-                decision = await asyncio.wait_for(
-                    self._routers.route(policy.router, _route_request(request)), self._timeout
-                )
+            # ONE deadline for the follow-up check and the router (slice 39): a stuck history read
+            # must not hold the turn any longer than a slow router may.
+            failure, decision = await asyncio.wait_for(consult(), self._timeout)
         except TimeoutError:
             failure = FALLBACK_TIMEOUT
         except Exception as error:

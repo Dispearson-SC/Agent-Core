@@ -14,6 +14,7 @@ calibration, model and elapsed time; a route that cannot be audited is not appli
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import replace
 from typing import Any
 
@@ -469,6 +470,57 @@ def test_the_first_turn_of_a_conversation_is_routed_as_before() -> None:
     routed = _run(use_case)
 
     assert routed.request.profile_id == BILLING and len(router.seen) == 1
+
+
+def test_a_history_check_that_hangs_is_bounded_by_the_router_timeout() -> None:
+    """Slice 39 warning: the follow-up check ran before, and outside, the router's timeout, so a
+    stuck database read held the turn with no bound. One deadline now covers the check and the
+    router: past it the turn runs the normal path (`timeout`) and the router is not asked."""
+    router = ScriptedRouter(RouteDecision(kind=RouteKind.ROUTE, profile_id=BILLING))
+
+    async def hangs(session: Any, turn_id: TurnId) -> bool:
+        await asyncio.sleep(5)
+        return False
+
+    audit = RecordedRoutes()
+    use_case = RouteTurn(
+        routers=router,
+        audit=audit,
+        profiles=_profiles(),
+        has_history=hangs,
+        timeout_ms=20,
+        **delegation(),
+    )
+
+    started = time.monotonic()
+    routed = _run(use_case)
+
+    assert time.monotonic() - started < 2
+    assert routed.request == _request() and router.seen == []
+    assert routed.record.fallback_reason == FALLBACK_TIMEOUT
+    assert [c[2].fallback_reason for c in audit.calls] == [FALLBACK_TIMEOUT]
+
+
+def test_the_history_check_and_the_router_share_one_deadline() -> None:
+    """A check that takes most of the budget leaves the router only the rest of it."""
+    router = ScriptedRouter(RouteDecision(kind=RouteKind.ROUTE, profile_id=BILLING), sleep=0.15)
+
+    async def slow(session: Any, turn_id: TurnId) -> bool:
+        await asyncio.sleep(0.15)
+        return False
+
+    use_case = RouteTurn(
+        routers=router,
+        audit=RecordedRoutes(),
+        profiles=_profiles(),
+        has_history=slow,
+        timeout_ms=250,
+        **delegation(),
+    )
+
+    routed = _run(use_case)
+
+    assert routed.record.fallback_reason == FALLBACK_TIMEOUT, "0.15 s + 0.15 s > 0.25 s"
 
 
 def test_a_history_check_that_fails_runs_the_normal_path_with_the_error_class() -> None:

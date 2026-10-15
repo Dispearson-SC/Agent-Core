@@ -205,7 +205,9 @@ A turn that continues a conversation (its session already holds another turn) is
 router is not asked and the audit row says `fallback_reason = 'follow_up'`. A router reads the
 message alone, so "and which of those is the most urgent?" lands on whatever "those" sounds like,
 and an intent plan's compose has no history. `AGENT_CORE_TURN_ROUTING_FOLLOW_UPS=true` routes
-follow-ups too. No drain either way: the check runs inside the recorded route step.
+follow-ups too. No drain either way: the check runs inside the recorded route step. The check
+and the router share the one `AGENT_CORE_TURN_ROUTER_TIMEOUT_MS` deadline: a history read that hangs
+runs the normal path with `fallback_reason = 'timeout'`.
 
 A routed turn is visible from its route on: `GET /turns/{id}` answers `running` (and `/events` streams)
 as soon as the route step recorded its `routed` event, although an intent plan writes the turn's
