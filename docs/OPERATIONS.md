@@ -207,6 +207,10 @@ message alone, so "and which of those is the most urgent?" lands on whatever "th
 and an intent plan's compose has no history. `AGENT_CORE_TURN_ROUTING_FOLLOW_UPS=true` routes
 follow-ups too. No drain either way: the check runs inside the recorded route step.
 
+A routed turn is visible from its route on: `GET /turns/{id}` answers `running` (and `/events` streams)
+as soon as the route step recorded its `routed` event, although an intent plan writes the turn's
+row only together with its reply.
+
 An intent plan's reply is ONE tool-less model call (the compose). It is bounded per deployment:
 `AGENT_CORE_COMPOSE_MAX_TOKENS` (default 4096, reasoning included on providers that count it there)
 and `AGENT_CORE_COMPOSE_REASONING_EFFORT` (`minimal`/`low`/`medium`/`high`, default `low`; set it

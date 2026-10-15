@@ -1914,10 +1914,24 @@ _TURN_LOOKUP_STATUS: dict[str, TurnStatus] = {
 # screenshots, a shared support ticket), and unguessable is not private. A row for another
 # tenant's turn_id simply does not match this WHERE clause, so it reads exactly like an
 # unknown id - the same "404, never a guess" the route already promises.
+#
+# L18. A ROUTED TURN IS VISIBLE BEFORE ITS ROW EXISTS. An intent plan persists the turn only with
+# its reply (`RunIntent`: the request is written once, so a fallback can write it instead), so its
+# row appeared only when it finished and `GET /turns/{id}` and `/events` answered 404 for the whole
+# compose (stress phase5: up to 112 s, and the backend fell back to polling with no stream). The
+# route step records a `routed` event for the turn in its tenant first; with no row yet that event
+# reads as `started` (running). Still tenant-scoped inside the query, still 404 for an id nobody
+# routed.
 _TURN_LOOKUP_SQL = """
     SELECT state, result
     FROM turns
-    WHERE turn_id = %s AND tenant_id = %s
+    WHERE turn_id = %(turn)s AND tenant_id = %(tenant)s
+    UNION ALL
+    SELECT 'started', NULL::jsonb
+    FROM turn_events
+    WHERE turn_id = %(turn)s::text AND tenant_id = %(tenant)s AND kind = 'routed'
+      AND NOT EXISTS (SELECT 1 FROM turns WHERE turn_id = %(turn)s AND tenant_id = %(tenant)s)
+    LIMIT 1
 """
 
 
@@ -1925,7 +1939,9 @@ def _turn_lookup_sync(
     conninfo: str, turn_id: TurnId, tenant_id: TenantId
 ) -> tuple[str, object | None] | None:
     with psycopg.connect(conninfo) as conn:
-        row = conn.execute(_TURN_LOOKUP_SQL, (str(turn_id), str(tenant_id))).fetchone()
+        row = conn.execute(
+            _TURN_LOOKUP_SQL, {"turn": str(turn_id), "tenant": str(tenant_id)}
+        ).fetchone()
     return None if row is None else (row[0], row[1])
 
 
