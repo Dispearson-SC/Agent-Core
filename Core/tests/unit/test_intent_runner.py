@@ -454,3 +454,13 @@ def test_a_cut_composite_compose_raises_so_the_composite_falls_back() -> None:
     groups = (("a", (PlanToolResult("x", "x", content="1"),)),)
     with pytest.raises(ComposeIncompleteError):
         asyncio.run(runner.compose_composite(TURN, _request(), _profile(), groups))
+
+
+def test_the_composite_compose_answers_only_what_its_results_cover() -> None:
+    """P13. A composite once answered a part it had no plan for as "not available" (the P12
+    battery). The coverage guard passes such a message; the instructions forbid the claim too."""
+    from agent_core.adapters.driven.agent_pydantic.intent_plan import COMPOSITE_INSTRUCTIONS
+
+    text = COMPOSITE_INSTRUCTIONS.lower()
+    assert "only what the results cover" in text
+    assert "never say that information is unavailable" in text

@@ -81,9 +81,13 @@ tokens (33-38 s) composing from an 11k-token result; this wording about 1k (7-8 
 
 COMPOSITE_INSTRUCTIONS: Final[str] = (
     "The results are grouped by topic. The question may ask about several of them: answer every "
-    "topic it asks about, in the order it asks, each in a sentence or two."
+    "topic it asks about, in the order it asks, each in a sentence or two. Answer only what the "
+    "results cover. Never say that information is unavailable, missing or not included for a part "
+    "of the question that no result group is about: you were not given that part, so leave it out."
 )
-"""S10. Added to `COMPOSE_INSTRUCTIONS` for a fast path composite (several intents, one reply)."""
+"""S10. Added to `COMPOSE_INSTRUCTIONS` for a fast path composite (several intents, one reply).
+P13: a part of the question no group covers is left out, never called unavailable (the route
+step's coverage guard passes a message asking for more than its detected intents)."""
 
 DEFAULT_COMPOSE_MAX_TOKENS: Final = 4096
 DEFAULT_COMPOSE_REASONING_EFFORT: Final = "low"
