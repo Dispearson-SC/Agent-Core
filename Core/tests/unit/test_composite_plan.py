@@ -400,3 +400,26 @@ def test_a_cache_that_is_down_is_a_miss_and_never_fails_the_turn() -> None:
 def test_without_a_cache_nothing_is_remembered() -> None:
     world = World(Runner())
     assert world.run().cached is None
+
+
+def test_the_cache_key_carries_the_callers_roles_channel_and_whom_it_acts_for() -> None:
+    """P13 (review 42b warning). Two callers with the same subject but other roles, another channel,
+    or acting for another person may see different data: they never share a remembered reply."""
+    profile = AgentProfile(id=FRONT, persona="f", model="m")
+    base_request = _request()
+    base = composite_cache_key(base_request, BOTH, profile)
+    caller = base_request.caller
+    manager = _replace(base_request, caller=_replace(caller, roles=frozenset({"manager"})))
+    voice = _replace(base_request, caller=_replace(caller, channel="voice"))
+    other = CallerIdentity(subject_id="v", channel="http", tenant_id=TenantId("t"))
+    acting = _replace(base_request, caller=_replace(caller, on_behalf_of=other))
+    for different in (manager, voice, acting):
+        assert composite_cache_key(different, BOTH, profile).digest() != base.digest()
+    reordered = _replace(
+        base_request, caller=_replace(caller, roles=frozenset({"b", "a"}))
+    )
+    same = _replace(base_request, caller=_replace(caller, roles=frozenset({"a", "b"})))
+    assert (
+        composite_cache_key(reordered, BOTH, profile).digest()
+        == composite_cache_key(same, BOTH, profile).digest()
+    )
