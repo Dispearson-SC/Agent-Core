@@ -368,6 +368,27 @@ routes:
   - {label: request_action, description: Asks to do something rather than to be told, target: pass}
 ```
 
+**The fast path's questions (S10).** When Core's request carries `fast_path: true`
+(`AGENT_CORE_FAST_PATH` shadow or on), the same POST also asks one `noul` per `intent:` route
+(`intent__<label>`: the route's optional `question`, else "Does this message ask for the following?
+<description>"), an `action` noul (asks to DO something), a `follow_up` noul when Core sent a recent
+conversation (the state is then `{message, recent_conversation}`) and a `complexity` score over
+three levels. The answer adds `assessment` (intent NAMES, the score normalised to [0, 1]); the
+route choice is decided exactly as without it. A missing or malformed fast path answer drops the
+assessment only (reason `bad_assessment`). A routes file may word the questions:
+
+```yaml
+fast_path:                       # optional; every key optional
+  intent_question: "Does the message ask for: {description}"   # must contain {description}
+  action_question: Does the message ask to change or propose something?
+  follow_up_question: Does `message` need `recent_conversation` to be understood?
+  complexity_question: How much work is the answer?
+  complexity_levels: [One fact, Several facts, Advice or a plan]  # 2-10 levels
+routes:
+  - {label: stock_level, description: How much is left, target: "intent:stock_level",
+     question: Does the message ask how much of a product is left?}
+```
+
 A route whose target is `pass` is a labelled abstention: chosen, the turn passes (reason
 `pass_route`) whatever the confidence. One specific option competes with the routes better than a
 broad escape description (a request to propose an order otherwise lands on the read-only plan).

@@ -28,6 +28,21 @@ WHAT IT ANSWERS
     field) raises `SystemOneConfigError`: Core falls back to the normal path and records the
     error class, so a misconfiguration is visible instead of a silent pass.
 
+THE FAST PATH (S10, Core's AGENT_CORE_FAST_PATH)
+    When Core's request says `fast_path: true`, the SAME call also asks (the Typesafe fan-out
+    pattern; questions run in parallel, so they cost little latency):
+      * `intent__<label>`: one `noul` per `intent:` route, "does the message ask for this?" (the
+        route's `question`, or the default built from its description);
+      * `action`: a `noul`, does it ask to DO something rather than to be told;
+      * `follow_up`: a `noul`, only when Core sent a recent conversation: does the message depend
+        on it (the state is then `{message, recent_conversation}`);
+      * `complexity`: a `score` over three levels (a routes file may name its own).
+    The answer then carries `assessment: {intents: {<intent name>: p}, action, follow_up,
+    complexity}` (the score normalised to [0, 1]); the route choice is decided exactly as without
+    it. A missing or malformed fast path answer drops the assessment only (reason
+    `bad_assessment`): Core then never takes the fast path for that turn. Without the flag the
+    request is exactly the one choice question.
+
 RETRIES
     429 and 529 are retried once after `retry_backoff_ms`, and only when that retry still fits
     `timeout_ms`; anything else is not retried. The budget covers the whole call.
@@ -66,8 +81,28 @@ _MAX_TEXT: Final = 200  # Core refuses longer label/model/reason strings
 _LABEL: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _TARGET: Final = re.compile(r"^(profile|intent):([A-Za-z0-9][A-Za-z0-9_.-]{0,127})$")
 PASS_TARGET: Final = "pass"
-_ROUTE_KEYS: Final = frozenset({"label", "description", "target"})
-_FILE_KEYS: Final = frozenset({"routes", "instructions", "escape_description"})
+_ROUTE_KEYS: Final = frozenset({"label", "description", "target", "question"})
+_FILE_KEYS: Final = frozenset({"routes", "instructions", "escape_description", "fast_path"})
+_FAST_KEYS: Final = frozenset(
+    {"intent_question", "action_question", "follow_up_question", "complexity_question",
+     "complexity_levels"}
+)  # fmt: skip
+INTENT_PREFIX: Final = "intent__"
+DEFAULT_INTENT_QUESTION: Final = "Does this message ask for the following? {description}"
+DEFAULT_ACTION_QUESTION: Final = (
+    "Does this message ask the assistant to DO something (create, change, propose, approve, send, "
+    "record or reject something) rather than only to be told information?"
+)
+DEFAULT_FOLLOW_UP_QUESTION: Final = (
+    "Can `message` only be understood with `recent_conversation`: does it refer back to something "
+    "said earlier (those, that one, and tomorrow?, why?) instead of standing on its own?"
+)
+DEFAULT_COMPLEXITY_QUESTION: Final = "How much work does answering this message take?"
+DEFAULT_COMPLEXITY_LEVELS: Final = (
+    "A direct lookup of one or a few facts",
+    "Combines or compares several facts",
+    "Needs analysis, advice, a plan, a judgement or a decision",
+)
 _ADDONS_ROOT: Final = Path(__file__).resolve().parents[2]
 
 
@@ -81,6 +116,18 @@ class Route:
     description: str
     kind: str  # "profile", "intent" or "pass"
     name: str
+    question: str | None = None  # S10: the intent's own yes/no question
+
+
+@dataclass(frozen=True, slots=True)
+class FastQuestions:
+    """S10. The fast path's question texts (a routes file's `fast_path:` block, else defaults)."""
+
+    intent_question: str = DEFAULT_INTENT_QUESTION
+    action_question: str = DEFAULT_ACTION_QUESTION
+    follow_up_question: str = DEFAULT_FOLLOW_UP_QUESTION
+    complexity_question: str = DEFAULT_COMPLEXITY_QUESTION
+    complexity_levels: tuple[str, ...] = DEFAULT_COMPLEXITY_LEVELS
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +135,7 @@ class RouteTable:
     routes: tuple[Route, ...]
     instructions: str | None
     escape_description: str | None
+    fast: FastQuestions = FastQuestions()
 
     def by_label(self) -> dict[str, Route]:
         return {route.label: route for route in self.routes}
@@ -150,6 +198,9 @@ def parse_routes(document: object, *, escape_label: str, source: str) -> RouteTa
         seen.add(label)
         target = raw.get("target")
         description = _text(raw.get("description"), f"{where}: description")
+        question = raw.get("question")
+        if question is not None:
+            question = _text(question, f"{where}: question")
         if target == PASS_TARGET:
             routes.append(Route(label, description, PASS_TARGET, ""))
             continue
@@ -158,14 +209,40 @@ def parse_routes(document: object, *, escape_label: str, source: str) -> RouteTa
             raise SystemOneConfigError(
                 f"{where}: target must be profile:<id>, intent:<name> or {PASS_TARGET}"
             )
-        routes.append(Route(label, description, match.group(1), match.group(2)))
+        routes.append(Route(label, description, match.group(1), match.group(2), question))
     instructions = document.get("instructions")
     escape = document.get("escape_description")
     return RouteTable(
         routes=tuple(routes),
         instructions=None if instructions is None else _text(instructions, "instructions"),
         escape_description=None if escape is None else _text(escape, "escape_description"),
+        fast=_fast_questions(document.get("fast_path"), source),
     )
+
+
+def _fast_questions(raw: object, source: str) -> FastQuestions:
+    if raw is None:
+        return FastQuestions()
+    where = f"routes file {source}, fast_path"
+    if not isinstance(raw, Mapping):
+        raise SystemOneConfigError(f"{where} must be a mapping")
+    extra = set(raw) - _FAST_KEYS
+    if extra:
+        raise SystemOneConfigError(f"{where} has unknown keys: {sorted(map(str, extra))}")
+    values: dict[str, Any] = {
+        key: _text(raw[key], f"{where}: {key}") for key in _FAST_KEYS - {"complexity_levels"}
+        if key in raw
+    }  # fmt: skip
+    if "intent_question" in values and "{description}" not in values["intent_question"]:
+        raise SystemOneConfigError(f"{where}: intent_question must contain {{description}}")
+    if "complexity_levels" in raw:
+        levels = raw["complexity_levels"]
+        if not isinstance(levels, list) or not 2 <= len(levels) <= 10:
+            raise SystemOneConfigError(f"{where}: complexity_levels must list 2-10 levels")
+        values["complexity_levels"] = tuple(
+            _text(level, f"{where}: complexity level") for level in levels
+        )
+    return FastQuestions(**values)
 
 
 def load_routes(settings: Mapping[str, Any]) -> RouteTable:
@@ -210,16 +287,82 @@ def build_body(
 ) -> dict[str, Any]:
     criteria = {route.label: route.description for route in table.routes}
     criteria[settings["escape_label"]] = table.escape_description or settings["escape_description"]
+    questions: dict[str, Any] = {
+        QUESTION_ID: {
+            "type": "choice",
+            "instructions": table.instructions or settings["instructions"],
+            "criteria": criteria,
+        }
+    }
+    state = build_state(request, list(settings["state_fields"]))
+    if request.get("fast_path") is True:
+        history = [str(line) for line in request.get("history") or []]
+        questions.update(_fast_path_questions(table, bool(history)))
+        if history:
+            state = {"message": str(request["text"]), "recent_conversation": history}
+    return {"state": state, "model": settings["model"], "questions": questions}
+
+
+def _fast_path_questions(table: RouteTable, has_history: bool) -> dict[str, Any]:
+    """S10. The fast path's questions, asked beside the route choice in the same call."""
+    fast = table.fast
+    questions: dict[str, Any] = {}
+    for route in table.routes:
+        if route.kind == "intent":
+            text = route.question or fast.intent_question.format(description=route.description)
+            questions[INTENT_PREFIX + route.label] = {"type": "noul", "instructions": text}
+    questions["action"] = {"type": "noul", "instructions": fast.action_question}
+    if has_history:
+        questions["follow_up"] = {"type": "noul", "instructions": fast.follow_up_question}
+    questions["complexity"] = {
+        "type": "score",
+        "instructions": fast.complexity_question,
+        "criteria": list(fast.complexity_levels),
+    }
+    return questions
+
+
+def _unit(value: object) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not 0.0 <= value <= 1.0
+    ):
+        raise _BadResponse("a noul is not a number in [0, 1]")
+    return float(value)
+
+
+def read_assessment(
+    payload: Mapping[str, Any], table: RouteTable, has_history: bool
+) -> dict[str, Any]:
+    """S10. The fast path's answers as Core's `assessment`; `_BadResponse` when any is missing or
+    malformed (the whole assessment is dropped, never half of it)."""
+    answers = payload.get("answers")
+    if not isinstance(answers, Mapping):
+        raise _BadResponse("no answers")
+
+    def noul(question_id: str) -> float:
+        answer = answers.get(question_id)
+        if not isinstance(answer, Mapping):
+            raise _BadResponse(f"no answer to {question_id}")
+        return _unit(answer.get("noul"))
+
+    intents: dict[str, float] = {}
+    for route in table.routes:
+        if route.kind == "intent":
+            value = noul(INTENT_PREFIX + route.label)
+            intents[route.name] = max(value, intents.get(route.name, 0.0))
+    complexity = answers.get("complexity")
+    score = complexity.get("score") if isinstance(complexity, Mapping) else None
+    top = len(table.fast.complexity_levels) - 1
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= score <= top:
+        raise _BadResponse("the complexity is not a score on its levels")
     return {
-        "state": build_state(request, list(settings["state_fields"])),
-        "model": settings["model"],
-        "questions": {
-            QUESTION_ID: {
-                "type": "choice",
-                "instructions": table.instructions or settings["instructions"],
-                "criteria": criteria,
-            }
-        },
+        "intents": intents,
+        "action": noul("action"),
+        "follow_up": noul("follow_up") if has_history else None,
+        "complexity": round(float(score) / top, 4),
     }
 
 
@@ -373,6 +516,13 @@ async def route(
     except ValueError:  # _BadResponse, or a body that is not JSON
         return done({"decision": "pass", "reason": "bad_response"})
     answer = _decide(choice, confidence, table, settings)
+    if request.get("fast_path") is True:
+        try:
+            answer["assessment"] = read_assessment(
+                response.json(), table, bool(request.get("history"))
+            )
+        except ValueError:  # _BadResponse: the route stands, the fast path does not
+            answer.setdefault("reason", "bad_assessment")
     if model is not None:
         answer["model"] = model
     answer["usage"] = usage

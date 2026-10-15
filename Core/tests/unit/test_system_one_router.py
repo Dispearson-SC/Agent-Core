@@ -605,3 +605,164 @@ def test_a_route_whose_target_is_pass_is_offered_by_label_and_passes_when_chosen
     assert answer["decision"] == "pass" and answer["reason"] == "pass_route"
     assert answer["label"] == "request_action" and answer["confidence"] == 0.91
     assert decision_from_mapping(answer).kind is RouteKind.PASS
+
+
+# --- S10: the fast path's questions, in the same call --------------------------------------------
+
+FAST_ROUTES = ROUTES + """\
+  - label: stock_level
+    description: How much of a product is left
+    target: intent:stock_level
+    question: Does the message ask how much stock of something is left?
+fast_path:
+  action_question: Does the message ask to DO something?
+  complexity_levels: [One fact, A few facts, Advice or analysis]
+"""
+
+
+def _fast_request(text: str, history: list[str] | None = None) -> dict[str, Any]:
+    return {**_request(text), "fast_path": True, "history": history or []}
+
+
+def _fast_answer(
+    choice: str = "billing",
+    *,
+    intents: dict[str, float] | None = None,
+    action: float = 0.03,
+    complexity: float = 0.2,
+    follow_up: float | None = None,
+) -> dict[str, Any]:
+    body = _answer(choice, 0.9)
+    for label, value in (intents or {}).items():
+        body["answers"][f"intent__{label}"] = {"type": "noul", "noul": value}
+    body["answers"]["action"] = {"type": "noul", "noul": action}
+    body["answers"]["complexity"] = {
+        "type": "score", "score": complexity, "confidence": 0.9,
+        "legend": {"0": "One fact", "1": "A few facts", "2": "Advice or analysis"},
+        "probabilities": {"0": 0.9, "1": 0.1, "2": 0.0},
+    }  # fmt: skip
+    if follow_up is not None:
+        body["answers"]["follow_up"] = {"type": "noul", "noul": follow_up}
+    return body
+
+
+def _fast_route(
+    handler: Handler, settings: dict[str, Any], request: dict[str, Any]
+) -> dict[str, Any]:
+    async def scenario() -> dict[str, Any]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            answer: dict[str, Any] = await SYSTEM_ONE.route(
+                request, settings, client=client, environ={"TYPESAFE_API_KEY": KEY}
+            )
+            return answer
+
+    return asyncio.run(scenario())
+
+
+def _fast_settings(tmp_path: Path) -> dict[str, Any]:
+    (tmp_path / "routes.yaml").write_text(FAST_ROUTES, encoding="utf-8")
+    return _settings(tmp_path)
+
+
+def test_without_the_fast_path_flag_the_request_is_exactly_the_one_choice_question(
+    tmp_path: Path,
+) -> None:
+    seen: list[httpx.Request] = []
+    _route(_replying(httpx.Response(200, json=_answer("billing", 0.9)), seen=seen),
+           _fast_settings(tmp_path))  # fmt: skip
+    assert list(json.loads(seen[0].content)["questions"]) == ["route"]
+
+
+def test_the_fast_path_asks_every_question_in_one_call(tmp_path: Path) -> None:
+    seen: list[httpx.Request] = []
+
+    _fast_route(
+        _replying(httpx.Response(200, json=_fast_answer()), seen=seen),
+        _fast_settings(tmp_path),
+        _fast_request("how much bread is left and when do you open?"),
+    )
+
+    (request,) = seen
+    body = json.loads(request.content)
+    assert body["state"] == "how much bread is left and when do you open?"
+    questions = body["questions"]
+    assert set(questions) == {
+        "route", "intent__opening_hours", "intent__stock_level", "action", "complexity",
+    }  # fmt: skip
+    assert questions["intent__opening_hours"]["type"] == "noul"
+    assert "When the shop is open" in questions["intent__opening_hours"]["instructions"]
+    assert questions["intent__stock_level"]["instructions"] == (
+        "Does the message ask how much stock of something is left?"
+    )
+    assert questions["action"] == {
+        "type": "noul", "instructions": "Does the message ask to DO something?",
+    }  # fmt: skip
+    assert questions["complexity"]["type"] == "score"
+    assert questions["complexity"]["criteria"] == ["One fact", "A few facts", "Advice or analysis"]
+    assert "follow_up" not in questions, "no conversation yet: nothing to depend on"
+
+
+def test_with_history_the_state_holds_the_conversation_and_the_follow_up_is_asked(
+    tmp_path: Path,
+) -> None:
+    seen: list[httpx.Request] = []
+    history = ["person: how much bread is left?", "agent: 12 loaves."]
+
+    _fast_route(
+        _replying(httpx.Response(200, json=_fast_answer(follow_up=0.8)), seen=seen),
+        _fast_settings(tmp_path),
+        _fast_request("and croissants?", history),
+    )
+
+    body = json.loads(seen[0].content)
+    assert body["state"] == {"message": "and croissants?", "recent_conversation": history}
+    assert body["questions"]["follow_up"]["type"] == "noul"
+
+
+def test_the_answers_come_back_as_an_assessment_by_intent_name(tmp_path: Path) -> None:
+    answer = _fast_route(
+        _replying(
+            httpx.Response(
+                200,
+                json=_fast_answer(
+                    intents={"opening_hours": 0.91, "stock_level": 0.88},
+                    action=0.04, complexity=0.5, follow_up=0.1,
+                ),
+            )
+        ),
+        _fast_settings(tmp_path),
+        _fast_request("x", ["person: hi"]),
+    )  # fmt: skip
+
+    assert answer["decision"] == "route"  # the choice is decided exactly as before
+    assert answer["assessment"] == {
+        "intents": {"opening_hours": 0.91, "stock_level": 0.88},
+        "action": 0.04,
+        "follow_up": 0.1,
+        "complexity": 0.25,  # score 0.5 on levels 0..2
+    }
+    decision = decision_from_mapping(answer)  # Core reads it
+    assert decision.assessment is not None and decision.assessment.complexity == 0.25
+
+
+def test_a_missing_or_malformed_fast_path_answer_drops_the_assessment_only(
+    tmp_path: Path,
+) -> None:
+    broken = _fast_answer(intents={"opening_hours": 0.9})
+    broken["answers"]["action"] = {"type": "noul", "noul": "yes"}
+
+    answer = _fast_route(
+        _replying(httpx.Response(200, json=broken)),
+        _fast_settings(tmp_path),
+        _fast_request("x"),
+    )
+
+    assert answer["decision"] == "route" and "assessment" not in answer
+    assert answer["reason"] == "bad_assessment"
+
+
+def test_a_fast_path_call_that_fails_passes_as_before(tmp_path: Path) -> None:
+    answer = _fast_route(
+        _replying(httpx.Response(529)), _fast_settings(tmp_path), _fast_request("x")
+    )
+    assert answer["decision"] == "pass" and "assessment" not in answer
