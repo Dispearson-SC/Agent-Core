@@ -7,23 +7,31 @@ THE RULES UNDER TEST. The orchestrator, and no other glazed profile, opts into t
 may answer (layer B, `intents: true`). The block is inert until `AGENT_CORE_TURN_ROUTING` is on (the
 startup checks run only then, and the off path loads the same profiles as before); with routing on
 and the router addon enabled, the shipped profiles pass both startup checks. The orchestrator
-collects every peer answer of a step (`peers.fan_out: all_settled`). No specialist answers typed
-data: their replies are prose the orchestrator reads, and a typed profile cannot own a plan.
+collects every peer answer of a step (`peers.fan_out: all_settled`), and two independent asks it
+issues in ONE step (S9: the persona asks every independent specialist in the same step) are both
+dispatched in that round and answered in one resume. No specialist answers typed data: their
+replies are prose the orchestrator reads, and a typed profile cannot own a plan.
 """
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
+
+import pytest
 import yaml
 
 from agent_core.adapters.driven.addons_fs.loader import load_addons_from_environment
 from agent_core.adapters.driven.addons_fs.registration import register_addons
 from agent_core.adapters.driven.policy_fs.loader import load_policy_rules
+from agent_core.adapters.driving.workflow import turn_workflow
 from agent_core.composition import (
     TOOL_PACKAGES,
     refuse_unplannable_intents,
     refuse_unroutable_profiles,
 )
 from agent_core.domain.peers import FanOutPolicy
+from tests.fakes import fanout
 from tests.unit import glazed_vertical_support as glazed
 
 SPECIALISTS = tuple(f"glazed_{role}" for role in glazed.ROLES if role != "orchestrator")
@@ -52,6 +60,39 @@ def test_the_orchestrator_collects_every_peer_answer_of_a_step() -> None:
         (glazed.ADDON / "profiles" / "glazed_orchestrator.yaml").read_text(encoding="utf-8")
     )
     assert declared["peers"]["fan_out"] == "all_settled"
+
+
+def test_two_independent_asks_of_one_step_are_dispatched_together_and_answered_in_one_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S9, scripted: the glazed orchestrator's model step defers two ask_peer calls to two
+    specialists. Both leave in that round (two mailbox asks before any answer is read), the turn
+    waits for both, and it resumes ONCE with both answers - the hang the old one-per-step rule
+    worked around does not happen."""
+    world = fanout.install(
+        monkeypatch,
+        (
+            fanout.ask("tc-1", target="glazed_present"),
+            fanout.ask("tc-2", target="glazed_supply"),
+        ),
+        [fanout.answer("corr-1", "ventas de hoy"), fanout.answer("corr-2", "cobertura")],
+    )
+    seat = turn_workflow._dependencies.peers  # noqa: SLF001 - the test seam
+    assert seat is not None
+    seat.profiles.clear()
+    seat.profiles.update({f"glazed_{role}": glazed.profile(role) for role in glazed.ROLES})
+    request = dataclasses.replace(fanout.request(), profile_id="glazed_orchestrator")
+
+    outcome = asyncio.run(fanout.body()(request))
+
+    assert outcome.result is not None
+    assert [target for target, _ in world.mailbox.asks] == ["glazed_present", "glazed_supply"]
+    assert len(world.resume.calls) == 1, "one resume for the whole step"
+    resumed = dict(world.resume.calls[0])
+    assert set(resumed) == {"tc-1", "tc-2"}
+    assert 'status="ok"' in str(resumed["tc-1"]) and "ventas de hoy" in str(resumed["tc-1"])
+    assert 'status="ok"' in str(resumed["tc-2"]) and "cobertura" in str(resumed["tc-2"])
+    assert world.mailbox.cancelled == {}
 
 
 def test_no_specialist_answers_typed_data() -> None:

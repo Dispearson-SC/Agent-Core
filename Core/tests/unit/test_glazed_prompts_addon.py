@@ -140,11 +140,20 @@ def test_optional_fields_are_flagged_as_never_to_estimate(tool: str) -> None:
     assert "may be absent; never estimate it yourself" in doc
 
 
-def test_orchestrator_asks_exactly_one_specialist_per_step() -> None:
-    """Resuming with one peer answer while two ask_peer calls are deferred hangs the turn."""
-    persona = _persona("orchestrator")
-    assert "Ask exactly ONE specialist per step" in persona
-    assert "Never issue two ask_peer calls in the same step" in persona
+def test_orchestrator_asks_every_independent_specialist_in_the_same_step() -> None:
+    """S9 (replaces vertical/glazed's one-specialist-per-step rule). The old rule worked around a
+    turn that hung when it resumed with one answer while two asks were deferred; Core now collects
+    every ask of a step and resumes once with all of them (`peers.fan_out: all_settled`, C10,
+    test_glazed_fast_comms.py), so independent asks go out together and only a dependent ask
+    waits."""
+    flat = _flat("orchestrator")
+    assert "ask them all in the same step" in flat
+    assert "issue every independent ask_peer call together" in flat
+    assert (
+        "ask in a later step only when a question depends on an earlier specialist's answer" in flat
+    )
+    assert "ask exactly one specialist per step" not in flat
+    assert "never issue two ask_peer calls in the same step" not in flat
 
 
 @pytest.mark.parametrize("role", ROLES)
@@ -268,7 +277,8 @@ def test_orchestrator_starts_from_the_briefing_and_asks_specialists_only_to_dril
     flat = _flat("orchestrator")
     assert "call get_briefing first on every question" in flat
     assert "answer directly without asking any specialist" in flat
-    assert "ask exactly one specialist only for drill-down the briefing lacks" in flat
+    assert "ask specialists only for drill-down the briefing lacks" in flat
+    assert "every independent one in the same step" in flat  # S9
     assert "top_issues" in flat and "issue_id" in flat and "option_id" in flat
     profile = glazed.profile("orchestrator")
     assert profile.max_iterations <= 6

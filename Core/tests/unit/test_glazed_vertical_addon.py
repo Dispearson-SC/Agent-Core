@@ -385,14 +385,48 @@ def _section_of(persona: str) -> tuple[str, str]:
     return persona[:start], persona[end:]
 
 
+# THE ONE INTENDED DIFFERENCE from vertical/glazed's orchestrator outside its section (S9, P11):
+# the old persona asked one specialist per step (a workaround for a turn that hung resuming with one
+# answer of two); Core collects every ask of a step (C10), so independent asks now go out together.
+# Each old fragment occurs exactly once and is replaced by the new words; everything else stays
+# byte for byte.
+INTENDED_ORCHESTRATOR_CHANGES = (
+    (
+        "Ask exactly ONE specialist per step: wait for its answer before asking another.\n"
+        "Never issue two ask_peer calls in the same step.\n",
+        "When a question needs several specialists, ask them all in the SAME step: issue every\n"
+        "independent ask_peer call together, so they work in parallel and you continue once with"
+        " all\n"
+        "their answers. Ask in a later step only when a question depends on an earlier"
+        " specialist's\n"
+        "answer (for example, the cover the supply specialist reports before deciding on an"
+        " order).\n",
+    ),
+    (
+        "asking any specialist. Ask exactly ONE specialist only for drill-down the briefing"
+        " lacks.\n",
+        "asking any specialist. Ask specialists only for drill-down the briefing lacks, every\n"
+        "independent one in the same step.\n",
+    ),
+)
+
+
+def _with_intended_changes(old_persona: str) -> str:
+    for before, after in INTENDED_ORCHESTRATOR_CHANGES:
+        assert old_persona.count(before) == 1, before
+        old_persona = old_persona.replace(before, after)
+    return old_persona
+
+
 def test_the_orchestrator_is_vertical_glazeds_with_plain_language_in_its_section(
     tmp_path: Path,
 ) -> None:
-    """Everything but the manager-communication section is byte for byte the old orchestrator;
-    the section is the `plain_language` fragment (glazed's settings), then glazed's own words."""
+    """Everything but the manager-communication section is byte for byte the old orchestrator
+    with the intended S9 change above; the section is the `plain_language` fragment (glazed's
+    settings), then glazed's own words."""
     new = glazed.served(tmp_path)["glazed_orchestrator"]
     old = glazed.reference()["glazed_orchestrator"]
-    head, tail = _section_of(old.persona)
+    head, tail = _section_of(_with_intended_changes(old.persona))
     slot = glazed.contributions().fragments["plain_language"].read_text(encoding="utf-8").strip()
 
     assert new.persona.startswith(head + slot + "\n")
