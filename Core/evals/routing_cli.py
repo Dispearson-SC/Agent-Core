@@ -12,6 +12,11 @@ and `routing.md`. Environment:
                                            AGENT_CORE_ADDON__<ADDON>__<KEY>); it may call a
                                            classifier, so it needs AGENT_CORE_EVAL=1.
     AGENT_CORE_EVAL_ROUTER_TIMEOUT_MS=<n>  the router timeout (default 1500, as production)
+    AGENT_CORE_EVAL_FAST_PATH=1            S10: ask the router the fast path's questions in the
+                                           same call and score the detected intent sets (exact
+                                           match, combined match, precision/recall, verdicts)
+    AGENT_CORE_EVAL_FAST_PATH_INTENT_THRESHOLD=<0-1>
+                                           the intent threshold of that scoring (default 0.5)
     AGENT_CORE_EVAL_TURNS_URL=<url>        optional: ALSO run every question as a whole turn
                                            against a running Agent-Core (POST /turns, poll
                                            GET /turns/{id} until `finished`; `waiting` or an
@@ -215,6 +220,8 @@ def main(env: Mapping[str, str]) -> int:
     timeout_ms = int(_number(env, "AGENT_CORE_EVAL_ROUTER_TIMEOUT_MS", 1500, 1, 600_000))
     turn_timeout = _number(env, "AGENT_CORE_EVAL_TURN_TIMEOUT", DEFAULT_TURN_TIMEOUT, 0.1, 3600)
     floor = _number(env, "AGENT_CORE_EVAL_MIN_ACCURACY", 0, 0, 1)
+    fast_path = env.get("AGENT_CORE_EVAL_FAST_PATH") == "1"
+    intent_threshold = _number(env, "AGENT_CORE_EVAL_FAST_PATH_INTENT_THRESHOLD", 0.5, 0, 1)
     try:
         question_set = load_question_set(Path(set_path))
     except QuestionSetError as error:
@@ -249,6 +256,8 @@ def main(env: Mapping[str, str]) -> int:
                 router_name=router_name,
                 timeout_ms=timeout_ms,
                 notes=notes,
+                fast_path=fast_path,
+                intent_threshold=intent_threshold,
             )
         headers = {
             "X-Tenant-Id": env.get("AGENT_CORE_EVAL_TURNS_TENANT") or "eval",
@@ -264,6 +273,8 @@ def main(env: Mapping[str, str]) -> int:
                 timeout_ms=timeout_ms,
                 turn=driver,
                 notes=notes,
+                fast_path=fast_path,
+                intent_threshold=intent_threshold,
             )
 
     comparison = asyncio.run(run())
@@ -271,10 +282,15 @@ def main(env: Mapping[str, str]) -> int:
         comparison, Path(env.get("AGENT_CORE_EVAL_REPORT_DIR") or DEFAULT_REPORT_DIR)
     )
     routed = comparison.routed
+    sets = (
+        ""
+        if routed.intent_set_accuracy is None
+        else f", intent sets {routed.intent_set_accuracy:.0%}"
+    )
     print(
         f"routing eval finished: accuracy {comparison.baseline.accuracy:.0%} off -> "
         f"{routed.accuracy:.0%} on, fallback {routed.fallback_rate:.0%}, abstention "
-        f"{routed.abstention_rate:.0%}; wrote {json_path} and {markdown_path}"
+        f"{routed.abstention_rate:.0%}{sets}; wrote {json_path} and {markdown_path}"
     )
     return 0 if routed.accuracy >= floor else 1
 

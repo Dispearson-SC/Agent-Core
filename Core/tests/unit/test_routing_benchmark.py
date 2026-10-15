@@ -471,3 +471,130 @@ def test_intent_turns_report_how_many_ran_their_plan_and_how_many_fell_back(
     assert "| intent turns: plan / fallback / no plan | 0 / 0 / 0 | 1 / 1 / 1 |" in (
         markdown_path.read_text(encoding="utf-8")
     )
+
+
+# --- S10: several intents in one question (the fast path) ------------------------------------
+
+from agent_core.domain.fast_path import Assessment  # noqa: E402
+
+
+def test_a_question_may_name_its_expected_intent_set_and_an_intent_route_implies_one(
+    tmp_path: Path,
+) -> None:
+    path = _write(
+        tmp_path,
+        "set.yaml",
+        """\
+        name: s
+        synthetic: true
+        entry_profile: front_desk
+        questions:
+          - {id: c1, text: "hours and refunds?", expected: pass, intents: [refund, opening_hours]}
+          - {id: c2, text: "hours?", expected: "intent:opening_hours"}
+          - {id: c3, text: "hi", expected: pass}
+        """,
+    )
+    questions = load_question_set(path).questions
+    assert [q.expected_intents for q in questions] == [
+        ("opening_hours", "refund"), ("opening_hours",), (),
+    ]  # fmt: skip
+    bad = _write(
+        tmp_path, "bad.yaml",
+        """\
+        name: s
+        synthetic: true
+        entry_profile: front_desk
+        questions:
+          - {id: c1, text: "x", expected: pass, intents: "refund"}
+        """,
+    )  # fmt: skip
+    with pytest.raises(QuestionSetError, match="c1"):
+        load_question_set(bad)
+
+
+class AssessingRouter:
+    """A `TurnRouter` answering a pass plus an assessment per question text, and recording whether
+    it was asked the fast path's questions."""
+
+    def __init__(self, clock: FakeClock, table: dict[str, dict[str, float]]) -> None:
+        self.clock, self.table = clock, table
+        self.fast: list[bool] = []
+
+    async def route(self, router: str, request: RouteRequest) -> RouteDecision:
+        self.fast.append(request.fast_path)
+        self.clock.now += 0.1
+        return RouteDecision(
+            kind=RouteKind.PASS,
+            assessment=Assessment.of(self.table[request.text], action=0.01, complexity=0.1),
+        )
+
+
+def _multi() -> tuple[RoutingComparison, AssessingRouter]:
+    clock = FakeClock()
+    router = AssessingRouter(
+        clock,
+        {
+            "both": {"a": 0.9, "b": 0.8, "c": 0.1},  # right
+            "one_of_two": {"a": 0.9, "b": 0.2, "c": 0.1},  # misses b
+            "extra": {"a": 0.9, "b": 0.1, "c": 0.7},  # adds c
+            "none": {"a": 0.1, "b": 0.1, "c": 0.1},  # right: nothing
+        },
+    )
+    question_set = QuestionSet(
+        name="s",
+        synthetic=True,
+        entry_profile="front_desk",
+        questions=(
+            Question("q1", "both", "pass", intents=("a", "b")),
+            Question("q2", "one_of_two", "pass", intents=("a", "b")),
+            Question("q3", "extra", "intent:a"),
+            Question("q4", "none", "pass"),
+        ),
+    )
+    comparison = asyncio.run(
+        run_routing(
+            question_set, router=router, router_name="jev", clock=clock, fast_path=True
+        )
+    )
+    return comparison, router
+
+
+def test_with_the_fast_path_the_router_is_asked_its_questions_and_sets_are_scored() -> None:
+    comparison, router = _multi()
+    routed = comparison.routed
+
+    assert router.fast == [True] * 4
+    assert [v.intents for v in routed.verdicts] == [("a", "b"), ("a",), ("a", "c"), ()]
+    assert routed.intent_set_accuracy == pytest.approx(2 / 4)
+    assert routed.combined_set_accuracy == pytest.approx(1 / 2)  # the two-intent questions
+    # micro: true positives a,b,a,a = 4; predicted 1+... = 2+1+2+0 = 5; expected 2+2+1+0 = 5
+    assert routed.intent_precision == pytest.approx(4 / 5)
+    assert routed.intent_recall == pytest.approx(4 / 5)
+    assert routed.fast_path_verdicts == {"composite": 3, "defer:no_intent": 1}
+    assert comparison.baseline.intent_set_accuracy is None, "routing off assesses nothing"
+
+
+def test_without_the_fast_path_no_intent_set_is_scored() -> None:
+    clock = FakeClock()
+    router = AssessingRouter(clock, {"both": {"a": 0.9}})
+    question_set = QuestionSet(
+        name="s", synthetic=True, entry_profile="f",
+        questions=(Question("q1", "both", "pass", intents=("a",)),),
+    )  # fmt: skip
+    routed = asyncio.run(
+        run_routing(question_set, router=router, router_name="jev", clock=clock)
+    ).routed
+    assert router.fast == [False]
+    assert routed.verdicts[0].intents is None and routed.intent_set_accuracy is None
+
+
+def test_the_report_carries_the_intent_set_metrics(tmp_path: Path) -> None:
+    comparison, _ = _multi()
+    json_path, markdown_path = write_routing_report(comparison, tmp_path)
+    report = json.loads(json_path.read_text(encoding="utf-8"))
+    assert report["router"]["intent_set_accuracy"] == pytest.approx(0.5)
+    assert report["router"]["fast_path_verdicts"] == {"composite": 3, "defer:no_intent": 1}
+    assert report["router"]["verdicts"][0]["intents"] == ["a", "b"]
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "| intent set exact match | - | 50% |" in markdown
+    assert "| intent precision / recall | - | 80% / 80% |" in markdown

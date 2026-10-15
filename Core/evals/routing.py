@@ -19,6 +19,16 @@ routing ON. The report carries, per run:
     latency p50/p95     of the router, and of the whole turn when a `TurnDriver` runs each turn
                         (a turn that failed is counted in `failed turns`, never timed),
 
+and with the fast path (S10, `run_routing(..., fast_path=True)`, the router asked its extra
+questions in the same call):
+
+    intent set exact match   share of the assessed questions whose detected intents (at or above
+                             the intent threshold) equal the expected set,
+    combined set match       the same over the questions expecting two or more intents,
+    intent precision/recall  micro-averaged over every (question, intent) pair,
+    fast path verdicts       how many questions each verdict got (`domain/fast_path.py`, no
+                             history, the default thresholds but the intent one),
+
 Nothing here knows a vertical. A set file is data; the scripted router (`KeywordRouter`) reads its
 rules from the set; a real router is an addon's (`provides.routers`), loaded by the CLI.
 
@@ -38,6 +48,8 @@ YAML (`.yaml`/`.yml`), one document:
         text: "Where is my invoice?"
         expected: "profile:billing"
         note: "optional, free text"
+        intents: [refund]               # optional: the intents the question asks for (S10);
+                                        # default: [<name>] for `intent:<name>`, else none
 
 JSONL (`.jsonl`): one JSON object per line. The FIRST line is `{"header": {...}}` with the header
 keys above (everything but `questions`); every other line is one question object. Blank lines are
@@ -61,6 +73,7 @@ from typing import Any, Final, Protocol
 
 import yaml
 
+from agent_core.domain.fast_path import FastPathThresholds, decide_fast_path
 from agent_core.domain.routing import RouteDecision, RouteKind, RouteRequest
 from agent_core.ports.turn_router import TurnRouter
 
@@ -89,7 +102,7 @@ _PREFIXES: Final = ("profile:", "intent:")
 _HEADER_KEYS: Final = frozenset(
     {"name", "synthetic", "description", "entry_profile", "keyword_router"}
 )
-_QUESTION_KEYS: Final = frozenset({"id", "text", "expected", "note"})
+_QUESTION_KEYS: Final = frozenset({"id", "text", "expected", "note", "intents"})
 _RULE_KEYS: Final = frozenset({"route", "keywords"})
 EVAL_CHANNEL: Final = "eval"
 EVAL_TENANT: Final = "eval"
@@ -129,6 +142,18 @@ class Question:
     text: str
     expected: str
     note: str = ""
+    # S10. The intents the question asks for; None: implied by `expected`.
+    intents: tuple[str, ...] | None = None
+
+    @property
+    def expected_intents(self) -> tuple[str, ...]:
+        """The expected intent set, sorted: the declared one, else the `intent:` route's, else
+        none."""
+        if self.intents is not None:
+            return tuple(sorted(set(self.intents)))
+        if self.expected.startswith("intent:"):
+            return (self.expected.removeprefix("intent:"),)
+        return ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,7 +245,21 @@ def _questions(path: Path, raw: object) -> tuple[Question, ...]:
         note = item.get("note", "")
         if not isinstance(note, str):
             raise _refuse(path, where, "'note' must be a string")
-        questions.append(Question(qid, _text(path, where, item, "text"), expected, note.strip()))
+        intents = item.get("intents")
+        if intents is not None and (
+            not isinstance(intents, list)
+            or not all(isinstance(i, str) and i.strip() for i in intents)
+        ):
+            raise _refuse(path, where, "'intents' must be a list of intent names")
+        questions.append(
+            Question(
+                qid,
+                _text(path, where, item, "text"),
+                expected,
+                note.strip(),
+                None if intents is None else tuple(i.strip() for i in intents),
+            )
+        )
     return tuple(questions)
 
 
@@ -324,6 +363,11 @@ class Verdict:
     turn_error: str | None = None
     # D97. How the deployment's intent plan ended for this turn (`plan`, `fallback:<reason>`).
     plan: str | None = None
+    # S10. The expected intent set, the detected one (None: no assessment) and the fast path's
+    # verdict on the assessment.
+    expected_intents: tuple[str, ...] = ()
+    intents: tuple[str, ...] | None = None
+    fast_path: str | None = None
 
     @property
     def correct(self) -> bool:
@@ -386,6 +430,49 @@ class RoutingRun:
         """Turns that failed (or never finished): reported apart, left out of the turn latency."""
         return sum(1 for v in self.verdicts if v.turn_error is not None)
 
+    def _assessed(self) -> list[Verdict]:
+        return [v for v in self.verdicts if v.intents is not None]
+
+    @property
+    def intent_set_accuracy(self) -> float | None:
+        """S10. Exact match of detected and expected intent sets, over the assessed questions."""
+        assessed = self._assessed()
+        if not assessed:
+            return None
+        return sum(1 for v in assessed if v.intents == v.expected_intents) / len(assessed)
+
+    @property
+    def combined_set_accuracy(self) -> float | None:
+        """S10. `intent_set_accuracy` over the questions expecting two or more intents."""
+        combined = [v for v in self._assessed() if len(v.expected_intents) >= 2]
+        if not combined:
+            return None
+        return sum(1 for v in combined if v.intents == v.expected_intents) / len(combined)
+
+    def _pairs(self) -> tuple[int, int, int]:
+        true_positive = predicted = expected = 0
+        for v in self._assessed():
+            got = set(v.intents or ())
+            want = set(v.expected_intents)
+            true_positive += len(got & want)
+            predicted += len(got)
+            expected += len(want)
+        return true_positive, predicted, expected
+
+    @property
+    def intent_precision(self) -> float | None:
+        true_positive, predicted, _ = self._pairs()
+        return true_positive / predicted if predicted else None
+
+    @property
+    def intent_recall(self) -> float | None:
+        true_positive, _, expected = self._pairs()
+        return true_positive / expected if expected else None
+
+    @property
+    def fast_path_verdicts(self) -> dict[str, int]:
+        return dict(sorted(Counter(v.fast_path for v in self.verdicts if v.fast_path).items()))
+
     def latency(self, which: str) -> dict[str, float | None]:
         if which == "router":
             values = [v.router_ms for v in self.verdicts if v.router_ms is not None]
@@ -428,14 +515,18 @@ async def _verdict(
     timeout: float,
     turn: TurnDriver | None,
     clock: Callable[[], float],
+    fast_path: FastPathThresholds | None = None,
 ) -> Verdict:
     got, outcome, router_ms = PASS, "off", None
+    detected: tuple[str, ...] | None = None
+    verdict: str | None = None
     if router is not None:
         request = RouteRequest(
             text=question.text,
             profile_id=entry_profile,
             channel=EVAL_CHANNEL,
             tenant_id=EVAL_TENANT,
+            fast_path=fast_path is not None,
         )
         started = clock()
         try:
@@ -447,6 +538,9 @@ async def _verdict(
         else:
             got = route_of(decision)
             outcome = "abstained" if got == PASS else "answered"
+            if fast_path is not None and decision.assessment is not None:
+                decided = decide_fast_path(decision.assessment, fast_path, has_history=False)
+                detected, verdict = decided.intents, decided.code
         router_ms = (clock() - started) * 1000
     turn_ms, turn_error, plan = None, None, None
     if turn is not None:
@@ -457,7 +551,17 @@ async def _verdict(
             turn_error = f"{type(error).__name__}: {error}"
         turn_ms = (clock() - started) * 1000 + (router_ms or 0.0)
     return Verdict(
-        question.id, question.expected, got, outcome, router_ms, turn_ms, turn_error, plan
+        question.id,
+        question.expected,
+        got,
+        outcome,
+        router_ms,
+        turn_ms,
+        turn_error,
+        plan,
+        question.expected_intents,
+        detected,
+        verdict,
     )
 
 
@@ -470,8 +574,11 @@ async def run_routing(
     turn: TurnDriver | None = None,
     clock: Callable[[], float] = time.monotonic,
     notes: Sequence[str] = (),
+    fast_path: bool = False,
+    intent_threshold: float = 0.5,
 ) -> RoutingComparison:
-    """The set twice, one question at a time: routing off (baseline), then routing on."""
+    """The set twice, one question at a time: routing off (baseline), then routing on. With
+    `fast_path` the router is asked its extra questions (S10) and the intent sets are scored."""
     if timeout_ms < 1:
         raise ValueError(f"the router timeout must be at least 1 ms, got {timeout_ms}")
     runs: list[RoutingRun] = []
@@ -485,6 +592,7 @@ async def run_routing(
                 timeout=timeout_ms / 1000,
                 turn=turn,
                 clock=clock,
+                fast_path=FastPathThresholds(intent=intent_threshold) if fast_path else None,
             )
             for question in question_set.questions
         ]
@@ -512,6 +620,11 @@ def _run_json(run: RoutingRun) -> dict[str, Any]:
         "turn_latency_ms": run.latency("turn"),
         "turn_errors": run.turn_errors,
         "plans": run.plans,
+        "intent_set_accuracy": run.intent_set_accuracy,
+        "combined_set_accuracy": run.combined_set_accuracy,
+        "intent_precision": run.intent_precision,
+        "intent_recall": run.intent_recall,
+        "fast_path_verdicts": run.fast_path_verdicts,
         "confusion": [
             {"expected": expected, "got": got, "count": count}
             for (expected, got), count in run.confusion.items()
@@ -526,6 +639,9 @@ def _run_json(run: RoutingRun) -> dict[str, Any]:
                 "turn_ms": v.turn_ms,
                 "turn_error": v.turn_error,
                 "plan": v.plan,
+                "expected_intents": list(v.expected_intents),
+                "intents": None if v.intents is None else list(v.intents),
+                "fast_path": v.fast_path,
             }
             for v in run.verdicts
         ],
@@ -579,6 +695,16 @@ def render_routing_markdown(comparison: RoutingComparison) -> str:
                 f"| {which} latency {key} (ms) | {_ms(base.latency(which)[key])} "
                 f"| {_ms(routed.latency(which)[key])} |"
             )
+    if routed.intent_set_accuracy is not None:
+        lines += [
+            f"| intent set exact match | - | {_pct(routed.intent_set_accuracy)} |",
+            f"| combined set match (2+ intents) | - | {_pct(routed.combined_set_accuracy)} |",
+            f"| intent precision / recall | - | {_pct(routed.intent_precision)} / "
+            f"{_pct(routed.intent_recall)} |",
+            "| fast path verdicts | - | "
+            + ", ".join(f"{k} {n}" for k, n in routed.fast_path_verdicts.items())
+            + " |",
+        ]
     if any(v.turn_ms is not None for v in (*base.verdicts, *routed.verdicts)):
         lines.append(f"| failed turns | {base.turn_errors} | {routed.turn_errors} |")
         counts = [" / ".join(str(run.plans[k]) for k in ("plan", "fallback", "no_plan"))
@@ -594,6 +720,16 @@ def render_routing_markdown(comparison: RoutingComparison) -> str:
         lines += ["", "## Misrouted (routing on)", ""]
         lines.extend(
             f"- {v.question_id}: expected {v.expected}, got {v.got} ({v.outcome})" for v in wrong
+        )
+    missed = [
+        v for v in routed.verdicts if v.intents is not None and v.intents != v.expected_intents
+    ]
+    if missed:
+        lines += ["", "## Intent sets that differ (fast path)", ""]
+        lines.extend(
+            f"- {v.question_id}: expected [{', '.join(v.expected_intents)}], got "
+            f"[{', '.join(v.intents or ())}] ({v.fast_path})"
+            for v in missed
         )
     return "\n".join(lines) + "\n"
 

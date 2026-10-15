@@ -685,6 +685,13 @@ questions replace it).
   `GET /turns/{id}/events` and the report counts `plan / fallback / no plan` per run. A deployment
   with routing on also routes the baseline run's turns: compare turn latency across two runs
   (deployment routing off, then on). It costs model calls.
+- Several intents per question (S10, the fast path): `AGENT_CORE_EVAL_FAST_PATH=1` asks the
+  router its fast path questions in the same call and scores, per question, the detected intents
+  (at or above `AGENT_CORE_EVAL_FAST_PATH_INTENT_THRESHOLD`, default 0.5) against the expected
+  set (a question's `intents: [...]`; an `intent:<name>` question expects that one, any other
+  none): intent set exact match, the same over questions expecting 2+ intents, micro precision /
+  recall, and how many got each fast path verdict. The router latency is then that of the
+  multi-question call.
 - Knobs: `AGENT_CORE_EVAL_ROUTER_TIMEOUT_MS` (default 1500, as production),
   `AGENT_CORE_EVAL_REPORT_DIR` (default `Core/evals/reports`), `AGENT_CORE_EVAL_MIN_ACCURACY`
   (exit 1 when routing-on accuracy is below it).

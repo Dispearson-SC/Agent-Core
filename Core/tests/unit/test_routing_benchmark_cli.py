@@ -378,3 +378,46 @@ def test_every_definition_runs_before_the_script_entry_point() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     ]
     assert late == []
+
+
+def test_a_fast_path_run_asks_the_router_its_questions_and_scores_intent_sets(
+    tmp_path: Path,
+) -> None:
+    """S10: AGENT_CORE_EVAL_FAST_PATH=1 sends the flag; the intent threshold is configurable."""
+    addon = tmp_path / "addons" / "bench_fast"
+    (addon / "routers").mkdir(parents=True)
+    (addon / "addon.yaml").write_text(
+        "name: bench_fast\nversion: 1.0.0\ncore: '>=0'\nprovides:\n  routers: [fast]\n"
+    )
+    (addon / "routers" / "fast.py").write_text(
+        dedent(
+            """
+            def route(request):
+                if not request.get("fast_path"):
+                    return {"decision": "pass"}
+                return {"decision": "pass", "assessment": {
+                    "intents": {"opening_hours": 0.7}, "action": 0.0, "complexity": 0.0}}
+            """
+        )
+    )
+    env = _env(
+        tmp_path,
+        AGENT_CORE_EVAL="1",
+        AGENT_CORE_EVAL_ROUTER="fast",
+        AGENT_CORE_EVAL_FAST_PATH="1",
+        AGENT_CORE_EVAL_FAST_PATH_INTENT_THRESHOLD="0.6",
+        AGENT_CORE_ADDONS="bench_fast",
+        AGENT_CORE_ADDONS_DIR=str(tmp_path / "addons"),
+    )
+
+    assert main(env) == 0
+
+    report = json.loads((tmp_path / "report" / "routing.json").read_text())
+    assert [v["intents"] for v in report["router"]["verdicts"]] == [
+        ["opening_hours"], ["opening_hours"], ["opening_hours"],
+    ]  # fmt: skip
+    assert report["router"]["intent_set_accuracy"] == pytest.approx(1 / 3)
+    strict = {**env, "AGENT_CORE_EVAL_FAST_PATH_INTENT_THRESHOLD": "0.8"}
+    assert main(strict) == 0
+    report = json.loads((tmp_path / "report" / "routing.json").read_text())
+    assert report["router"]["verdicts"][0]["intents"] == []
