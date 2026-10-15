@@ -157,3 +157,75 @@ def test_a_composite_orders_its_members_by_intent_and_needs_one() -> None:
     assert call.intents == ("day_summary", "order_plan")
     with pytest.raises(ValueError):
         CompositeCall(())
+
+
+# --- P13: the coverage guard and the route choice as a second signal ----------------------------
+
+
+def test_a_message_asking_more_things_than_the_detected_intents_passes_uncovered() -> None:
+    from agent_core.domain.fast_path import PASS_UNCOVERED
+
+    # "How am I doing today and what do I order?": two requests, only order_plan detected. A
+    # composite would answer the order and claim the day's figures are unavailable (P12 battery).
+    assessment = Assessment.of(
+        {"order_plan": 0.81, "day_summary": 0.2}, action=0.02, complexity=0.1, requests=2
+    )
+    verdict = decide_fast_path(assessment, T, has_history=False)
+    assert verdict.code == PASS_UNCOVERED == "pass:uncovered"
+    assert verdict.passes and not verdict.composite
+    assert verdict.intents == ("order_plan",)
+
+
+def test_a_message_whose_requests_the_detected_intents_cover_is_a_composite() -> None:
+    both = Assessment.of(
+        {"order_plan": 0.81, "day_summary": 0.9}, action=0.02, complexity=0.1, requests=2
+    )
+    assert decide_fast_path(both, T, has_history=False).code == COMPOSITE
+    # More intents than requests: a ride-along read, still covered.
+    one = Assessment.of({"a": 0.9, "b": 0.8}, action=0.02, complexity=0.1, requests=1)
+    assert decide_fast_path(one, T, has_history=False).code == COMPOSITE
+
+
+def test_without_a_requests_answer_the_p12_rules_hold() -> None:
+    verdict = decide_fast_path(_assess({"order_plan": 0.81}), T, has_history=False)
+    assert verdict.code == COMPOSITE
+
+
+def test_the_coverage_guard_runs_after_the_earlier_rules() -> None:
+    action = Assessment.of({"a": 0.9}, action=0.9, complexity=0.1, requests=3)
+    assert decide_fast_path(action, T, has_history=False).code == PASS_ACTION
+    none = Assessment.of({"a": 0.1}, action=0.02, complexity=0.1, requests=2)
+    assert decide_fast_path(none, T, has_history=False).code == DEFER_NO_INTENT
+
+
+def test_a_confident_route_choice_counts_its_intent_as_detected() -> None:
+    # "Give me today's summary": the route choice said day_summary at 0.86, its yes/no 0.54.
+    assessment = Assessment.of({"day_summary": 0.54}, action=0.02, complexity=0.1, requests=1)
+    verdict = decide_fast_path(
+        assessment, T, has_history=False, routed=("day_summary", 0.86)
+    )
+    assert verdict.code == COMPOSITE and verdict.intents == ("day_summary",)
+    # It joins the yes/no detections, and it covers a request of its own.
+    two = Assessment.of({"order_plan": 0.9}, action=0.02, complexity=0.1, requests=2)
+    joined = decide_fast_path(two, T, has_history=False, routed=("day_summary", 0.9))
+    assert joined.code == COMPOSITE and joined.intents == ("day_summary", "order_plan")
+
+
+def test_an_unsure_route_choice_is_not_a_detection() -> None:
+    assessment = Assessment.of({"day_summary": 0.3}, action=0.02, complexity=0.1)
+    verdict = decide_fast_path(assessment, T, has_history=False, routed=("day_summary", 0.69))
+    assert verdict.code == DEFER_NO_INTENT and verdict.intents == ()
+    strict = FastPathThresholds(route_intent=0.95)
+    sure = decide_fast_path(assessment, strict, has_history=False, routed=("day_summary", 0.9))
+    assert sure.code == DEFER_NO_INTENT
+
+
+def test_the_route_threshold_and_the_requests_answer_are_checked() -> None:
+    assert T.route_intent == 0.7
+    with pytest.raises(ValueError):
+        FastPathThresholds(route_intent=1.5)
+    for bad in (0, -1, 256, True):
+        with pytest.raises(ValueError):
+            Assessment.of({}, requests=bad)  # type: ignore[arg-type]
+    counted = Assessment.of({"a": 0.5}, action=0.02, complexity=0.2, requests=2)
+    assert counted.summary() == "intents=a:0.50;action=0.02;follow_up=-;complexity=0.20;requests=2"

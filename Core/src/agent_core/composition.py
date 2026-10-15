@@ -761,6 +761,9 @@ class Settings:
     fast_path_follow_up_threshold: float = _FAST_PATH_DEFAULTS.follow_up
     fast_path_complexity_threshold: float = _FAST_PATH_DEFAULTS.complexity
     fast_path_max_intents: int = _FAST_PATH_DEFAULTS.max_intents
+    # P13. The route choice confidence at which its intent counts as detected
+    # (`AGENT_CORE_FAST_PATH_ROUTE_THRESHOLD` in [0, 1], default 0.7).
+    fast_path_route_threshold: float = _FAST_PATH_DEFAULTS.route_intent
     # S10. The profile that writes a composite's one reply (`AGENT_CORE_FAST_PATH_COMPOSER`); unset
     # or empty is the turn's entry profile. Startup stops when it names no loaded profile.
     fast_path_composer: str | None = None
@@ -883,6 +886,11 @@ class Settings:
                 "AGENT_CORE_FAST_PATH_COMPLEXITY_THRESHOLD",
                 env.get("AGENT_CORE_FAST_PATH_COMPLEXITY_THRESHOLD"),
                 _FAST_PATH_DEFAULTS.complexity,
+            ),
+            fast_path_route_threshold=_parse_unit(
+                "AGENT_CORE_FAST_PATH_ROUTE_THRESHOLD",
+                env.get("AGENT_CORE_FAST_PATH_ROUTE_THRESHOLD"),
+                _FAST_PATH_DEFAULTS.route_intent,
             ),
             fast_path_composer=(env.get("AGENT_CORE_FAST_PATH_COMPOSER") or "").strip() or None,
             fast_path_cache_seconds=_parse_cache_seconds(
@@ -1040,6 +1048,7 @@ def fast_path_thresholds_for(settings: Settings) -> FastPathThresholds:
         follow_up=settings.fast_path_follow_up_threshold,
         complexity=settings.fast_path_complexity_threshold,
         max_intents=settings.fast_path_max_intents,
+        route_intent=settings.fast_path_route_threshold,
     )
 
 

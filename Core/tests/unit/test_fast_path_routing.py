@@ -379,3 +379,63 @@ def test_a_route_record_recorded_before_the_fast_path_reads_back_without_it() ->
     record.__setstate__(["jev", FRONT, FRONT, None, 5])
     assert (record.fast_path_mode, record.fast_path, record.assessment) == (None, None, None)
     assert record.outcome == "passed" and not record.composite
+
+
+# --- P13: the route choice as a second signal, the coverage guard --------------------------------
+
+
+def test_on_a_confident_intent_route_choice_is_a_composite_of_that_intent() -> None:
+    # "Give me today's summary": the choice said day_summary at 0.86, its yes/no only 0.3.
+    decision = RouteDecision(
+        kind=RouteKind.INTENT,
+        label="day_summary",
+        intent="day_summary",
+        confidence=0.86,
+        assessment=Assessment.of(
+            {"day_summary": 0.3}, action=0.02, complexity=0.1, requests=1
+        ),
+    )
+    use_case, _, routes = _use_case(decision, FastPathMode.ON)
+
+    routed = _run(use_case)
+
+    assert routed.composite is not None and routed.composite.intents == ("day_summary",)
+    assert routes.records[0].fast_path_intents == "day_summary"
+
+
+def test_on_a_message_with_an_unplanned_request_runs_the_entry_profile() -> None:
+    # Two requests, one detected intent: the composite would drop the other part.
+    decision = RouteDecision(
+        kind=RouteKind.INTENT,
+        label="order_plan",
+        intent="order_plan",
+        confidence=0.6,
+        assessment=Assessment.of(
+            {"order_plan": 0.81, "day_summary": 0.2}, action=0.02, complexity=0.1, requests=2
+        ),
+    )
+    use_case, _, routes = _use_case(decision, FastPathMode.ON)
+
+    routed = _run(use_case)
+
+    assert routed.request == _request(), "the entry profile, as the person"
+    assert routed.composite is None and routed.intent is None, "never the one-intent route"
+    record = routes.records[0]
+    assert record.fast_path == "pass:uncovered" and record.outcome == "passed"
+    assert record.assessment is not None and record.assessment.endswith(";requests=2")
+
+
+def test_shadow_records_an_uncovered_message_but_runs_todays_route() -> None:
+    decision = RouteDecision(
+        kind=RouteKind.INTENT,
+        label="order_plan",
+        intent="order_plan",
+        confidence=0.6,
+        assessment=Assessment.of({"order_plan": 0.81}, action=0.02, complexity=0.1, requests=2),
+    )
+    use_case, _, routes = _use_case(decision, FastPathMode.SHADOW)
+
+    routed = _run(use_case)
+
+    assert routed.intent is not None and routed.intent.intent == "order_plan", "today's route"
+    assert routes.records[0].fast_path == "pass:uncovered"

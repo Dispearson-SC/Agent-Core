@@ -46,7 +46,8 @@ THE FAST PATH (S10, `domain/fast_path.py`)
     (`recent_history`), so a follow-up IS sent to the router then; its verdict, the detected
     intents and every answer are audited on the route row. SHADOW then does exactly what OFF would
     have done (a follow-up is still not routed). ON applies the verdict: a `pass:*` runs the entry
-    profile as the person, a `composite` runs the plans of every detected intent and one compose
+    profile as the person (`pass:uncovered` included: the message asks for more than the detected
+    intents, P13), a `composite` runs the plans of every detected intent and one compose
     (`RunIntent.run_composite`), and a `defer:*` runs the logic above. A composite is built only
     when the entry profile opted into intents and EVERY detected intent has a declared plan whose
     owner is an allowed, startable target the entry profile may ask (the S8 guard, per owner);
@@ -367,7 +368,16 @@ class RouteTurn:
         assessment: Assessment | None = decision.assessment
         if assessment is None:
             return FastPathVerdict("defer:unassessed"), ()
-        verdict = decide_fast_path(assessment, self._thresholds, has_history=continued)
+        routed = (
+            (decision.intent, decision.confidence)
+            if decision.kind is RouteKind.INTENT
+            and decision.intent
+            and decision.confidence is not None
+            else None
+        )
+        verdict = decide_fast_path(
+            assessment, self._thresholds, has_history=continued, routed=routed
+        )
         if not verdict.composite:
             return verdict, ()
         if not policy.intents or self._owners is None:

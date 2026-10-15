@@ -493,8 +493,26 @@ def test_an_answer_may_carry_the_fast_path_assessment() -> None:
         {"intents": {}, "action": True},
         {"intents": {}, "mood": 0.1},
         {"intents": {"x" * 65: 0.1}},
+        {"intents": {}, "requests": 0},
+        {"intents": {}, "requests": 1.5},
+        {"intents": {}, "requests": True},
+        {"intents": {}, "requests": "2"},
     ],
 )
 def test_a_malformed_assessment_is_a_malformed_answer(assessment: Any) -> None:
     with pytest.raises((ValueError, TypeError)):
         decision_from_mapping({"decision": "pass", "assessment": assessment})
+
+
+def test_an_assessment_may_count_the_requests_of_the_message() -> None:
+    decision = decision_from_mapping(
+        {
+            "decision": "pass",
+            "assessment": {"intents": {"a": 0.9}, "action": 0.1, "complexity": 0.0, "requests": 2},
+        }
+    )
+    assert decision.assessment is not None and decision.assessment.requests == 2
+    plain = decision_from_mapping(
+        {"decision": "pass", "assessment": {"intents": {}, "action": 0.1, "complexity": 0.0}}
+    )
+    assert plain.assessment is not None and plain.assessment.requests is None

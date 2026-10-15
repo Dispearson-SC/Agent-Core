@@ -9,9 +9,21 @@ the switch, the thresholds and the rules that turn those answers into a verdict:
   1. an action request                       -> `pass:action_request`   (the entry profile's model)
   2. depends on the conversation, or unsure  -> `pass:depends_on_history`
   3. complex                                 -> `pass:complex`
-  4. more intents than `max_intents`         -> `pass:too_many_intents`
-  5. one or more intents above the threshold -> `composite`  (all their plans, one compose)
-  6. otherwise                               -> `defer:no_intent` (the existing route/pass logic)
+  4. no intent detected                      -> `defer:no_intent` (the existing route/pass logic)
+  5. more intents than `max_intents`         -> `pass:too_many_intents`
+  6. more requests than detected intents     -> `pass:uncovered`
+  7. otherwise                               -> `composite`  (all their plans, one compose)
+
+An intent is DETECTED when its yes/no value is at or above the intent threshold, or when the route
+choice itself picked it with a confidence at or above `route_intent` (P13: a second signal; "Give
+me today's summary" routed to day_summary at 0.86 while its yes/no said 0.54).
+
+THE COVERAGE GUARD (P13, rule 6). A router may also say how many separate things the message asks
+for (`Assessment.requests`). When that count is larger than the detected intents, some part of the
+message has no plan: a composite would answer the planned parts and could only say the rest is
+"not available" (the P12 battery: "How am I doing today and what do I order?" with only the order
+detected). The turn passes to the entry profile, which reasons about all of it. A router that does
+not count (`requests` None) gets the P12 rules.
 
 `application/route_turn.py` then checks that every intent of a composite has a declared plan whose
 owner the entry profile may ask (the S8 delegation guard, per owner); one that cannot is
@@ -48,6 +60,7 @@ __all__ = [
     "PASS_COMPLEX",
     "PASS_FOLLOW_UP",
     "PASS_TOO_MANY",
+    "PASS_UNCOVERED",
     "Assessment",
     "MAX_COMPOSITE_CALLS",
     "CompositeCall",
@@ -64,6 +77,7 @@ PASS_ACTION: Final[str] = "pass:action_request"
 PASS_FOLLOW_UP: Final[str] = "pass:depends_on_history"
 PASS_COMPLEX: Final[str] = "pass:complex"
 PASS_TOO_MANY: Final[str] = "pass:too_many_intents"
+PASS_UNCOVERED: Final[str] = "pass:uncovered"
 DEFER_NO_INTENT: Final[str] = "defer:no_intent"
 
 MAX_COMPOSITE_CALLS: Final[int] = 12
@@ -71,6 +85,9 @@ MAX_COMPOSITE_CALLS: Final[int] = 12
 
 MAX_ASSESSED_INTENTS: Final[int] = 254
 """As many intents as one Typesafe choice question may list (255 options, an escape among them)."""
+
+MAX_REQUESTS: Final[int] = 255
+"""The largest request count an assessment holds (a router's top level means "or more")."""
 
 
 class FastPathMode(StrEnum):
@@ -86,16 +103,18 @@ def _unit(name: str, value: float) -> None:
 
 @dataclass(frozen=True, slots=True)
 class FastPathThresholds:
-    """Where each answer tips the verdict. `max_intents` bounds one composite (its budget)."""
+    """Where each answer tips the verdict. `max_intents` bounds one composite (its budget);
+    `route_intent` is the route choice confidence at which its intent counts as detected (P13)."""
 
     intent: float = 0.5
     action: float = 0.5
     follow_up: float = 0.3
     complexity: float = 0.6
     max_intents: int = 3
+    route_intent: float = 0.7
 
     def __post_init__(self) -> None:
-        for name in ("intent", "action", "follow_up", "complexity"):
+        for name in ("intent", "action", "follow_up", "complexity", "route_intent"):
             _unit(f"{name} threshold", getattr(self, name))
         if self.max_intents < 1:
             raise ValueError(
@@ -109,12 +128,14 @@ class Assessment:
 
     `intents` maps each assessed intent to the probability the message asks for it (sorted by
     name). `follow_up` is None when it was not asked (no conversation yet). `complexity` is the
-    router's score normalised to [0, 1] (0 the simplest level, 1 the most complex)."""
+    router's score normalised to [0, 1] (0 the simplest level, 1 the most complex). `requests` is
+    how many separate things the message asks for (P13; None when the router does not count)."""
 
     intents: tuple[tuple[str, float], ...] = ()
     action: float | None = None
     follow_up: float | None = None
     complexity: float | None = None
+    requests: int | None = None
 
     def __post_init__(self) -> None:
         if len(self.intents) > MAX_ASSESSED_INTENTS:
@@ -130,6 +151,14 @@ class Assessment:
             value = getattr(self, name)
             if value is not None:
                 _unit(name, value)
+        if self.requests is not None and (
+            isinstance(self.requests, bool)
+            or not isinstance(self.requests, int)
+            or not 1 <= self.requests <= MAX_REQUESTS
+        ):
+            raise ValueError(
+                f"an assessment counts 1-{MAX_REQUESTS} requests, got {self.requests!r}"
+            )
         object.__setattr__(self, "intents", tuple(sorted(self.intents)))
 
     @classmethod
@@ -140,25 +169,28 @@ class Assessment:
         action: float | None = None,
         follow_up: float | None = None,
         complexity: float | None = None,
+        requests: int | None = None,
     ) -> Assessment:
         return cls(
             tuple((str(k), float(v)) for k, v in intents.items()),
             action=action,
             follow_up=follow_up,
             complexity=complexity,
+            requests=requests,
         )
 
     def summary(self) -> str:
         """Every answer with its value, compact, for the audit row: `intents=a:0.93,b:0.10;
-        action=0.02;follow_up=-;complexity=0.21`."""
+        action=0.02;follow_up=-;complexity=0.21`, then `;requests=2` when the router counted."""
 
         def value(number: float | None) -> str:
             return "-" if number is None else f"{number:.2f}"
 
         intents = ",".join(f"{name}:{score:.2f}" for name, score in self.intents)
+        counted = "" if self.requests is None else f";requests={self.requests}"
         return (
             f"intents={intents};action={value(self.action)};"
-            f"follow_up={value(self.follow_up)};complexity={value(self.complexity)}"
+            f"follow_up={value(self.follow_up)};complexity={value(self.complexity)}{counted}"
         )
 
 
@@ -180,14 +212,20 @@ class FastPathVerdict:
 
 
 def decide_fast_path(
-    assessment: Assessment, thresholds: FastPathThresholds, *, has_history: bool
+    assessment: Assessment,
+    thresholds: FastPathThresholds,
+    *,
+    has_history: bool,
+    routed: tuple[str, float] | None = None,
 ) -> FastPathVerdict:
     """The verdict of the rules in the module docstring, in their order. A missing action or
     complexity answer is not a "no": the router said nothing, so nothing is assumed safe and the
-    existing logic runs (`defer:unassessed`)."""
-    detected = tuple(
-        sorted(name for name, score in assessment.intents if score >= thresholds.intent)
-    )
+    existing logic runs (`defer:unassessed`). `routed` is the route choice's intent and confidence
+    when it chose an intent (None otherwise)."""
+    found = {name for name, score in assessment.intents if score >= thresholds.intent}
+    if routed is not None and routed[0] and routed[1] >= thresholds.route_intent:
+        found.add(routed[0])
+    detected = tuple(sorted(found))
     if assessment.action is None or assessment.complexity is None:
         return FastPathVerdict("defer:unassessed", detected)
     if assessment.action >= thresholds.action:
@@ -202,6 +240,8 @@ def decide_fast_path(
         return FastPathVerdict(DEFER_NO_INTENT, detected)
     if len(detected) > thresholds.max_intents:
         return FastPathVerdict(PASS_TOO_MANY, detected)
+    if assessment.requests is not None and assessment.requests > len(detected):
+        return FastPathVerdict(PASS_UNCOVERED, detected)
     return FastPathVerdict(COMPOSITE, detected)
 
 

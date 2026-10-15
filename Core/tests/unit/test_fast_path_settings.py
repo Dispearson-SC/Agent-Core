@@ -123,3 +123,11 @@ def test_the_composite_answer_cache_is_off_unless_a_ttl_is_set() -> None:
 def test_a_bad_cache_ttl_stops_startup(raw: str) -> None:
     with pytest.raises(ValueError, match="AGENT_CORE_FAST_PATH_CACHE_SECONDS"):
         _settings(AGENT_CORE_FAST_PATH_CACHE_SECONDS=raw)
+
+
+def test_the_route_choice_threshold_is_read_from_the_environment_and_checked() -> None:
+    settings = _settings(AGENT_CORE_FAST_PATH_ROUTE_THRESHOLD="0.85")
+    assert fast_path_thresholds_for(settings).route_intent == 0.85
+    assert fast_path_thresholds_for(_settings()).route_intent == 0.7
+    with pytest.raises(ValueError, match="AGENT_CORE_FAST_PATH_ROUTE_THRESHOLD"):
+        _settings(AGENT_CORE_FAST_PATH_ROUTE_THRESHOLD="1.5")

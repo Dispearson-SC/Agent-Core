@@ -279,8 +279,16 @@ is `pass:action_request`; a message in a conversation that depends on it, or mig
 (`follow_up >= AGENT_CORE_FAST_PATH_FOLLOW_UP_THRESHOLD`, 0.3, or no answer), is
 `pass:depends_on_history`; a complex one (`complexity >= AGENT_CORE_FAST_PATH_COMPLEXITY_THRESHOLD`,
 0.6) is `pass:complex`; more detected intents than `AGENT_CORE_FAST_PATH_MAX_INTENTS` (3) is
-`pass:too_many_intents`; one or more intents at or above `AGENT_CORE_FAST_PATH_INTENT_THRESHOLD`
-(0.5) is `composite`; nothing detected is `defer:no_intent`. A router answer without the action or
+`pass:too_many_intents`; a message that asks for more separate things than the intents detected
+(the router's `requests` count, P13) is `pass:uncovered`; otherwise the detected intents are a
+`composite`; nothing detected is `defer:no_intent`. An intent is detected when its yes/no value is
+at or above `AGENT_CORE_FAST_PATH_INTENT_THRESHOLD` (0.5), or when the route choice itself picked
+that intent with a confidence at or above `AGENT_CORE_FAST_PATH_ROUTE_THRESHOLD` (0.7; P13). The
+coverage guard exists because a composite can only answer the parts it planned: in the P12 battery
+"How am I doing today and what do I order?" with only the order detected answered the order and
+called the day's figures unavailable; `pass:uncovered` runs the entry profile instead, and the
+composite compose is told to leave out (never call unavailable) a part no result covers. A router
+that does not count requests gets the rules without the guard. A router answer without the action or
 complexity value is `defer:unassessed`. A composite needs the entry profile's `routing.intents`
 (else `defer:intent_not_supported`) and, for EVERY detected intent, a declared plan
 (`defer:<intent>:intent_unknown`) whose owner is a listed, startable target
@@ -309,7 +317,8 @@ scratch, as the person.
 **The composite answer cache (roadmap 5.8)** is off unless `AGENT_CORE_FAST_PATH_CACHE_SECONDS`
 is set (1-86400). A composed composite reply is then remembered in the answer cache table
 (`peer_answer_cache`, D57; the database clock decides expiry, shared by every process) under a
-digest of: the tenant, the sorted intents, the session (the case) and the person, the normalised
+digest of: the tenant, the sorted intents, the session (the case) and the caller (the person, its
+channel, its sorted roles and whom it acts for: P13), the normalised
 question, and a version made of the caller's `X-Data-Version` and the composer profile's content
 hash. The same question about the same case and data version within the TTL is answered from the
 cache with no call and no compose (`audit_turn_intents.reply_mode = 'cache'`, `planned` = `cache`).
