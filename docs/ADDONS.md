@@ -301,7 +301,13 @@ intents:
       - id: deliveries                    # the step's name in a template (default: the tool)
         tool: get_deliveries
     reply: compose                        # or `template` with `template: "Low: {get_inventory}"`
+    max_complexity: 0.8                   # optional (P15): see below
 ```
+
+`max_complexity` (a number between 0 and 1, optional) is for a plan that answers its question
+however complex the message sounds: with the fast path (`AGENT_CORE_FAST_PATH`, docs/OPERATIONS.md)
+a message whose detected intents all declare one is `pass:complex` only at or above the lowest of
+them, never below the deployment's complexity threshold. Without it the deployment's threshold holds.
 
 The entry profile opts in with `routing: {router: ..., targets: [...], intents: true}` (default
 false). When its router answers `intent: low_stock`, the turn runs as `shop_supply` (the plan's

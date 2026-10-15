@@ -50,13 +50,17 @@ THE FAST PATH (S10, `domain/fast_path.py`)
     P13), except that a pass other than an action, a follow-up or a complex message whose route
     choice is sure (`route_covers`) of the specialist owning the one detected intent's plan becomes
     `defer:route_covers` and the router's own route runs (P14: the request count said two things for
-    one topic said twice, and the turn lost its specialist), a `composite` runs the plans of every
-    detected intent and one compose (`RunIntent.run_composite`), and a `defer:*` runs the logic
-    above. A composite is built only when the entry profile opted into intents and EVERY detected
-    intent has a declared plan whose owner is an allowed, startable target the entry profile may ask
-    (the S8 guard, per owner); otherwise it is `defer:<intent>:<reason>`. The composite turn stays
-    the person's turn on the entry profile; each member records the hop its calls run delegated at.
-    Like a route, it is applied only once its audit row is written.
+    one topic said twice, and the turn lost its specialist); a complex message whose route choice
+    is a sure (`route_covers`) specialist route, with no detected intent or only one that specialist
+    owns, becomes `defer:route_sure` and that specialist answers directly (P15: the entry profile
+    would only ask that same specialist, one model call and one peer hop later); a `composite`
+    runs the plans of every detected intent and one compose (`RunIntent.run_composite`), and a
+    `defer:*` runs the logic above. A composite is built only when the entry profile opted into
+    intents and EVERY detected intent has a declared plan whose owner is an allowed, startable
+    target the entry profile may ask (the S8 guard, per owner); otherwise it is
+    `defer:<intent>:<reason>`. The composite turn stays the person's turn on the entry profile;
+    each member records the hop its calls run delegated at. Like a route, it is applied only once
+    its audit row is written.
 """
 
 from __future__ import annotations
@@ -146,6 +150,8 @@ MAX_ASSESSMENT_TEXT = 2000
 
 DEFER_ROUTE_COVERS = "defer:route_covers"
 """P14. A pass whose sure route choice covers the one detected intent: the router's route runs."""
+DEFER_ROUTE_SURE = "defer:route_sure"
+"""P15. A complex message whose route choice is a sure specialist route: that specialist answers."""
 
 # The passes the entry profile must answer whatever the route choice said.
 _ENTRY_PASSES = frozenset({PASS_ACTION, PASS_FOLLOW_UP, PASS_COMPLEX})
@@ -197,6 +203,12 @@ class RouteTurn:
         self._owners = (
             None if plans is None else {name: plan.profile_id for name, plan in plans.items()}
         )
+        # P15. intent -> the complexity ceiling its plan declared (`max_complexity`).
+        self._ceilings = {
+            name: plan.max_complexity
+            for name, plan in (plans or {}).items()
+            if plan.max_complexity is not None
+        }
         # S8. Both are needed to delegate; without either no route is applied.
         self._peer_gate = peer_gate
         self._policy = policy
@@ -388,10 +400,16 @@ class RouteTurn:
             else None
         )
         verdict = decide_fast_path(
-            assessment, self._thresholds, has_history=continued, routed=routed
+            assessment,
+            self._thresholds,
+            has_history=continued,
+            routed=routed,
+            ceilings=self._ceilings,
         )
         if self._route_covers(verdict, decision):
             return FastPathVerdict(DEFER_ROUTE_COVERS, verdict.intents), ()
+        if self._route_sure(verdict, decision):
+            return FastPathVerdict(DEFER_ROUTE_SURE, verdict.intents), ()
         if not verdict.composite:
             return verdict, ()
         if not policy.intents or self._owners is None:
@@ -441,6 +459,25 @@ class RouteTurn:
             and owner is not None
             and owner == decision.profile_id
         )
+
+    def _route_sure(self, verdict: FastPathVerdict, decision: RouteDecision) -> bool:
+        """P15. Whether a complex message keeps the router's route: the route choice is a sure (at
+        or above `route_covers`) specialist route and the message asks nothing another profile
+        owns (no detected intent, or only one whose plan that specialist owns). An action or a
+        follow-up is never complex here: their rules come first."""
+        if (
+            verdict.code != PASS_COMPLEX
+            or decision.kind is not RouteKind.ROUTE
+            or not decision.profile_id
+            or decision.confidence is None
+            or decision.confidence < self._thresholds.route_covers
+            or len(verdict.intents) > 1
+        ):
+            return False
+        if not verdict.intents:
+            return True
+        owner = None if self._owners is None else self._owners.get(verdict.intents[0])
+        return owner == decision.profile_id
 
     async def _follow_up(self, turn_id: TurnId, request: TurnRequest) -> str | None:
         """`follow_up` when the session already holds another turn, an error reason when that

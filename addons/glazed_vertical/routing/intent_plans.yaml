@@ -53,6 +53,9 @@ intents:
     profile: glazed_auditor
     steps:
       - tool: get_integrity_issues
+    # The one check answers "is anything wrong with the data?" however it is phrased; the live
+    # "¿Hay problemas de integridad en los datos?" scored complexity 0.70 (P15).
+    max_complexity: 0.8
   transfer_options:
     profile: glazed_liaison
     steps:

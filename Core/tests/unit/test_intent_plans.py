@@ -140,12 +140,24 @@ def test_a_plan_names_its_profile_steps_arguments_and_reply() -> None:
          "more than one"),
         ("  x: {steps: [{tool: t}]}", "profile"),
         ("  x: {profile: p, steps: [{tool: 'not a tool'}]}", "tool"),
+        ("  x: {profile: p, steps: [{tool: t}], max_complexity: 1.5}", "number between 0 and 1"),
+        ("  x: {profile: p, steps: [{tool: t}], max_complexity: yes}", "number between 0 and 1"),
+        ("  x: {profile: p, steps: [{tool: t}], max_complexity: '0.8'}", "number between 0 and 1"),
     ],
 )
 def test_a_plan_that_cannot_work_is_refused_naming_the_intent(body: str, match: str) -> None:
     with pytest.raises(IntentPlanError, match=match) as raised:
         _plans("intents:\n" + body + "\n")
     assert "'x'" in str(raised.value)
+
+
+def test_a_plan_may_raise_its_own_complexity_ceiling() -> None:
+    plans = _plans(
+        "intents:\n  x: {profile: p, steps: [{tool: t}], max_complexity: 0.8}\n"
+        "  y: {profile: p, steps: [{tool: t}], max_complexity: 1}\n"
+    )
+    assert plans["x"].max_complexity == 0.8 and plans["y"].max_complexity == 1.0
+    assert _plans()["orders"].max_complexity is None, "no ceiling unless the plan names one"
 
 
 def test_a_plans_document_is_one_intents_mapping() -> None:

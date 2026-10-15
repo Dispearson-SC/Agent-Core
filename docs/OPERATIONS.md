@@ -299,7 +299,14 @@ intent is detected and the route choice picked that intent with a confidence at 
 the coverage questions 0.60-0.87 because their unplanned part takes the rest). With `on`, a pass
 other than an action, a follow-up or a complex message, whose route choice is that sure of the
 specialist owning the one detected intent's plan, is `defer:route_covers`: the router's own route
-runs instead of the entry profile. A missing request count is unknown: no `pass:uncovered`. A router answer without the action or
+runs instead of the entry profile. P15 does the same for a complex message: with `on`, a
+`pass:complex` whose route choice is a specialist route at or above that same threshold, and that
+detected no intent or only one whose plan that specialist owns, is `defer:route_sure` and the
+specialist answers directly (the entry profile would only have asked that specialist, one model call
+and one peer hop later: 28-32 s against 11-19 s in the P14 battery). An intent plan may also declare
+its own complexity ceiling, `max_complexity` (a number between 0 and 1), for a plan that answers its
+question however complex the message sounds: when every detected intent has one, the lowest is the
+complexity threshold, never below `AGENT_CORE_FAST_PATH_COMPLEXITY_THRESHOLD`. A missing request count is unknown: no `pass:uncovered`. A router answer without the action or
 complexity value is `defer:unassessed`. A composite needs the entry profile's `routing.intents`
 (else `defer:intent_not_supported`) and, for EVERY detected intent, a declared plan
 (`defer:<intent>:intent_unknown`) whose owner is a listed, startable target

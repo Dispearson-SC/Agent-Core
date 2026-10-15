@@ -23,6 +23,7 @@ no tool, no model and no addon.
 
 from __future__ import annotations
 
+import math
 import re
 import string
 from collections.abc import Mapping
@@ -83,7 +84,7 @@ PLAN_NOT_WIRED: Final[str] = "not_wired"
 
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _PROFILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-_PLAN_KEYS = frozenset({"profile", "steps", "reply", "template"})
+_PLAN_KEYS = frozenset({"profile", "steps", "reply", "template", "max_complexity"})
 _STEP_KEYS = frozenset({"id", "tool", "arguments"})
 _SOURCE_KEYS = frozenset({"argument", "context", "constant", "default"})
 
@@ -135,6 +136,10 @@ class IntentPlan:
     steps: tuple[PlanStep, ...]
     reply: ReplyMode = ReplyMode.COMPOSE
     template: str | None = None
+    # P15. The fast path's complexity score below which a message of this intent still runs this
+    # plan, when the plan answers its question however complex it sounds. It only ever raises the
+    # fast path's own threshold (`domain/fast_path.py`); None keeps that threshold.
+    max_complexity: float | None = None
 
     @property
     def tools(self) -> tuple[str, ...]:
@@ -302,13 +307,27 @@ def _plan(intent: str, raw: object, source: str) -> IntentPlan:
             raise _refuse(where, f"template names unknown steps {sorted(unknown)}")
     elif template is not None:
         raise _refuse(where, "`template` is only for `reply: template`")
+    ceiling = raw.get("max_complexity")
+    if ceiling is not None and (
+        isinstance(ceiling, bool)
+        or not isinstance(ceiling, int | float)
+        or not math.isfinite(ceiling)
+        or not 0.0 <= ceiling <= 1.0
+    ):
+        raise _refuse(where, "`max_complexity` must be a number between 0 and 1")
     return IntentPlan(
-        intent=intent, profile_id=profile, steps=steps, reply=reply, template=template
+        intent=intent,
+        profile_id=profile,
+        steps=steps,
+        reply=reply,
+        template=template,
+        max_complexity=None if ceiling is None else float(ceiling),
     )
 
 
 def parse_intent_plans(document: object, *, source: str) -> dict[str, IntentPlan]:
-    """The plans of one document `{intents: {<intent>: {profile, steps, reply, template}}}`."""
+    """The plans of one document
+    `{intents: {<intent>: {profile, steps, reply, template, max_complexity}}}`."""
     if not isinstance(document, Mapping) or set(document) != {"intents"}:
         raise IntentPlanError(f"{source}: a plans file is a mapping with one key, `intents`")
     raw = document["intents"]

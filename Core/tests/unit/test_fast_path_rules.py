@@ -353,3 +353,56 @@ def test_the_p14_thresholds_and_request_levels_are_checked() -> None:
     assert counted.more_requests_than(1) == pytest.approx(0.87)
     assert counted.more_requests_than(2) == 0.0
     assert Assessment.of({}, requests=2).more_requests_than(1) is None
+
+
+# --- P15: a plan's complexity ceiling ------------------------------------------------------------
+
+
+def test_a_ceiling_on_the_detected_intent_raises_the_complexity_threshold() -> None:
+    verdict = decide_fast_path(
+        _assess({"data_integrity": 0.9}, complexity=0.7),
+        T,
+        has_history=False,
+        ceilings={"data_integrity": 0.8},
+    )
+    assert verdict.code == COMPOSITE and verdict.intents == ("data_integrity",)
+
+
+def test_a_message_at_or_above_the_ceiling_still_passes_complex() -> None:
+    verdict = decide_fast_path(
+        _assess({"data_integrity": 0.9}, complexity=0.8),
+        T,
+        has_history=False,
+        ceilings={"data_integrity": 0.8},
+    )
+    assert verdict.code == PASS_COMPLEX
+
+
+def test_every_detected_intent_needs_a_ceiling_and_the_lowest_one_counts() -> None:
+    without = decide_fast_path(
+        _assess({"data_integrity": 0.9, "staffing": 0.9}, complexity=0.7),
+        T,
+        has_history=False,
+        ceilings={"data_integrity": 0.8},
+    )
+    lowest = decide_fast_path(
+        _assess({"data_integrity": 0.9, "staffing": 0.9}, complexity=0.7),
+        T,
+        has_history=False,
+        ceilings={"data_integrity": 0.9, "staffing": 0.65},
+    )
+    assert without.code == PASS_COMPLEX and lowest.code == PASS_COMPLEX
+
+
+def test_a_ceiling_never_lowers_the_threshold_and_needs_a_detected_intent() -> None:
+    lower = decide_fast_path(
+        _assess({"data_integrity": 0.9}, complexity=0.5),
+        T,
+        has_history=False,
+        ceilings={"data_integrity": 0.3},
+    )
+    nobody = decide_fast_path(
+        _assess({}, complexity=0.7), T, has_history=False, ceilings={"data_integrity": 0.8}
+    )
+    assert lower.code == COMPOSITE
+    assert nobody.code == PASS_COMPLEX

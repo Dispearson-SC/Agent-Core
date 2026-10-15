@@ -258,11 +258,14 @@ def decide_fast_path(
     *,
     has_history: bool,
     routed: tuple[str, float] | None = None,
+    ceilings: Mapping[str, float] | None = None,
 ) -> FastPathVerdict:
     """The verdict of the rules in the module docstring, in their order. A missing action or
     complexity answer is not a "no": the router said nothing, so nothing is assumed safe and the
     existing logic runs (`defer:unassessed`). `routed` is the route choice's intent and confidence
-    when it chose an intent (None otherwise)."""
+    when it chose an intent (None otherwise). `ceilings` holds each intent's own complexity ceiling
+    (P15, an intent plan's `max_complexity`): when every detected intent has one, the lowest of them
+    is the complexity threshold, never below `thresholds.complexity`."""
     found = {name for name, score in assessment.intents if score >= thresholds.intent}
     if routed is not None and routed[0] and routed[1] >= thresholds.route_intent:
         found.add(routed[0])
@@ -275,7 +278,7 @@ def decide_fast_path(
         assessment.follow_up is None or assessment.follow_up >= thresholds.follow_up
     ):
         return FastPathVerdict(PASS_FOLLOW_UP, detected)
-    if assessment.complexity >= thresholds.complexity:
+    if assessment.complexity >= _complexity_limit(detected, thresholds, ceilings or {}):
         return FastPathVerdict(PASS_COMPLEX, detected)
     if not detected:
         return FastPathVerdict(DEFER_NO_INTENT, detected)
@@ -290,6 +293,16 @@ def decide_fast_path(
     if not covered and _uncovered(assessment, len(detected), thresholds):
         return FastPathVerdict(PASS_UNCOVERED, detected)
     return FastPathVerdict(COMPOSITE, detected)
+
+
+def _complexity_limit(
+    detected: tuple[str, ...], thresholds: FastPathThresholds, ceilings: Mapping[str, float]
+) -> float:
+    """Rule 3 (P15): a plan that answers its intent however complex the message sounds raises the
+    threshold for a message of that intent only; one detected intent without a ceiling keeps it."""
+    if not detected or any(intent not in ceilings for intent in detected):
+        return thresholds.complexity
+    return max(thresholds.complexity, min(ceilings[intent] for intent in detected))
 
 
 def _uncovered(assessment: Assessment, detected: int, thresholds: FastPathThresholds) -> bool:

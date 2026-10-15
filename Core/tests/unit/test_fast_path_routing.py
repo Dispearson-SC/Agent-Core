@@ -139,12 +139,13 @@ def _use_case(
     async def recent_history(session: SessionRef, turn_id: TurnId) -> tuple[str, ...]:
         return tuple(history or ())
 
+    plans = seats.pop("plans", PLANS)
     kwargs: dict[str, Any] = {**delegation(), **seats}
     use_case = RouteTurn(
         routers=router,
         audit=routes,
         profiles=_profiles(),
-        plans=PLANS,
+        plans=plans,
         has_history=has_history,
         recent_history=recent_history,
         fast_path=mode,
@@ -508,19 +509,11 @@ def test_on_an_unsure_covering_route_still_passes_uncovered() -> None:
     assert routes.records[0].fast_path == "pass:uncovered"
 
 
-def test_on_action_follow_up_and_complex_passes_never_keep_the_route() -> None:
-    cases = {
-        "pass:action_request": Assessment.of(
-            {"day_summary": 0.93}, action=0.9, complexity=0.1, requests=1
-        ),
-        "pass:complex": Assessment.of(
-            {"day_summary": 0.93}, action=0.02, complexity=0.9, requests=1
-        ),
-    }
-    for code, assessment in cases.items():
-        use_case, _, routes = _use_case(_sure_route(assessment=assessment), FastPathMode.ON)
-        assert _run(use_case).request == _request(), code
-        assert routes.records[0].fast_path == code
+def test_on_action_and_follow_up_passes_never_keep_the_route() -> None:
+    action = Assessment.of({"day_summary": 0.93}, action=0.9, complexity=0.1, requests=1)
+    use_case, _, routes = _use_case(_sure_route(assessment=action), FastPathMode.ON)
+    assert _run(use_case).request == _request()
+    assert routes.records[0].fast_path == "pass:action_request"
     follow = Assessment.of(
         {"day_summary": 0.93}, action=0.02, follow_up=0.9, complexity=0.1, requests=1
     )
@@ -529,6 +522,105 @@ def test_on_action_follow_up_and_complex_passes_never_keep_the_route() -> None:
     )
     assert _run(use_case).request == _request()
     assert routes.records[0].fast_path == "pass:depends_on_history"
+
+
+# --- P15: a complex message with a sure specialist route goes straight to that specialist ---------
+
+# The live audit row of "what happened the last time sales dropped like this?": no intent above its
+# threshold, complexity 0.66, route choice 0.99 of the specialist that answers about the past.
+COMPLEX_FOR_ONE = Assessment.of(
+    {"day_summary": 0.17, "order_plan": 0.33}, action=0.05, complexity=0.66, requests=1
+)
+
+
+def test_on_a_complex_message_with_a_sure_specialist_route_keeps_the_route() -> None:
+    use_case, _, routes = _use_case(
+        _sure_route(profile=STOCK, confidence=0.99, assessment=COMPLEX_FOR_ONE), FastPathMode.ON
+    )
+
+    routed = _run(use_case)
+
+    assert routed.request.profile_id == STOCK, "the specialist, not the entry profile"
+    assert routed.composite is None and routed.intent is None
+    record = routes.records[0]
+    assert record.fast_path == "defer:route_sure" and record.outcome == "routed"
+
+
+def test_shadow_and_off_run_the_same_turn_for_a_sure_complex_route() -> None:
+    decision = _sure_route(profile=STOCK, confidence=0.99, assessment=COMPLEX_FOR_ONE)
+    on, _, _ = _use_case(decision, FastPathMode.ON)
+    shadow, _, shadow_routes = _use_case(decision, FastPathMode.SHADOW)
+    off, _, _ = _use_case(decision, FastPathMode.OFF)
+
+    assert _run(shadow).request == _run(off).request == _run(on).request
+    assert shadow_routes.records[0].fast_path == "defer:route_sure"
+
+
+def test_on_a_complex_message_with_an_unsure_route_still_runs_the_entry_profile() -> None:
+    use_case, _, routes = _use_case(
+        _sure_route(profile=STOCK, confidence=0.9, assessment=COMPLEX_FOR_ONE), FastPathMode.ON
+    )
+
+    assert _run(use_case).request == _request()
+    assert routes.records[0].fast_path == "pass:complex"
+
+
+def test_on_a_complex_message_with_an_intent_another_profile_owns_runs_the_entry_profile() -> None:
+    # SALES owns day_summary; STOCK is sure, but the message also asks for a summary of the day.
+    both = Assessment.of({"day_summary": 0.93}, action=0.02, complexity=0.8, requests=2)
+    use_case, _, routes = _use_case(
+        _sure_route(profile=STOCK, confidence=1.0, assessment=both), FastPathMode.ON
+    )
+
+    assert _run(use_case).request == _request()
+    assert routes.records[0].fast_path == "pass:complex"
+
+
+def test_on_a_complex_message_whose_one_intent_the_sure_route_owns_keeps_the_route() -> None:
+    owned = Assessment.of({"order_plan": 0.93}, action=0.02, complexity=0.8, requests=1)
+    use_case, _, routes = _use_case(
+        _sure_route(profile=STOCK, confidence=0.97, assessment=owned), FastPathMode.ON
+    )
+
+    assert _run(use_case).request.profile_id == STOCK
+    assert routes.records[0].fast_path == "defer:route_sure"
+
+
+def test_on_a_complex_message_without_a_route_choice_still_runs_the_entry_profile() -> None:
+    use_case, _, routes = _use_case(
+        _decision(COMPLEX_FOR_ONE, RouteKind.PASS), FastPathMode.ON
+    )
+
+    assert _run(use_case).request == _request()
+    assert routes.records[0].fast_path == "pass:complex"
+
+
+# --- P15: an intent plan may raise its own complexity ceiling ------------------------------------
+
+
+def test_on_a_plan_ceiling_turns_a_complex_sounding_question_into_its_composite() -> None:
+    # The live audit row of "are there data integrity problems?": intent 0.99, complexity 0.70.
+    plans = {
+        **PLANS,
+        "order_plan": IntentPlan(
+            "order_plan", STOCK, (PlanStep("plan", "get_order_plan"),), max_complexity=0.8
+        ),
+    }
+    sounding = Assessment.of({"order_plan": 0.95}, action=0.02, complexity=0.7, requests=1)
+    use_case, _, routes = _use_case(_decision(sounding), FastPathMode.ON, plans=plans)
+
+    routed = _run(use_case)
+
+    assert routed.composite is not None and routed.composite.intents == ("order_plan",)
+    assert routes.records[0].fast_path == "composite"
+
+
+def test_on_without_a_plan_ceiling_the_same_question_still_passes_complex() -> None:
+    sounding = Assessment.of({"order_plan": 0.95}, action=0.02, complexity=0.7, requests=1)
+    use_case, _, routes = _use_case(_decision(sounding), FastPathMode.ON)
+
+    assert _run(use_case).request == _request()
+    assert routes.records[0].fast_path == "pass:complex"
 
 
 def test_on_a_sure_intent_route_choice_of_the_one_topic_is_its_composite() -> None:
